@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="mousomi_camera_cache" path="mousomi_camera/" />
+    <cache-path name="mousomi_media_tmp" path="mousomi_media_tmp/" />
+    <files-path name="mousomi_generated_images" path="mousomi_generated_images/" />
+</paths>
