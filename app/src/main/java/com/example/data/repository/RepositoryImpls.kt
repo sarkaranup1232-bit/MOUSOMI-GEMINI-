@@ -4,6 +4,8 @@ import com.example.data.local.db.ChatDao
 import com.example.data.local.db.ConversationEntity
 import com.example.data.local.db.MessageEntity
 import com.example.data.local.prefs.SettingsDataStore
+import com.example.data.remote.firestore.FirestoreCloudSyncRepository
+import com.example.domain.auth.OptionalAuthGateway
 import com.example.domain.model.AppSettings
 import com.example.domain.model.DomainConversation
 import com.example.domain.model.DomainMessage
@@ -16,13 +18,17 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 
 @Singleton
 class ChatRepositoryImpl @Inject constructor(
   private val chatDao: ChatDao,
   private val json: Json,
+  private val firestoreSync: FirestoreCloudSyncRepository? = null,
 ) : ChatRepository {
+
+  constructor(chatDao: ChatDao, json: Json) : this(chatDao, json, null)
 
   override fun observeConversations(): Flow<List<DomainConversation>> =
     chatDao.observeConversations().map { list ->
@@ -64,6 +70,11 @@ class ChatRepositoryImpl @Inject constructor(
         updatedAtMs = now,
       )
     chatDao.upsertConversation(entity)
+    firestoreSync?.let { sync ->
+      sync.syncScope.launch {
+        sync.upsertConversation(conversationId, initialTitle, now)
+      }
+    }
     return DomainConversation(
       id = entity.id,
       title = entity.title,
@@ -73,25 +84,38 @@ class ChatRepositoryImpl @Inject constructor(
   }
 
   override suspend fun updateConversationTitle(conversationId: String, title: String) {
+    val now = System.currentTimeMillis()
     chatDao.updateConversationTitle(
       id = conversationId,
       title = title,
-      updatedAtMs = System.currentTimeMillis(),
+      updatedAtMs = now,
     )
+    firestoreSync?.let { sync ->
+      sync.syncScope.launch {
+        sync.upsertConversation(conversationId, title, now)
+      }
+    }
   }
 
   override suspend fun deleteConversation(conversationId: String) {
     chatDao.deleteConversation(conversationId)
+    firestoreSync?.let { sync ->
+      sync.syncScope.launch {
+        sync.deleteConversation(conversationId)
+      }
+    }
   }
 
   override suspend fun upsertMessage(message: DomainMessage) {
     val existing = chatDao.getConversationById(message.conversationId)
     val now = System.currentTimeMillis()
     if (existing == null) {
+      val initialTitle =
+        if (message.isUser && message.text.isNotBlank()) message.text.take(60) else "New Conversation"
       chatDao.upsertConversation(
         ConversationEntity(
           id = message.conversationId,
-          title = "New Conversation",
+          title = initialTitle,
           createdAtMs = now,
           updatedAtMs = now,
         )
@@ -125,6 +149,11 @@ class ChatRepositoryImpl @Inject constructor(
         attachedMediaJson = mediaJson,
       )
     )
+    firestoreSync?.let { sync ->
+      sync.syncScope.launch {
+        sync.upsertMessage(message)
+      }
+    }
   }
 
   override suspend fun deleteMessage(messageId: String) {
@@ -133,6 +162,49 @@ class ChatRepositoryImpl @Inject constructor(
 
   override suspend fun deleteMessagesFrom(conversationId: String, fromTimestampMs: Long) {
     chatDao.deleteMessagesFrom(conversationId, fromTimestampMs)
+  }
+
+  suspend fun mergeRemoteConversations(remote: List<DomainConversation>) {
+    remote.forEach { conv ->
+      val local = chatDao.getConversationById(conv.id)
+      if (local == null || conv.updatedAtMs > local.updatedAtMs) {
+        chatDao.upsertConversation(
+          ConversationEntity(
+            id = conv.id,
+            title = conv.title,
+            createdAtMs = conv.createdAtMs,
+            updatedAtMs = conv.updatedAtMs,
+          )
+        )
+      }
+    }
+  }
+
+  suspend fun mergeRemoteMessages(remote: List<DomainMessage>) {
+    remote.forEach { message ->
+      val urisJson = json.encodeToString(message.imageUris)
+      val blocksJson = runCatching { json.encodeToString(message.blocks) }.getOrDefault("[]")
+      val mediaJson = runCatching { json.encodeToString(message.attachedMediaSummaries) }.getOrDefault("[]")
+      chatDao.upsertMessage(
+        MessageEntity(
+          id = message.id,
+          conversationId = message.conversationId,
+          isUser = message.isUser,
+          text = message.text,
+          timestampMs = message.timestampMs,
+          imageUrisJson = urisJson,
+          isSampleArtwork = message.isSampleArtwork,
+          modelUsed = message.modelUsed,
+          categoryLabel = message.categoryLabel,
+          promptTokens = message.tokenUsage?.promptTokens,
+          completionTokens = message.tokenUsage?.completionTokens,
+          totalTokens = message.tokenUsage?.totalTokens,
+          isError = message.isError,
+          blocksJson = blocksJson,
+          attachedMediaJson = mediaJson,
+        )
+      )
+    }
   }
 
   private fun toDomainMessage(entity: MessageEntity): DomainMessage {
@@ -176,12 +248,27 @@ class ChatRepositoryImpl @Inject constructor(
 @Singleton
 class SettingsRepositoryImpl @Inject constructor(
   private val dataStore: SettingsDataStore,
+  private val firestoreSync: FirestoreCloudSyncRepository? = null,
+  private val authGateway: OptionalAuthGateway? = null,
 ) : SettingsRepository {
+  constructor(dataStore: SettingsDataStore) : this(dataStore, null, null)
+
   override fun observeSettings(): Flow<AppSettings> = dataStore.settingsFlow
 
   override suspend fun getSettingsSnapshot(): AppSettings = dataStore.getSnapshot()
 
   override suspend fun saveSettings(settings: AppSettings) {
     dataStore.save(settings)
+    val session = authGateway?.getCurrentSession()
+    if (session?.isSignedIn == true && firestoreSync != null) {
+      firestoreSync.syncScope.launch {
+        firestoreSync.syncUserProfileAndPreferences(
+          displayName = session.displayName,
+          email = session.email,
+          photoUrl = session.photoUrl,
+          settings = settings,
+        )
+      }
+    }
   }
 }

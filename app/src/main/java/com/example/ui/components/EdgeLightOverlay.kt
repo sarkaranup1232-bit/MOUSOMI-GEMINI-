@@ -120,25 +120,27 @@ fun EdgeLightPerimeterOverlay(
   val shaderMatrix = remember { Matrix() }
   val rectF = remember { RectF() }
 
-  Canvas(modifier = modifier.fillMaxSize().clipToBounds().testTag("edge_light_perimeter_canvas")) {
+  Canvas(modifier = modifier.fillMaxSize().testTag("edge_light_perimeter_canvas")) {
     val w = size.width
     val h = size.height
-    if (w <= 2f || h <= 2f) return@Canvas
+    if (w <= 4f || h <= 4f) return@Canvas
 
     val cx = w / 2f
     val cy = h / 2f
-    val baseStrokePx = (params.thicknessDp * density).coerceIn(3f, 28f)
-    val cornerPx = (params.cornerRadiusDp * density).coerceIn(8f, minOf(w, h) * 0.25f)
+    val baseStrokePx = (params.thicknessDp * density).coerceIn(3f, 24f)
+    val cornerPx = (params.cornerRadiusDp * density).coerceIn(10f, minOf(w, h) * 0.28f)
     val effectiveAlpha =
-      (params.brightness * pulse * (1f + params.voiceReactiveBoost * 0.22f)).coerceIn(0.12f, 1.0f)
+      (params.brightness * pulse * (1f + params.voiceReactiveBoost * 0.22f)).coerceIn(0.14f, 1.0f)
 
     val shader: Shader =
       if (params.breathingOnly) {
         LinearGradient(0f, 0f, w, h, intColors, null, Shader.TileMode.CLAMP)
       } else {
-        SweepGradient(cx, cy, intColors, null).apply {
+        SweepGradient(0f, 0f, intColors, null).apply {
           shaderMatrix.reset()
-          shaderMatrix.setRotate(phase, cx, cy)
+          shaderMatrix.setRotate(phase)
+          shaderMatrix.postScale(w / 2f, h / 2f)
+          shaderMatrix.postTranslate(cx, cy)
           setLocalMatrix(shaderMatrix)
         }
       }
@@ -160,37 +162,44 @@ fun EdgeLightPerimeterOverlay(
           if (blurRadiusPx > 0.5f) BlurMaskFilter(blurRadiusPx, BlurMaskFilter.Blur.NORMAL)
           else null
 
-        rectF.set(insetPx, insetPx, (w - insetPx).coerceAtLeast(insetPx + 2f), (h - insetPx).coerceAtLeast(insetPx + 2f))
-        val cr = (cornerPx - insetPx).coerceAtLeast(0f)
+        val safeInset = insetPx.coerceIn(2f, minOf(w, h) * 0.2f)
+        rectF.set(
+          safeInset,
+          safeInset,
+          (w - safeInset).coerceAtLeast(safeInset + 2f),
+          (h - safeInset).coerceAtLeast(safeInset + 2f),
+        )
+        val maxCorner = minOf(rectF.width(), rectF.height()) * 0.5f
+        val cr = (cornerPx - safeInset).coerceIn(0f, maxCorner)
         nc.drawRoundRect(rectF, cr, cr, paint)
       }
 
-      // Layer 1: Wide, out-of-focus inward ambient light bleed along all 4 sides & corners
+      // Layer 1: Wide diffused inward bloom with symmetric inset so blur halo never clips on any side or corner
       if (params.glowLayerCount >= 3) {
         drawBlurredRim(
-          strokeWidthPx = baseStrokePx * 4.4f,
-          blurRadiusPx = baseStrokePx * 3.8f,
-          alphaScale = 0.26f,
-          insetPx = baseStrokePx * 0.35f,
+          strokeWidthPx = baseStrokePx * 4.0f,
+          blurRadiusPx = baseStrokePx * 3.0f,
+          alphaScale = 0.28f,
+          insetPx = (baseStrokePx * 1.45f).coerceAtLeast(8f),
         )
       }
 
-      // Layer 2: Soft diffused mid-glow wrapping the display corners smoothly
+      // Layer 2: Balanced mid-glow tracking all 4 rounded corners smoothly
       if (params.glowLayerCount >= 2) {
         drawBlurredRim(
-          strokeWidthPx = baseStrokePx * 2.4f,
-          blurRadiusPx = baseStrokePx * 1.9f,
-          alphaScale = 0.48f,
-          insetPx = baseStrokePx * 0.15f,
+          strokeWidthPx = baseStrokePx * 2.2f,
+          blurRadiusPx = baseStrokePx * 1.5f,
+          alphaScale = 0.52f,
+          insetPx = (baseStrokePx * 0.9f).coerceAtLeast(5f),
         )
       }
 
-      // Layer 3: Softly feathered luminous edge core anchored flush at screen perimeter (no harsh sharp wireframe)
+      // Layer 3: Continuous luminous perimeter core anchored cleanly inside container bounds
       drawBlurredRim(
         strokeWidthPx = baseStrokePx * 1.05f,
-        blurRadiusPx = baseStrokePx * 0.72f,
-        alphaScale = 0.85f,
-        insetPx = 0.5f,
+        blurRadiusPx = baseStrokePx * 0.55f,
+        alphaScale = 0.92f,
+        insetPx = (baseStrokePx * 0.55f).coerceAtLeast(3f),
       )
     }
   }

@@ -365,8 +365,10 @@ class Part5UpgradeTest {
 
     composeRule.onNodeWithTag("neon_chat_composer").assertIsDisplayed()
     composeRule.onNodeWithText("Ask Mousomi...").assertIsDisplayed()
-    composeRule.onNodeWithTag("context_chip_generate_image").assertIsDisplayed()
-    composeRule.onNodeWithTag("context_chip_deep_research").assertIsDisplayed()
+    composeRule.onNodeWithTag("mode_chat_button").assertIsDisplayed()
+    composeRule.onNodeWithTag("mode_task_button").assertIsDisplayed()
+    composeRule.onNodeWithTag("context_chip_generate_image").assertDoesNotExist()
+    composeRule.onNodeWithTag("context_chip_deep_research").assertDoesNotExist()
   }
 
   @Test
@@ -406,8 +408,8 @@ class Part5UpgradeTest {
     }
 
     composeRule.onNodeWithTag("active_image_edit_badge").assertIsDisplayed()
-    composeRule.onNodeWithTag("context_chip_edit_image").assertIsDisplayed()
-    composeRule.onNodeWithTag("context_chip_draw_region").performScrollTo().assertIsDisplayed()
+    composeRule.onNodeWithTag("context_chip_edit_image").assertDoesNotExist()
+    composeRule.onNodeWithTag("context_chip_draw_region").assertDoesNotExist()
   }
 
   @Test
@@ -591,7 +593,7 @@ class Part5UpgradeTest {
     composeRule.onNodeWithTag("upgrade_button").assertDoesNotExist()
     composeRule.onNodeWithTag("welcome_quick_actions_row").assertDoesNotExist()
     composeRule.onNodeWithTag("neon_chat_composer").assertIsDisplayed()
-    composeRule.onNodeWithTag("context_chip_generate_image").assertIsDisplayed()
+    composeRule.onNodeWithTag("context_chip_generate_image").assertDoesNotExist()
   }
 
   private fun createMinimalViewModel(context: Context): MousomiViewModel {

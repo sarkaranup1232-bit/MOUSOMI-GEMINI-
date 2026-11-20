@@ -42,6 +42,9 @@ class RealtimeIntelligenceRouter @Inject constructor(
     }
 
     if (hasImages || attachments.any { it.kind == MediaAttachmentKind.PHOTO }) {
+      if (imageToVideoKeywords.any { it in q }) {
+        return IntelligenceIntent.IMAGE_TO_VIDEO
+      }
       if (explicitImageEditRequested || imageEditKeywords.any { it in q }) {
         return IntelligenceIntent.IMAGE_EDITING
       }
@@ -64,6 +67,14 @@ class RealtimeIntelligenceRouter @Inject constructor(
       return IntelligenceIntent.IMAGE_EDITING
     }
 
+    if (textToVideoPhrases.any { it in q }) {
+      return IntelligenceIntent.TEXT_TO_VIDEO
+    }
+
+    if (isMusicGenerationRequest(q)) {
+      return IntelligenceIntent.MUSIC_GENERATION
+    }
+
     if (imageGenerationPhrases.any { it in q }) {
       return IntelligenceIntent.IMAGE_GENERATION
     }
@@ -81,6 +92,10 @@ class RealtimeIntelligenceRouter @Inject constructor(
     }
     if (chartKeywords.any { it in q } && ("chart" in q || "plot" in q || "graph" in q)) {
       return IntelligenceIntent.CHART_VISUALIZATION
+    }
+
+    if (mapsKeywords.any { it in q }) {
+      return IntelligenceIntent.MAPS_SEARCH
     }
 
     if (liveSearchKeywords.any { it in q }) {
@@ -162,6 +177,13 @@ class RealtimeIntelligenceRouter @Inject constructor(
     return deviceKeywords.any { it in q }
   }
 
+  private fun isMusicGenerationRequest(q: String): Boolean {
+    if (musicGenerationPhrases.any { it in q }) return true
+    val composeVerb = listOf("compose ", "generate ", "create ", "make ", "produce ")
+    val audioNoun = listOf("music", "song", "beat", "melody", "track", "instrumental", "soundtrack", "jingle")
+    return composeVerb.any { it in q } && audioNoun.any { it in q }
+  }
+
   private fun isCasualGreeting(q: String): Boolean {
     if (q.length > 48) return false
     val cleaned = q.replace(Regex("[^a-zA-Z0-9\\s\\u0980-\\u09FF\\u0900-\\u097F]"), "").trim()
@@ -216,6 +238,34 @@ class RealtimeIntelligenceRouter @Inject constructor(
       listOf(
         "analyze my excel", "analyze this csv", "analyze data", "data analysis",
         "statistics", "mean", "median", "correlation", "trend", "duplicate", "missing value",
+      )
+
+    private val imageToVideoKeywords =
+      listOf(
+        "animate this", "animate image", "animate photo", "animate the photo",
+        "turn this image into a video", "turn image into video", "create a video from this",
+        "make a video from this", "video from this image", "image to video", "image-to-video",
+      )
+
+    private val textToVideoPhrases =
+      listOf(
+        "generate video", "generate a video", "create video", "create a video",
+        "make a video", "text to video", "text-to-video", "veo video",
+      )
+
+    private val musicGenerationPhrases =
+      listOf(
+        "generate music", "generate a song", "create music", "create a song",
+        "compose music", "compose a song", "make music", "generate a beat",
+        "create a beat", "compose a beat", "ai music", "lyria",
+      )
+
+    private val mapsKeywords =
+      listOf(
+        "nearby ", "near me", "directions to", "route to", "google maps",
+        "restaurants near", "restaurants in ", "hotels near", "hotels in ",
+        "cafes near", "hospital near", "places to visit in", "how far is",
+        "distance from ", "map of ",
       )
   }
 }

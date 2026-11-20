@@ -11,6 +11,7 @@ enum class ActivationHealthStatus(val label: String) {
 }
 
 enum class DetectedProviderKind(val label: String) {
+  FIREBASE_AI_LOGIC("Firebase AI Logic (App Check)"),
   GEMINI("Google Gemini"),
   GROQ("Groq Cloud"),
   PROXY("HTTPS Proxy"),

@@ -24,7 +24,7 @@ import com.example.data.local.db.Part4OperationsDao
 import com.example.data.local.db.Part5Dao
 import com.example.data.repository.ChatRepositoryImpl
 import com.example.data.repository.SettingsRepositoryImpl
-import com.example.domain.auth.DefaultNoOpAuthGateway
+import com.example.data.auth.FirebaseAuthGateway
 import com.example.domain.auth.OptionalAuthGateway
 import com.example.domain.model.ProviderType
 import com.example.domain.orchestrator.AiOrchestrator
@@ -248,7 +248,7 @@ abstract class BindingsModule {
   @Binds
   @Singleton
   abstract fun bindOptionalAuthGateway(
-    impl: DefaultNoOpAuthGateway,
+    impl: FirebaseAuthGateway,
   ): OptionalAuthGateway
 
   @Binds

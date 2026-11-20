@@ -80,12 +80,20 @@ fun MainChatScreen(
   onRequestStartScreenShare: () -> Unit = {},
   onStopScreenShare: () -> Unit = {},
   onNavigateToAssistantHub: (Int) -> Unit = {},
+  onNavigateToLens: () -> Unit = {},
 ) {
   val context = LocalContext.current
   val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
   val coroutineScope = rememberCoroutineScope()
   val snackbarHostState = remember { SnackbarHostState() }
   var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+
+  LaunchedEffect(uiState.pendingNavigateToLens) {
+    if (uiState.pendingNavigateToLens) {
+      viewModel.onConsumeNavigateToLens()
+      onNavigateToLens()
+    }
+  }
 
   LaunchedEffect(uiState.statusToastMessage) {
     val msg = uiState.statusToastMessage
@@ -246,6 +254,10 @@ fun MainChatScreen(
           viewModel.onSetRequestedHubTab(0)
           onNavigateToAssistantHub(0)
         },
+        onOpenLens = {
+          coroutineScope.launch { drawerState.close() }
+          onNavigateToLens()
+        },
       )
     },
   ) {
@@ -275,6 +287,7 @@ fun MainChatScreen(
             isEmergencyActive = uiState.isAnyLiveSessionActive,
             onEmergencyStop = viewModel::onTriggerEmergencyStop,
             onOpenPermissions = onNavigateToPermissions,
+            onOpenLens = onNavigateToLens,
             modifier = Modifier.widthIn(max = 760.dp),
           )
 
@@ -335,6 +348,10 @@ fun MainChatScreen(
                   onRetryTask = viewModel::onRetryTask,
                   onCancelTask = viewModel::onCancelTask,
                   onOpenAssistantHub = { onNavigateToAssistantHub(0) },
+                  onSaveVideo = viewModel::onSaveGeneratedVideo,
+                  onShareVideo = { vid -> viewModel.onShareGeneratedVideo(context, vid) },
+                  onSaveMusic = viewModel::onSaveGeneratedMusic,
+                  onShareMusic = { mus -> viewModel.onShareGeneratedMusic(context, mus) },
                 )
               }
             }
@@ -422,6 +439,10 @@ fun MainChatScreen(
             viewModel.onToggleAttachmentSheet(false)
             onRequestCameraCapture()
           },
+          onOpenLens = {
+            viewModel.onToggleAttachmentSheet(false)
+            onNavigateToLens()
+          },
           onPickFromGallery = {
             viewModel.onToggleAttachmentSheet(false)
             photoPickerLauncher.launch(
@@ -481,14 +502,20 @@ fun MainChatScreen(
             viewModel.onToggleMoreToolsSheet(false)
             viewModel.analyzeLatestScreenFrameOrPrompt(onRequestStartScreenShare)
           },
+          onOpenLens = {
+            viewModel.onToggleMoreToolsSheet(false)
+            onNavigateToLens()
+          },
           onDismiss = { viewModel.onToggleMoreToolsSheet(false) },
         )
       }
 
       if (uiState.isProfileDialogOpen) {
         ProfileAccountDialog(
+          authSession = uiState.authSession,
           onOpenSettings = onNavigateToSettings,
           onOpenPermissions = onNavigateToPermissions,
+          onSignOut = viewModel::onSignOut,
           onDismiss = { viewModel.onToggleProfileDialog(false) },
         )
       }
@@ -505,21 +532,56 @@ fun MainChatScreen(
       }
 
       AnimatedVisibility(
-        visible = uiState.isGeminiLiveOpen,
+        visible = uiState.isGeminiLiveOpen && !uiState.isGeminiLiveMinimized,
         enter = fadeIn(),
         exit = fadeOut(),
       ) {
+        val latestAssistantText =
+          uiState.messages.lastOrNull { !it.isUser && it.text.isNotBlank() }?.text.orEmpty()
         GeminiLiveOverlay(
           voiceState = uiState.voiceState,
           voiceRmsNormalized = uiState.voiceRmsNormalized,
           isThinking = uiState.isGenerating,
           voiceGender = uiState.voicePreferences.voiceGender,
+          latestAssistantText = latestAssistantText,
           onSelectVoiceGender = viewModel::onUpdateVoiceGender,
           onStartListening = viewModel::onStartVoiceListening,
           onStopListening = viewModel::onStopVoiceListening,
+          onSendFollowUp = viewModel::onSendLiveFollowUp,
+          onOpenCamera = {
+            viewModel.onToggleGeminiLiveMinimized(true)
+            onRequestCameraCapture()
+          },
+          onRunDeepSearch = {
+            viewModel.onToggleGeminiLiveMinimized(true)
+            viewModel.onSelectContextualAction("deep_research")
+          },
+          onMinimize = { viewModel.onToggleGeminiLiveMinimized(true) },
           onEmergencyStop = viewModel::onTriggerEmergencyStop,
           onClose = { viewModel.onToggleGeminiLive(false) },
           audioMetrics = uiState.voiceAudioMetrics,
+        )
+      }
+
+      AnimatedVisibility(
+        visible = uiState.isGeminiLiveOpen && uiState.isGeminiLiveMinimized,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier =
+          Modifier
+            .align(Alignment.TopEnd)
+            .statusBarsPadding()
+            .padding(top = 60.dp, end = 14.dp),
+      ) {
+        MinimizedGeminiLivePill(
+          voiceState = uiState.voiceState,
+          voiceRmsNormalized = uiState.voiceRmsNormalized,
+          isThinking = uiState.isGenerating,
+          audioMetrics = uiState.voiceAudioMetrics,
+          onStartListening = viewModel::onStartVoiceListening,
+          onStopListening = viewModel::onStopVoiceListening,
+          onExpand = { viewModel.onToggleGeminiLiveMinimized(false) },
+          onClose = { viewModel.onToggleGeminiLive(false) },
         )
       }
 

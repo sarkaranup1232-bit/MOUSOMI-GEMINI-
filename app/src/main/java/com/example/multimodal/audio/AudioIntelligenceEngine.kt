@@ -1,5 +1,6 @@
 package com.example.multimodal.audio
 
+import com.example.ai.firebase.FirebaseAiLogicService
 import com.example.ai.provider.AiChatRequest
 import com.example.ai.provider.AiProvider
 import com.example.ai.provider.AiStreamEvent
@@ -49,6 +50,7 @@ class AudioIntelligenceEngine @Inject constructor(
   private val securityValidator: SecurityValidator,
   private val providers: Map<ProviderType, @JvmSuppressWildcards AiProvider>,
   private val json: Json,
+  private val firebaseAiLogicService: FirebaseAiLogicService? = null,
 ) {
 
   suspend fun analyzeAudio(
@@ -113,14 +115,58 @@ class AudioIntelligenceEngine @Inject constructor(
         }
       }
 
-      // Strategy 3: Gemini Multimodal Audio understanding
+      // Strategy 3: Gemini Multimodal Audio understanding (BYOK)
       if (settings.geminiApiKey.isNotBlank()) {
         return analyzeWithGeminiAudio(prepared, userPrompt, model, settings, onProgress)
       }
 
+      // Strategy 4: Firebase AI Logic Multimodal Audio understanding (no API key needed)
+      if (firebaseAiLogicService?.isAvailable() == true) {
+        if (prepared.tempFile.length() > 18L * 1024L * 1024L) {
+          return Result.failure(
+            IllegalStateException("Audio file exceeds the 18 MB inline limit for direct transcription. Trim the clip or configure Groq Whisper.")
+          )
+        }
+        onProgress("Processing audio via Firebase AI Logic (Gemini 3.8 Flash)…")
+        val prompt =
+          """
+          Listen carefully to the attached audio file (${prepared.metadata.displayName}).
+          User request: "$userPrompt"
+          Preferred response language: ${settings.voicePreferences.preferredLanguage.label}.
+          Return ONLY valid JSON:
+          {
+            "detectedLanguage": "...",
+            "summary": "...",
+            "transcript": "...",
+            "segments": [{"startTimeFormatted":"00:00","endTimeFormatted":"00:10","text":"..."}],
+            "keyPoints": ["..."],
+            "translatedText": null
+          }
+          """.trimIndent()
+        val rawText =
+          firebaseAiLogicService.analyzeAudioBytes(
+            bytes = prepared.tempFile.readBytes(),
+            mimeType = prepared.metadata.mimeType,
+            prompt = prompt,
+          ).getOrElse { return Result.failure(it) }
+        val parsed = parseAudioJson(rawText)
+        return Result.success(
+          AudioAnalysisResult(
+            metadata = prepared.metadata,
+            detectedLanguage = parsed?.detectedLanguage ?: "Detected by Gemini",
+            transcriptionEngine = "Firebase AI Logic (${FirebaseAiLogicService.DEFAULT_TEXT_MODEL})",
+            summary = parsed?.summary?.ifBlank { rawText.take(300) } ?: rawText,
+            fullTranscript = parsed?.transcript?.ifBlank { rawText } ?: rawText,
+            segments = parsed?.segments.orEmpty(),
+            keyPoints = parsed?.keyPoints.orEmpty(),
+            translatedText = parsed?.translatedText,
+          )
+        )
+      }
+
       return Result.failure(
         IllegalStateException(
-          "Audio transcription requires a Groq API key (Whisper), a Gemini API key (multimodal audio), or an HTTPS Backend Proxy configured in Settings."
+          "Audio transcription requires Firebase AI Logic, a Groq API key (Whisper), a Gemini API key, or an HTTPS Backend Proxy configured in Settings."
         )
       )
     } finally {

@@ -36,4 +36,17 @@ interface GeminiApiService {
     @Header("x-goog-api-key") apiKey: String,
     @Body request: GeminiGenerateRequest,
   ): Response<GeminiGenerateResponse>
+
+  @POST("v1beta/models/{model}:predictLongRunning")
+  suspend fun predictLongRunning(
+    @Path("model") model: String,
+    @Header("x-goog-api-key") apiKey: String,
+    @Body request: com.example.ai.provider.dto.GeminiLongRunningRequest,
+  ): Response<com.example.ai.provider.dto.GeminiOperationResponse>
+
+  @GET("v1beta/{operationName}")
+  suspend fun getOperation(
+    @Path(value = "operationName", encoded = true) operationName: String,
+    @Header("x-goog-api-key") apiKey: String,
+  ): Response<com.example.ai.provider.dto.GeminiOperationResponse>
 }

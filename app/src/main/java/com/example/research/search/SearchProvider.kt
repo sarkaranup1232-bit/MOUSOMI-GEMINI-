@@ -38,6 +38,19 @@ interface SearchService {
     settings: AppSettings,
   ): Result<SearchResponse>
 
+  suspend fun searchMaps(
+    query: String,
+    settings: AppSettings,
+  ): Result<SearchResponse> =
+    search(
+      SearchQueryRequest(
+        query = "$query address location google maps",
+        topic = SearchTopic.GENERAL,
+        pageSize = 6,
+      ),
+      settings,
+    )
+
   suspend fun searchMultipleQueries(
     queries: List<String>,
     topic: SearchTopic,

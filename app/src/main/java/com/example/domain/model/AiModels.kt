@@ -56,10 +56,10 @@ data class AiModelSpec(
 
 object VerifiedModelCatalog {
   const val HYDROGEN_SLOT_ID = "gemini_4_hydrogen"
-  const val DEFAULT_HYDROGEN_BACKING_MODEL_ID = "gemini-2.5-flash"
+  const val DEFAULT_HYDROGEN_BACKING_MODEL_ID = "gemini-3.8-flash"
   const val DEFAULT_GROQ_REASONING_MODEL_ID = "qwen/qwen3.8-27b"
   const val FALLBACK_GROQ_MODEL_ID = "llama-3.3-70b-versatile"
-  const val DEFAULT_IMAGE_MODEL_ID = "gemini-2.0-flash-exp-image-generation"
+  const val DEFAULT_IMAGE_MODEL_ID = "gemini-nano-banana-2.1"
 
   fun createHydrogenSpec(backingModelId: String = DEFAULT_HYDROGEN_BACKING_MODEL_ID): AiModelSpec {
     val cleanId = backingModelId.trim().ifBlank { DEFAULT_HYDROGEN_BACKING_MODEL_ID }
@@ -87,7 +87,7 @@ object VerifiedModelCatalog {
 
   val geminiPro =
     AiModelSpec(
-      id = "gemini-2.5-pro",
+      id = "gemini-4-argon",
       selectorSlotId = "gemini_pro",
       displayName = "Gemini Pro",
       shortLabel = "Pro",
@@ -109,7 +109,7 @@ object VerifiedModelCatalog {
 
   val geminiFlash =
     AiModelSpec(
-      id = "gemini-2.5-flash",
+      id = "gemini-3.8-flash",
       selectorSlotId = "gemini_flash",
       displayName = "Gemini Flash",
       shortLabel = "Flash",

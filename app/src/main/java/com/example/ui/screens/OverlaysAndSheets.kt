@@ -3,6 +3,7 @@ package com.example.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,7 +13,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -25,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ScreenShare
+import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.Analytics
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.AudioFile
@@ -32,8 +36,10 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.Brush
 import androidx.compose.material.icons.outlined.CameraAlt
+import androidx.compose.material.icons.outlined.CenterFocusWeak
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.CleaningServices
+import androidx.compose.material.icons.outlined.CloseFullscreen
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Description
@@ -44,6 +50,7 @@ import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MicOff
+import androidx.compose.material.icons.outlined.OpenInFull
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Science
@@ -57,6 +64,9 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -121,6 +131,7 @@ fun MousomiDrawerContent(
   isEmergencyActive: Boolean = false,
   onTriggerEmergencyStop: () -> Unit = {},
   onOpenAssistantHub: () -> Unit = {},
+  onOpenLens: () -> Unit = {},
 ) {
   val colors = LocalMousomiColors.current
   val onSurface = MaterialTheme.colorScheme.onSurface
@@ -241,6 +252,14 @@ fun MousomiDrawerContent(
           modifier = Modifier.testTag("drawer_emergency_stop"),
         )
       }
+
+      NavigationDrawerItem(
+        label = { Text("Mousomi Lens Visual AI") },
+        selected = false,
+        onClick = onOpenLens,
+        icon = { Icon(Icons.Outlined.CenterFocusWeak, contentDescription = null, tint = NeonCyan) },
+        modifier = Modifier.testTag("drawer_mousomi_lens"),
+      )
 
       NavigationDrawerItem(
         label = { Text("Device, Tasks & Alarms") },
@@ -365,6 +384,7 @@ fun AttachmentBottomSheet(
   onPickAudio: () -> Unit = {},
   onPickDocuments: () -> Unit = {},
   onTakeCameraPhoto: () -> Unit = {},
+  onOpenLens: () -> Unit = {},
   onAttachSamplePreview: () -> Unit,
   onDismiss: () -> Unit,
 ) {
@@ -445,6 +465,12 @@ fun AttachmentBottomSheet(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
       ) {
         AttachmentTile(
+          icon = Icons.Outlined.CenterFocusWeak,
+          label = "Live Lens",
+          onClick = onOpenLens,
+          modifier = Modifier.weight(1f).testTag("attach_lens_button"),
+        )
+        AttachmentTile(
           icon = Icons.Outlined.ImageSearch,
           label = "Analyze Image",
           onClick = onPickFromGallery,
@@ -456,12 +482,19 @@ fun AttachmentBottomSheet(
           onClick = onPickDocuments,
           modifier = Modifier.weight(1f).testTag("attach_analyze_doc_button"),
         )
+      }
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
         AttachmentTile(
           icon = Icons.Outlined.Image,
           label = "Sample Art",
           onClick = onAttachSamplePreview,
           modifier = Modifier.weight(1f).testTag("attach_sample_button"),
         )
+        Spacer(modifier = Modifier.weight(2f))
       }
 
       Text(
@@ -551,6 +584,7 @@ fun ImageToolsBottomSheet(
 fun MoreToolsBottomSheet(
   onSelectToolAction: (String) -> Unit,
   onOpenScreenAssistant: () -> Unit,
+  onOpenLens: () -> Unit = {},
   onDismiss: () -> Unit,
 ) {
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -590,10 +624,10 @@ fun MoreToolsBottomSheet(
           modifier = Modifier.weight(1f).testTag("more_tool_research"),
         )
         AttachmentTile(
-          icon = Icons.Outlined.Analytics,
-          label = "Data Analysis",
-          onClick = { onSelectToolAction("data_analysis") },
-          modifier = Modifier.weight(1f).testTag("more_tool_data"),
+          icon = Icons.Outlined.CenterFocusWeak,
+          label = "Mousomi Lens",
+          onClick = onOpenLens,
+          modifier = Modifier.weight(1f).testTag("more_tool_lens"),
         )
       }
       Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -615,6 +649,15 @@ fun MoreToolsBottomSheet(
           onClick = { onSelectToolAction("draw_region") },
           modifier = Modifier.weight(1f).testTag("more_tool_drawing"),
         )
+      }
+      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        AttachmentTile(
+          icon = Icons.Outlined.Analytics,
+          label = "Data Analysis",
+          onClick = { onSelectToolAction("data_analysis") },
+          modifier = Modifier.weight(1f).testTag("more_tool_data"),
+        )
+        Spacer(modifier = Modifier.weight(2f))
       }
     }
   }
@@ -658,11 +701,23 @@ private fun AttachmentTile(
 
 @Composable
 fun ProfileAccountDialog(
+  authSession: com.example.domain.auth.AuthUserSession = com.example.domain.auth.AuthUserSession(),
   onOpenSettings: () -> Unit,
   onOpenPermissions: () -> Unit = {},
+  onSignOut: (() -> Unit)? = null,
   onDismiss: () -> Unit,
 ) {
   val colors = LocalMousomiColors.current
+  val displayTitle =
+    if (authSession.isSignedIn && authSession.displayName.isNotBlank()) authSession.displayName else "HACKER"
+  val avatarInitial = displayTitle.firstOrNull()?.uppercaseChar()?.toString() ?: "M"
+  val subtitleText =
+    if (authSession.isSignedIn && !authSession.email.isNullOrBlank()) {
+      authSession.email
+    } else {
+      "Mousomi AI • ${authSession.entitlementTier.label}"
+    }
+
   Dialog(onDismissRequest = onDismiss) {
     Surface(
       shape = RoundedCornerShape(24.dp),
@@ -679,7 +734,7 @@ fun ProfileAccountDialog(
           contentAlignment = Alignment.Center,
         ) {
           Text(
-            text = "C",
+            text = avatarInitial,
             color = Color.White,
             fontFamily = DisplayFontFamily,
             fontWeight = FontWeight.Medium,
@@ -688,15 +743,19 @@ fun ProfileAccountDialog(
         }
         Spacer(modifier = Modifier.height(12.dp))
         Text(
-          text = "HACKER",
+          text = displayTitle,
           fontFamily = DisplayFontFamily,
           fontWeight = FontWeight.SemiBold,
           fontSize = 18.sp,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
         )
         Text(
-          text = "Mousomi AI • Multi-Model Engine",
+          text = subtitleText,
           style = MaterialTheme.typography.bodyMedium,
           color = colors.mutedText,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
         )
 
         Spacer(modifier = Modifier.height(18.dp))
@@ -723,11 +782,26 @@ fun ProfileAccountDialog(
             onOpenPermissions()
           },
           shape = RoundedCornerShape(14.dp),
-          modifier = Modifier.fillMaxWidth().height(46.dp),
+          modifier = Modifier.fillMaxWidth().height(48.dp),
         ) {
           Icon(Icons.Outlined.Shield, contentDescription = null, modifier = Modifier.size(18.dp))
           Spacer(modifier = Modifier.width(8.dp))
           Text("Permissions & Privacy")
+        }
+
+        if (authSession.isSignedIn && onSignOut != null) {
+          Spacer(modifier = Modifier.height(8.dp))
+          OutlinedButton(
+            onClick = {
+              onDismiss()
+              onSignOut()
+            },
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
+            modifier = Modifier.fillMaxWidth().height(48.dp).testTag("profile_sign_out_button"),
+          ) {
+            Text("Sign Out", color = MaterialTheme.colorScheme.error)
+          }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -735,7 +809,7 @@ fun ProfileAccountDialog(
         OutlinedButton(
           onClick = onDismiss,
           shape = RoundedCornerShape(14.dp),
-          modifier = Modifier.fillMaxWidth().height(46.dp),
+          modifier = Modifier.fillMaxWidth().height(48.dp),
         ) {
           Text("Close")
         }
@@ -850,9 +924,14 @@ fun GeminiLiveOverlay(
   voiceRmsNormalized: Float = 0f,
   isThinking: Boolean = false,
   voiceGender: VoiceGender = VoiceGender.FEMALE,
+  latestAssistantText: String = "",
   onSelectVoiceGender: (VoiceGender) -> Unit = {},
   onStartListening: () -> Unit,
   onStopListening: () -> Unit,
+  onSendFollowUp: (String) -> Unit = {},
+  onOpenCamera: () -> Unit = {},
+  onRunDeepSearch: () -> Unit = {},
+  onMinimize: () -> Unit = {},
   onEmergencyStop: () -> Unit = {},
   onClose: () -> Unit,
   audioMetrics: VoiceAudioMetrics = VoiceAudioMetrics.SILENT,
@@ -860,6 +939,7 @@ fun GeminiLiveOverlay(
   BackHandler(onBack = onClose)
 
   var isMuted by remember { mutableStateOf(false) }
+  var followUpText by remember { mutableStateOf("") }
 
   Box(
     modifier =
@@ -872,7 +952,7 @@ fun GeminiLiveOverlay(
         )
         .statusBarsPadding()
         .navigationBarsPadding()
-        .padding(24.dp)
+        .padding(20.dp)
         .testTag("mousomi_live_overlay")
   ) {
     Row(
@@ -891,27 +971,47 @@ fun GeminiLiveOverlay(
           fontSize = 20.sp,
         )
       }
-      Surface(
-        shape = CircleShape,
-        color = Color.White.copy(alpha = 0.12f),
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
       ) {
-        Text(
-          text =
-            when {
-              isThinking -> "Thinking"
-              voiceState is VoiceState.Listening -> "Listening"
-              voiceState is VoiceState.Speaking -> "Speaking"
-              else -> "Voice Ready"
-            },
-          color = NeonCyan,
-          style = MaterialTheme.typography.labelSmall,
-          modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-        )
+        Surface(
+          shape = CircleShape,
+          color = Color.White.copy(alpha = 0.12f),
+        ) {
+          Text(
+            text =
+              when {
+                isThinking -> "Thinking"
+                voiceState is VoiceState.Listening -> "Listening"
+                voiceState is VoiceState.Speaking -> "Speaking"
+                else -> "Voice Ready"
+              },
+            color = NeonCyan,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+          )
+        }
+        IconButton(
+          onClick = onMinimize,
+          modifier = Modifier.size(40.dp).testTag("minimize_gemini_live_button"),
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.CloseFullscreen,
+            contentDescription = "Minimize Live Assistant",
+            tint = Color.White,
+            modifier = Modifier.size(20.dp),
+          )
+        }
       }
     }
 
     Column(
-      modifier = Modifier.align(Alignment.Center),
+      modifier =
+        Modifier
+          .align(Alignment.Center)
+          .fillMaxWidth()
+          .padding(vertical = 56.dp),
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {
       AnimatedAIOrb(
@@ -919,18 +1019,18 @@ fun GeminiLiveOverlay(
         voiceRmsNormalized = voiceRmsNormalized,
         isThinking = isThinking,
         isMuted = isMuted,
-        orbSize = 196.dp,
+        orbSize = 180.dp,
         audioMetrics = audioMetrics,
       )
 
-      Spacer(modifier = Modifier.height(14.dp))
+      Spacer(modifier = Modifier.height(12.dp))
 
       VoiceWaveform(
         isActive = !isMuted && (voiceState is VoiceState.Listening || voiceState is VoiceState.Speaking),
         rmsNormalized = voiceRmsNormalized,
       )
 
-      Spacer(modifier = Modifier.height(20.dp))
+      Spacer(modifier = Modifier.height(16.dp))
 
       Text(
         text =
@@ -939,24 +1039,43 @@ fun GeminiLiveOverlay(
             isThinking -> "Processing your request…"
             voiceState is VoiceState.Listening && voiceState.partialTranscript.isNotBlank() ->
               voiceState.partialTranscript
-            voiceState is VoiceState.Listening -> "Listening to HACKER…"
+            voiceState is VoiceState.Listening -> "Listening…"
             voiceState is VoiceState.Speaking -> "Speaking response…"
             else -> "Tap mic to speak with Mousomi AI"
           },
         color = Color.White,
         fontFamily = DisplayFontFamily,
-        fontSize = 22.sp,
+        fontSize = 21.sp,
         textAlign = TextAlign.Center,
       )
       Spacer(modifier = Modifier.height(6.dp))
       Text(
-        text = "Voice: ${voiceGender.label} • Interrupt anytime to ask follow-up questions",
+        text = "Voice: ${voiceGender.label} • Interrupt anytime or minimize to float",
         color = Color.White.copy(alpha = 0.72f),
         style = MaterialTheme.typography.bodyMedium,
         textAlign = TextAlign.Center,
       )
 
-      Spacer(modifier = Modifier.height(14.dp))
+      if (latestAssistantText.isNotBlank()) {
+        Spacer(modifier = Modifier.height(10.dp))
+        Surface(
+          shape = RoundedCornerShape(16.dp),
+          color = Color.White.copy(alpha = 0.1f),
+          border = BorderStroke(1.dp, Color.White.copy(alpha = 0.16f)),
+          modifier = Modifier.fillMaxWidth().heightIn(max = 110.dp),
+        ) {
+          Text(
+            text = latestAssistantText.take(260),
+            color = Color.White.copy(alpha = 0.92f),
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 4,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(12.dp),
+          )
+        }
+      }
+
+      Spacer(modifier = Modifier.height(12.dp))
 
       Row(
         modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -977,66 +1096,230 @@ fun GeminiLiveOverlay(
           )
         }
       }
+
+      Spacer(modifier = Modifier.height(8.dp))
+
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        OutlinedButton(
+          onClick = onOpenCamera,
+          border = BorderStroke(1.dp, Color.White.copy(alpha = 0.28f)),
+        ) {
+          Icon(Icons.Outlined.CameraAlt, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.width(6.dp))
+          Text("Camera Vision", color = Color.White, style = MaterialTheme.typography.labelMedium)
+        }
+        OutlinedButton(
+          onClick = onRunDeepSearch,
+          border = BorderStroke(1.dp, Color.White.copy(alpha = 0.28f)),
+        ) {
+          Icon(Icons.Outlined.Public, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.width(6.dp))
+          Text("Deep Research", color = Color.White, style = MaterialTheme.typography.labelMedium)
+        }
+      }
     }
 
-    Row(
-      modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
-      horizontalArrangement = Arrangement.spacedBy(20.dp),
-      verticalAlignment = Alignment.CenterVertically,
+    Column(
+      modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+      horizontalAlignment = Alignment.CenterHorizontally,
+      verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-      Surface(
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        OutlinedTextField(
+          value = followUpText,
+          onValueChange = { followUpText = it },
+          placeholder = { Text("Type a quick follow-up…", color = Color.White.copy(alpha = 0.5f)) },
+          singleLine = true,
+          shape = CircleShape,
+          modifier = Modifier.weight(1f).testTag("live_follow_up_input"),
+        )
+        Surface(
+          onClick = {
+            if (followUpText.isNotBlank()) {
+              val q = followUpText.trim()
+              followUpText = ""
+              onSendFollowUp(q)
+            }
+          },
+          shape = CircleShape,
+          color = NeonCyan,
+          modifier = Modifier.size(48.dp).testTag("live_follow_up_send"),
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              imageVector = Icons.AutoMirrored.Rounded.Send,
+              contentDescription = "Send follow-up",
+              tint = Color.Black,
+              modifier = Modifier.size(20.dp),
+            )
+          }
+        }
+      }
+
+      Row(
+        modifier = Modifier.padding(bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(20.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Surface(
+          onClick = {
+            isMuted = !isMuted
+            if (isMuted) onStopListening() else onStartListening()
+          },
+          shape = CircleShape,
+          color = if (isMuted) Color.White else Color.White.copy(alpha = 0.16f),
+          modifier = Modifier.size(62.dp).testTag("live_mute_toggle_button"),
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              imageVector = if (isMuted) Icons.Outlined.MicOff else Icons.Outlined.Mic,
+              contentDescription = if (isMuted) "Unmute" else "Mute",
+              tint = if (isMuted) Color.Black else Color.White,
+              modifier = Modifier.size(26.dp),
+            )
+          }
+        }
+
+        Surface(
+          onClick = {
+            onEmergencyStop()
+            onClose()
+          },
+          shape = CircleShape,
+          color = Color(0xFF991B1B),
+          border = BorderStroke(1.dp, Color(0xFFEF4444)),
+          modifier = Modifier.height(50.dp).testTag("live_emergency_stop_button"),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Icon(Icons.Rounded.Stop, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+            Text("Emergency Stop", color = Color.White, style = MaterialTheme.typography.labelLarge)
+          }
+        }
+
+        Surface(
+          onClick = onClose,
+          shape = CircleShape,
+          color = Color(0xFFDC2626),
+          modifier = Modifier.size(62.dp).testTag("close_gemini_live_button"),
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              imageVector = Icons.Rounded.Close,
+              contentDescription = "End Live Voice",
+              tint = Color.White,
+              modifier = Modifier.size(28.dp),
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+fun MinimizedGeminiLivePill(
+  voiceState: VoiceState,
+  voiceRmsNormalized: Float,
+  isThinking: Boolean,
+  audioMetrics: VoiceAudioMetrics,
+  onStartListening: () -> Unit,
+  onStopListening: () -> Unit,
+  onExpand: () -> Unit,
+  onClose: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  var offsetX by remember { mutableStateOf(0f) }
+  var offsetY by remember { mutableStateOf(0f) }
+  var isMuted by remember { mutableStateOf(false) }
+
+  Surface(
+    shape = CircleShape,
+    color = Color(0xFF071330).copy(alpha = 0.94f),
+    border = BorderStroke(1.2.dp, NeonCyan.copy(alpha = 0.72f)),
+    tonalElevation = 8.dp,
+    modifier =
+      modifier
+        .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
+        .pointerInput(Unit) {
+          detectDragGestures { change, dragAmount ->
+            change.consume()
+            offsetX += dragAmount.x
+            offsetY += dragAmount.y
+          }
+        }
+        .testTag("gemini_live_floating_pill"),
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      AnimatedAIOrb(
+        voiceState = voiceState,
+        voiceRmsNormalized = voiceRmsNormalized,
+        isThinking = isThinking,
+        isMuted = isMuted,
+        orbSize = 34.dp,
+        audioMetrics = audioMetrics,
+      )
+      Text(
+        text =
+          when {
+            isMuted -> "Muted"
+            isThinking -> "Thinking"
+            voiceState is VoiceState.Listening -> "Listening"
+            voiceState is VoiceState.Speaking -> "Speaking"
+            else -> "Live"
+          },
+        color = Color.White,
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+      )
+      IconButton(
         onClick = {
           isMuted = !isMuted
           if (isMuted) onStopListening() else onStartListening()
         },
-        shape = CircleShape,
-        color = if (isMuted) Color.White else Color.White.copy(alpha = 0.16f),
-        modifier = Modifier.size(62.dp).testTag("live_mute_toggle_button"),
+        modifier = Modifier.size(36.dp),
       ) {
-        Box(contentAlignment = Alignment.Center) {
-          Icon(
-            imageVector = if (isMuted) Icons.Outlined.MicOff else Icons.Outlined.Mic,
-            contentDescription = if (isMuted) "Unmute" else "Mute",
-            tint = if (isMuted) Color.Black else Color.White,
-            modifier = Modifier.size(26.dp),
-          )
-        }
+        Icon(
+          imageVector = if (isMuted) Icons.Outlined.MicOff else Icons.Outlined.Mic,
+          contentDescription = if (isMuted) "Unmute Live Voice" else "Mute Live Voice",
+          tint = if (isMuted) Color(0xFFFCA5A5) else NeonCyan,
+          modifier = Modifier.size(18.dp),
+        )
       }
-
-      Surface(
-        onClick = {
-          onEmergencyStop()
-          onClose()
-        },
-        shape = CircleShape,
-        color = Color(0xFF991B1B),
-        border = BorderStroke(1.dp, Color(0xFFEF4444)),
-        modifier = Modifier.height(50.dp).testTag("live_emergency_stop_button"),
+      IconButton(
+        onClick = onExpand,
+        modifier = Modifier.size(36.dp).testTag("expand_gemini_live_button"),
       ) {
-        Row(
-          modifier = Modifier.padding(horizontal = 16.dp),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-          Icon(Icons.Rounded.Stop, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
-          Text("Emergency Stop", color = Color.White, style = MaterialTheme.typography.labelLarge)
-        }
+        Icon(
+          imageVector = Icons.Outlined.OpenInFull,
+          contentDescription = "Expand Live Assistant",
+          tint = Color.White,
+          modifier = Modifier.size(18.dp),
+        )
       }
-
-      Surface(
+      IconButton(
         onClick = onClose,
-        shape = CircleShape,
-        color = Color(0xFFDC2626),
-        modifier = Modifier.size(62.dp).testTag("close_gemini_live_button"),
+        modifier = Modifier.size(36.dp).testTag("end_minimized_live_button"),
       ) {
-        Box(contentAlignment = Alignment.Center) {
-          Icon(
-            imageVector = Icons.Rounded.Close,
-            contentDescription = "End Live Voice",
-            tint = Color.White,
-            modifier = Modifier.size(28.dp),
-          )
-        }
+        Icon(
+          imageVector = Icons.Rounded.Close,
+          contentDescription = "End Live Assistant",
+          tint = Color(0xFFFCA5A5),
+          modifier = Modifier.size(18.dp),
+        )
       }
     }
   }

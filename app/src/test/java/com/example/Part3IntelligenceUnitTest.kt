@@ -189,6 +189,38 @@ class Part3IntelligenceUnitTest {
         attachments = emptyList(),
       ),
     )
+    assertEquals(
+      IntelligenceIntent.MAPS_SEARCH,
+      router.classifyIntent(
+        "Find coffee shops near me on Google Maps",
+        hasImages = false,
+        attachments = emptyList(),
+      ),
+    )
+    assertEquals(
+      IntelligenceIntent.IMAGE_TO_VIDEO,
+      router.classifyIntent(
+        "Animate this photo into a short video",
+        hasImages = true,
+        attachments = emptyList(),
+      ),
+    )
+    assertEquals(
+      IntelligenceIntent.TEXT_TO_VIDEO,
+      router.classifyIntent(
+        "Create a video of rain over Tokyo at night",
+        hasImages = false,
+        attachments = emptyList(),
+      ),
+    )
+    assertEquals(
+      IntelligenceIntent.MUSIC_GENERATION,
+      router.classifyIntent(
+        "Compose a calm lo-fi chill instrumental beat",
+        hasImages = false,
+        attachments = emptyList(),
+      ),
+    )
   }
 
   @Test

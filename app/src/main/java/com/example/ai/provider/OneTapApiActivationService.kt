@@ -1,5 +1,6 @@
 package com.example.ai.provider
 
+import com.example.ai.firebase.FirebaseAiLogicService
 import com.example.ai.provider.api.GeminiApiService
 import com.example.ai.provider.api.GroqApiService
 import com.example.ai.provider.api.ProxyApiService
@@ -35,6 +36,7 @@ class OneTapApiActivationService @Inject constructor(
   private val groqApiService: GroqApiService,
   private val proxyApiService: ProxyApiService,
   private val securityValidator: SecurityValidator,
+  private val firebaseAiLogicService: FirebaseAiLogicService? = null,
 ) {
 
   fun detectProvider(rawKey: String, settings: AppSettings): DetectedProviderKind {
@@ -47,6 +49,7 @@ class OneTapApiActivationService @Inject constructor(
       key.isNotEmpty() -> DetectedProviderKind.UNKNOWN
       settings.geminiApiKey.isNotBlank() -> DetectedProviderKind.GEMINI
       settings.groqApiKey.isNotBlank() -> DetectedProviderKind.GROQ
+      firebaseAiLogicService?.isAvailable() == true -> DetectedProviderKind.FIREBASE_AI_LOGIC
       else -> DetectedProviderKind.UNKNOWN
     }
   }
@@ -93,6 +96,7 @@ class OneTapApiActivationService @Inject constructor(
       DetectedProviderKind.GEMINI -> probeGeminiKey(cleanKey, existingSettings, hasMicPermission)
       DetectedProviderKind.GROQ -> probeGroqKey(cleanKey, existingSettings, hasMicPermission)
       DetectedProviderKind.PROXY -> probeProxyEndpoint(existingSettings, hasMicPermission, cleanKey)
+      DetectedProviderKind.FIREBASE_AI_LOGIC -> buildFirebaseAiLogicOutcome(existingSettings, hasMicPermission)
       DetectedProviderKind.UNKNOWN -> {
         // Probe Gemini first; if unauthorized, try Groq automatically so non-standard keys work
         val geminiAttempt = probeGeminiKey(cleanKey, existingSettings, hasMicPermission)
@@ -124,6 +128,9 @@ class OneTapApiActivationService @Inject constructor(
     val hasGemini = settings.geminiApiKey.isNotBlank()
     val hasGroq = settings.groqApiKey.isNotBlank()
     if (!hasGemini && !hasGroq) {
+      if (firebaseAiLogicService?.isAvailable() == true) {
+        return buildFirebaseAiLogicOutcome(settings, hasMicPermission)
+      }
       return OneTapActivationOutcome(
         result =
           OneTapActivationResult(
@@ -141,6 +148,40 @@ class OneTapApiActivationService @Inject constructor(
       probeGroqKey(settings.groqApiKey, settings, hasMicPermission)
     }
   }
+
+  private fun buildFirebaseAiLogicOutcome(
+    existingSettings: AppSettings,
+    hasMicPermission: Boolean,
+  ): OneTapActivationOutcome =
+    OneTapActivationOutcome(
+      result =
+        OneTapActivationResult(
+          status = ActivationHealthStatus.PARTIALLY_ACTIVE,
+          detectedProvider = DetectedProviderKind.FIREBASE_AI_LOGIC,
+          statusMessage =
+            "Firebase AI Logic + App Check active (no API key needed for Gemini 3.8 Flash chat, vision, audio & Search). Note: Nano Banana image gen, Veo video, and Lyria music require Firebase Blaze billing or a paid Gemini API key.",
+          capabilities =
+            buildCapabilities(
+              chatAvailable = true,
+              visionAvailable = true,
+              imageGenAvailable = true,
+              researchAvailable = true,
+              micGranted = hasMicPermission,
+              docsAvailable = true,
+              reasoningAvailable = true,
+              videoAndMusicAvailable = false,
+            ),
+          discoveredModelIds =
+            listOf(
+              FirebaseAiLogicService.DEFAULT_TEXT_MODEL,
+              FirebaseAiLogicService.DEFAULT_PRO_MODEL,
+              FirebaseAiLogicService.DEFAULT_LITE_MODEL,
+              FirebaseAiLogicService.DEFAULT_IMAGE_MODEL,
+            ),
+          verifiedAtMs = System.currentTimeMillis(),
+        ),
+      updatedSettings = existingSettings,
+    )
 
   fun buildDeactivatedSettings(current: AppSettings): AppSettings =
     current.copy(
@@ -164,16 +205,21 @@ class OneTapApiActivationService @Inject constructor(
           val hasChat = rawIds.any { it.contains("gemini", ignoreCase = true) }
           val hasImageGen =
             rawIds.any {
-              it.contains("image-generation", ignoreCase = true) ||
+              it.contains("nano-banana", ignoreCase = true) ||
+                it.contains("image-generation", ignoreCase = true) ||
                 it.contains("imagen", ignoreCase = true) ||
-                it.contains("gemini-2.0-flash-exp", ignoreCase = true)
+                it.contains("-image", ignoreCase = true)
             }
+          val hasVideoOrMusic =
+            rawIds.any { it.contains("veo", ignoreCase = true) || it.contains("lyria", ignoreCase = true) }
           val preferredHydrogen =
-            rawIds.firstOrNull { it.contains("2.5-flash") }
+            rawIds.firstOrNull { it.contains("3.8-flash") }
+              ?: rawIds.firstOrNull { it.contains("3.") && it.contains("flash") }
               ?: rawIds.firstOrNull { it.contains("flash") }
               ?: existingSettings.hydrogenBackingModelId
           val preferredImageModel =
-            rawIds.firstOrNull { it.contains("image-generation") }
+            rawIds.firstOrNull { it.contains("nano-banana") }
+              ?: rawIds.firstOrNull { it.contains("image-generation") || it.contains("-image") }
               ?: rawIds.firstOrNull { it.contains("imagen") }
               ?: existingSettings.imageModelId
 
@@ -189,6 +235,7 @@ class OneTapApiActivationService @Inject constructor(
           val missingOptional =
             buildList {
               if (!hasImageGen) add("image-generation model unlisted")
+              if (!hasVideoOrMusic) add("Veo/Lyria require paid AI Studio billing")
               if (!hasMicPermission) add("microphone permission needed for live voice")
             }
 
@@ -202,7 +249,7 @@ class OneTapApiActivationService @Inject constructor(
               ActivationHealthStatus.ACTIVE ->
                 "Gemini API active (${rawIds.size} models verified). All capabilities ready."
               ActivationHealthStatus.PARTIALLY_ACTIVE ->
-                "Gemini API active (${rawIds.size} models). Optional items: ${missingOptional.joinToString(", ")}."
+                "Gemini API active (${rawIds.size} models). Notes: ${missingOptional.joinToString(", ")}."
               else -> "Key authenticated, but no compatible text models were returned."
             }
 
@@ -222,6 +269,7 @@ class OneTapApiActivationService @Inject constructor(
                     micGranted = hasMicPermission,
                     docsAvailable = hasChat,
                     reasoningAvailable = true,
+                    videoAndMusicAvailable = hasVideoOrMusic,
                   ),
                 discoveredModelIds = rawIds.take(12),
                 verifiedAtMs = System.currentTimeMillis(),
@@ -512,13 +560,14 @@ class OneTapApiActivationService @Inject constructor(
     micGranted: Boolean,
     docsAvailable: Boolean = chatAvailable,
     reasoningAvailable: Boolean = chatAvailable,
+    videoAndMusicAvailable: Boolean = false,
   ): List<CapabilityActivationBadge> =
     listOf(
       CapabilityActivationBadge(
         id = "chat",
         label = "AI Chat",
         available = chatAvailable,
-        detail = if (chatAvailable) "Streaming chat verified" else "Requires valid API key",
+        detail = if (chatAvailable) "Streaming chat verified" else "Requires Firebase AI Logic or API key",
       ),
       CapabilityActivationBadge(
         id = "reasoning",
@@ -530,19 +579,25 @@ class OneTapApiActivationService @Inject constructor(
         id = "vision",
         label = "Vision & Photos",
         available = visionAvailable,
-        detail = if (visionAvailable) "Multimodal vision active" else "Requires Gemini key",
+        detail = if (visionAvailable) "Multimodal vision active" else "Requires Gemini or Firebase AI Logic",
       ),
       CapabilityActivationBadge(
         id = "image_gen",
         label = "Image Gen & Edit",
         available = imageGenAvailable,
-        detail = if (imageGenAvailable) "Image pipeline ready" else "Requires Gemini key",
+        detail = if (imageGenAvailable) "Nano Banana pipeline ready (billing may apply)" else "Requires Gemini key",
       ),
       CapabilityActivationBadge(
         id = "research",
-        label = "Deep Research",
+        label = "Search & Maps",
         available = researchAvailable,
-        detail = if (researchAvailable) "Search grounding enabled" else "Requires Gemini or Search endpoint",
+        detail = if (researchAvailable) "Search & Maps grounding enabled" else "Requires Gemini or Search endpoint",
+      ),
+      CapabilityActivationBadge(
+        id = "video_music",
+        label = "Veo Video & Music",
+        available = videoAndMusicAvailable,
+        detail = if (videoAndMusicAvailable) "Veo & Lyria listed" else "Requires paid Gemini API billing",
       ),
       CapabilityActivationBadge(
         id = "docs",

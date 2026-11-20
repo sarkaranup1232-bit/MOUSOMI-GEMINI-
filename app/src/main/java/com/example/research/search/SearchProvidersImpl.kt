@@ -1,5 +1,6 @@
 package com.example.research.search
 
+import com.example.ai.firebase.FirebaseAiLogicService
 import com.example.ai.provider.api.GeminiApiService
 import com.example.ai.provider.api.ProxyApiService
 import com.example.ai.provider.dto.ExternalSearchRequest
@@ -16,6 +17,7 @@ import com.example.domain.model.ConnectionMode
 import com.example.domain.model.SearchResponse
 import com.example.domain.model.SearchResultItem
 import com.example.domain.model.SourceVerificationStatus
+import com.example.domain.model.VerifiedModelCatalog
 import java.net.URI
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -209,7 +211,8 @@ class GeminiGroundingSearchProvider @Inject constructor(
           append("Return concise factual points grounded strictly in retrieved web sources with dates where available.")
         }
 
-      val modelId = settings.hydrogenBackingModelId.ifBlank { "gemini-2.5-flash" }
+      val modelId =
+        settings.hydrogenBackingModelId.ifBlank { VerifiedModelCatalog.DEFAULT_HYDROGEN_BACKING_MODEL_ID }
       val resp =
         RetryPolicy.withExponentialBackoff {
           geminiApiService.generateContent(
@@ -283,6 +286,73 @@ class GeminiGroundingSearchProvider @Inject constructor(
         retrievedAtMs = now,
       )
     }
+
+  suspend fun searchMaps(query: String, settings: AppSettings): Result<SearchResponse> =
+    runCatching {
+      val apiKey = settings.geminiApiKey.trim()
+      require(apiKey.isNotEmpty()) { "Gemini API key is required for direct Google Maps tool grounding." }
+      val prompt =
+        "Provide real, verified Google Maps places, addresses, coordinates/areas, and map links for: \"$query\"."
+      val modelId =
+        settings.hydrogenBackingModelId.ifBlank { VerifiedModelCatalog.DEFAULT_HYDROGEN_BACKING_MODEL_ID }
+      val resp =
+        RetryPolicy.withExponentialBackoff {
+          geminiApiService.generateContent(
+            model = modelId,
+            apiKey = apiKey,
+            request =
+              GeminiGenerateRequest(
+                contents = listOf(GeminiContent(role = "user", parts = listOf(GeminiPart(text = prompt)))),
+                generationConfig = GeminiGenerationConfig(temperature = 0.2),
+                tools = listOf(GeminiTool(google_maps = JsonObject(emptyMap()))),
+              ),
+          )
+        }
+      if (!resp.isSuccessful) {
+        error("Gemini Maps Grounding failed (HTTP ${resp.code()}).")
+      }
+      val body = resp.body() ?: error("Empty response from Gemini Maps Grounding.")
+      val candidate = body.candidates.firstOrNull()
+      val grounding = candidate?.groundingMetadata
+      val chunks = grounding?.groundingChunks.orEmpty()
+      val now = System.currentTimeMillis()
+      val snippetFallback =
+        candidate?.content?.parts?.mapNotNull { it.text }?.joinToString(" ")?.take(260).orEmpty()
+
+      val items =
+        chunks.mapIndexedNotNull { idx, chunk ->
+          val maps = chunk.maps
+          val web = chunk.web
+          val uri = maps?.uri?.trim()?.ifBlank { null } ?: web?.uri?.trim().orEmpty()
+          if (uri.isBlank()) return@mapIndexedNotNull null
+          val title = maps?.title?.ifBlank { null } ?: web?.title?.ifBlank { null } ?: "Google Maps Place"
+          val domain =
+            runCatching { URI(uri).host?.removePrefix("www.") }.getOrNull().orEmpty().ifBlank { "maps.google.com" }
+          SearchResultItem(
+            id = "gem_maps_$idx",
+            title = title,
+            url = uri,
+            publisher = if (maps != null) "Google Maps" else domain,
+            snippet = snippetFallback,
+            publishedTimestamp = null,
+            retrievedTimestampMs = now,
+            verificationStatus =
+              if (securityValidator.validateHttpsResourceUrl(uri)) SourceVerificationStatus.VERIFIED_HTTPS
+              else SourceVerificationStatus.UNVERIFIED_FORMAT,
+            sourceDomain = domain,
+            relevanceScore = (1.0 - idx * 0.04).coerceAtLeast(0.35),
+          )
+        }
+
+      SearchResponse(
+        query = query,
+        results = items,
+        page = 1,
+        hasMorePages = false,
+        providerUsed = "Gemini Google Maps Grounding",
+        retrievedAtMs = now,
+      )
+    }
 }
 
 @Singleton
@@ -291,6 +361,7 @@ class CompositeSearchService @Inject constructor(
   private val externalSearchApiProvider: ExternalSearchApiProvider,
   private val geminiGroundingSearchProvider: GeminiGroundingSearchProvider,
   private val pageRetriever: HttpPageRetriever,
+  private val firebaseAiLogicService: FirebaseAiLogicService? = null,
 ) : SearchService {
 
   private data class CacheEntry(val response: SearchResponse, val cachedAtMs: Long)
@@ -311,9 +382,30 @@ class CompositeSearchService @Inject constructor(
       }
     }
 
+    val firebaseFallbackProvider =
+      firebaseAiLogicService
+        ?.takeIf { it.isAvailable() && settings.connectionMode != ConnectionMode.BACKEND_PROXY }
+        ?.let { service ->
+          object : SearchProvider {
+            override val providerName: String = "Firebase AI Logic Google Search"
+            override fun isAvailable(settings: AppSettings): Boolean = service.isAvailable()
+            override suspend fun search(
+              request: SearchQueryRequest,
+              settings: AppSettings,
+            ): Result<SearchResponse> = service.searchGrounded(request.query, isMapsQuery = false)
+          }
+        }
+
     val orderedProviders =
-      listOf(proxySearchProvider, externalSearchApiProvider, geminiGroundingSearchProvider)
-        .filter { it.isAvailable(settings) }
+      buildList {
+        addAll(
+          listOf(proxySearchProvider, externalSearchApiProvider, geminiGroundingSearchProvider)
+            .filter { it.isAvailable(settings) }
+        )
+        if (firebaseFallbackProvider != null && firebaseFallbackProvider.isAvailable(settings)) {
+          add(firebaseFallbackProvider)
+        }
+      }
 
     if (orderedProviders.isEmpty()) {
       return Result.failure(
@@ -348,6 +440,50 @@ class CompositeSearchService @Inject constructor(
 
     return Result.failure(
       lastError ?: IllegalStateException("Live search failed across all configured providers.")
+    )
+  }
+
+  override suspend fun searchMaps(query: String, settings: AppSettings): Result<SearchResponse> {
+    val cleanQuery = query.trim()
+    if (cleanQuery.isEmpty()) {
+      return Result.failure(IllegalArgumentException("Maps query cannot be empty."))
+    }
+
+    val cacheKey = "maps|${cleanQuery.lowercase()}"
+    val now = System.currentTimeMillis()
+    cache[cacheKey]?.let { entry ->
+      if (now - entry.cachedAtMs <= cacheTtlMs) {
+        return Result.success(entry.response)
+      }
+    }
+
+    if (geminiGroundingSearchProvider.isAvailable(settings)) {
+      val mapsResp = geminiGroundingSearchProvider.searchMaps(cleanQuery, settings)
+      if (mapsResp.isSuccess && mapsResp.getOrThrow().results.isNotEmpty()) {
+        val raw = mapsResp.getOrThrow()
+        val finalResp = raw.copy(results = deduplicateAndRank(raw.results))
+        cache[cacheKey] = CacheEntry(finalResp, System.currentTimeMillis())
+        return Result.success(finalResp)
+      }
+    }
+
+    if (firebaseAiLogicService?.isAvailable() == true && settings.connectionMode != ConnectionMode.BACKEND_PROXY) {
+      val fbMaps = firebaseAiLogicService.searchGrounded(cleanQuery, isMapsQuery = true)
+      if (fbMaps.isSuccess && fbMaps.getOrThrow().results.isNotEmpty()) {
+        val raw = fbMaps.getOrThrow()
+        val finalResp = raw.copy(results = deduplicateAndRank(raw.results))
+        cache[cacheKey] = CacheEntry(finalResp, System.currentTimeMillis())
+        return Result.success(finalResp)
+      }
+    }
+
+    return search(
+      SearchQueryRequest(
+        query = "$cleanQuery address location google maps",
+        topic = SearchTopic.GENERAL,
+        pageSize = 6,
+      ),
+      settings,
     )
   }
 

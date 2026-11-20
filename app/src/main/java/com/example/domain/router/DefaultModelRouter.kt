@@ -1,5 +1,6 @@
 package com.example.domain.router
 
+import com.example.ai.firebase.FirebaseAiLogicService
 import com.example.domain.model.AiModelSpec
 import com.example.domain.model.AppSettings
 import com.example.domain.model.ConnectionMode
@@ -11,7 +12,11 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class DefaultModelRouter @Inject constructor() : ModelRouter {
+class DefaultModelRouter @Inject constructor(
+  private val firebaseAiLogicService: FirebaseAiLogicService? = null,
+) : ModelRouter {
+
+  constructor() : this(firebaseAiLogicService = null)
 
   override fun classifyTask(prompt: String, hasImages: Boolean): TaskCategory {
     if (hasImages) return TaskCategory.IMAGE_ANALYSIS
@@ -46,7 +51,8 @@ class DefaultModelRouter @Inject constructor() : ModelRouter {
       )
     }
 
-    val hasGemini = useProxy || settings.geminiApiKey.isNotBlank()
+    val hasFirebaseAi = firebaseAiLogicService?.isAvailable() == true
+    val hasGemini = useProxy || settings.geminiApiKey.isNotBlank() || hasFirebaseAi
     val hasGroq = useProxy || settings.groqApiKey.isNotBlank()
 
     if (!hasGemini && !hasGroq) {

@@ -1,0 +1,111 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny-all rule
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['userId', 'displayName', 'themeModeName', 'selectedModelId', 'composerGlowIntensity', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'userId', 'displayName', 'email', 'photoUrl', 'themeModeName', 'selectedModelId',
+          'hydrogenBackingModelId', 'groqReasoningModelId', 'imageModelId',
+          'voiceLanguageTag', 'voiceGenderName', 'composerGlowIntensity', 'createdAt', 'updatedAt'
+        ])
+        && data.userId == userId
+        && data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 120
+        && data.themeModeName is string && data.themeModeName.size() > 0 && data.themeModeName.size() <= 32
+        && data.selectedModelId is string && data.selectedModelId.size() > 0 && data.selectedModelId.size() <= 100
+        && data.composerGlowIntensity is number && data.composerGlowIntensity >= 0 && data.composerGlowIntensity <= 1
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt)
+        && (!('email' in data) || (data.email is string && data.email.size() <= 200))
+        && (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 512))
+        && (!('hydrogenBackingModelId' in data) || (data.hydrogenBackingModelId is string && data.hydrogenBackingModelId.size() <= 100))
+        && (!('groqReasoningModelId' in data) || (data.groqReasoningModelId is string && data.groqReasoningModelId.size() <= 100))
+        && (!('imageModelId' in data) || (data.imageModelId is string && data.imageModelId.size() <= 100))
+        && (!('voiceLanguageTag' in data) || (data.voiceLanguageTag is string && data.voiceLanguageTag.size() <= 20))
+        && (!('voiceGenderName' in data) || (data.voiceGenderName is string && data.voiceGenderName.size() <= 20));
+    }
+
+    function isValidConversation(data, userId) {
+      return data.keys().hasAll(['userId', 'title', 'clientUpdatedAtMs', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'title', 'clientUpdatedAtMs', 'modelId', 'messageCount', 'createdAt', 'updatedAt'])
+        && data.userId == userId
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && data.clientUpdatedAtMs is int && data.clientUpdatedAtMs >= 0
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt)
+        && (!('modelId' in data) || (data.modelId is string && data.modelId.size() <= 100))
+        && (!('messageCount' in data) || (data.messageCount is int && data.messageCount >= 0));
+    }
+
+    function isValidMessage(data, userId, conversationId) {
+      return data.keys().hasAll(['userId', 'conversationId', 'fromUser', 'text', 'clientTimestampMs', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'userId', 'conversationId', 'fromUser', 'text', 'clientTimestampMs',
+          'modelUsed', 'categoryLabel', 'totalTokens', 'errorFlag', 'blocksJson',
+          'attachmentsCount', 'createdAt', 'updatedAt'
+        ])
+        && data.userId == userId
+        && data.conversationId == conversationId
+        && data.fromUser is bool
+        && data.text is string && data.text.size() <= 100000
+        && data.clientTimestampMs is int && data.clientTimestampMs >= 0
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt)
+        && (!('modelUsed' in data) || (data.modelUsed is string && data.modelUsed.size() <= 120))
+        && (!('categoryLabel' in data) || (data.categoryLabel is string && data.categoryLabel.size() <= 80))
+        && (!('totalTokens' in data) || (data.totalTokens is int && data.totalTokens >= 0))
+        && (!('errorFlag' in data) || data.errorFlag is bool)
+        && (!('blocksJson' in data) || (data.blocksJson is string && data.blocksJson.size() <= 200000))
+        && (!('attachmentsCount' in data) || (data.attachmentsCount is int && data.attachmentsCount >= 0));
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) && isValidUserProfile(request.resource.data, userId);
+      allow update: if isOwner(userId)
+        && isValidUserProfile(request.resource.data, userId)
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isOwner(userId);
+
+      match /conversations/{conversationId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidConversation(request.resource.data, userId);
+        allow update: if isOwner(userId)
+          && isValidConversation(request.resource.data, userId)
+          && request.resource.data.userId == resource.data.userId
+          && request.resource.data.createdAt == resource.data.createdAt;
+        allow delete: if isOwner(userId);
+
+        match /messages/{messageId} {
+          allow get, list: if isOwner(userId);
+          allow create: if isOwner(userId) && isValidMessage(request.resource.data, userId, conversationId);
+          allow update: if isOwner(userId)
+            && isValidMessage(request.resource.data, userId, conversationId)
+            && request.resource.data.userId == resource.data.userId
+            && request.resource.data.conversationId == resource.data.conversationId
+            && request.resource.data.createdAt == resource.data.createdAt;
+          allow delete: if isOwner(userId);
+        }
+      }
+    }
+  }
+}

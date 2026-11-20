@@ -15,6 +15,10 @@ enum class IntelligenceIntent(val label: String) {
   CHART_VISUALIZATION("Interactive Chart"),
   IMAGE_GENERATION("Image Generation"),
   IMAGE_EDITING("In-Chat Image Editing"),
+  MAPS_SEARCH("Google Maps & Places"),
+  IMAGE_TO_VIDEO("Image-to-Video Animation"),
+  TEXT_TO_VIDEO("Text-to-Video Generation"),
+  MUSIC_GENERATION("AI Music Generation"),
   DEVICE_ACTION("Device Assistant"),
   ALARM_REMINDER("Alarms & Reminders"),
   MULTI_TASK("Multi-Task Agent"),
@@ -307,6 +311,30 @@ data class ChartSpec(
 )
 
 @Serializable
+data class GeneratedVideoResult(
+  val mediaId: String,
+  val prompt: String,
+  val isImageToVideo: Boolean = false,
+  val filePath: String,
+  val mimeType: String = "video/mp4",
+  val durationSeconds: Int = 6,
+  val providerModel: String,
+  val createdAtMs: Long = System.currentTimeMillis(),
+)
+
+@Serializable
+data class GeneratedMusicResult(
+  val mediaId: String,
+  val prompt: String,
+  val filePath: String,
+  val mimeType: String = "audio/wav",
+  val durationSeconds: Int = 15,
+  val providerModel: String,
+  val lyricsOrNotes: String = "",
+  val createdAtMs: Long = System.currentTimeMillis(),
+)
+
+@Serializable
 sealed class ResponseBlock {
   @Serializable
   data class MarkdownText(val content: String) : ResponseBlock()
@@ -344,6 +372,12 @@ sealed class ResponseBlock {
 
   @Serializable
   data class GeneratedImageBlock(val image: GeneratedImageResult) : ResponseBlock()
+
+  @Serializable
+  data class GeneratedVideoBlock(val video: GeneratedVideoResult) : ResponseBlock()
+
+  @Serializable
+  data class GeneratedMusicBlock(val music: GeneratedMusicResult) : ResponseBlock()
 
   @Serializable
   data class RichLinkCardBlock(val cards: List<RichLinkMetadata>) : ResponseBlock()

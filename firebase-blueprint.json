@@ -1,0 +1,80 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and non-secret app preferences synchronized with Firestore",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "themeModeName": { "type": "string" },
+        "selectedModelId": { "type": "string" },
+        "hydrogenBackingModelId": { "type": "string" },
+        "groqReasoningModelId": { "type": "string" },
+        "imageModelId": { "type": "string" },
+        "voiceLanguageTag": { "type": "string" },
+        "voiceGenderName": { "type": "string" },
+        "composerGlowIntensity": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "displayName", "themeModeName", "selectedModelId", "composerGlowIntensity", "createdAt", "updatedAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "User-owned conversation thread metadata",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "clientUpdatedAtMs": { "type": "integer" },
+        "modelId": { "type": "string" },
+        "messageCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "title", "clientUpdatedAtMs", "createdAt", "updatedAt"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "User or assistant turn belonging to a user-owned conversation",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "conversationId": { "type": "string" },
+        "fromUser": { "type": "boolean" },
+        "text": { "type": "string" },
+        "clientTimestampMs": { "type": "integer" },
+        "modelUsed": { "type": "string" },
+        "categoryLabel": { "type": "string" },
+        "totalTokens": { "type": "integer" },
+        "errorFlag": { "type": "boolean" },
+        "blocksJson": { "type": "string" },
+        "attachmentsCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "conversationId", "fromUser", "text", "clientTimestampMs", "createdAt", "updatedAt"]
+    }
+  },
+  "auth": {
+    "providers": ["google.com"]
+  },
+  "firestore": {
+    "databaseId": "ai-studio-android-mousomig-cd5d84df-71c4-47e2-8d12-19bfe0958c63",
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile and non-sensitive settings"
+    },
+    "/users/{userId}/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "Private conversations owned by the user"
+    },
+    "/users/{userId}/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/Message" },
+      "description": "Private messages within a user-owned conversation"
+    }
+  }
+}

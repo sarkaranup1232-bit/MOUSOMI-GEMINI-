@@ -407,54 +407,6 @@ fun NeonChatComposer(
     label = "composer_border_width",
   )
 
-  // Unified primary action bar (single collection, zero home-screen duplication)
-  val contextualChips =
-    remember(hasImageContext, activeEditTarget) {
-      if (hasImageContext || activeEditTarget != null) {
-        listOf(
-          ComposerChipSpec("edit_image", "Edit Image", Icons.Outlined.Edit, NeonCyan) {
-            onContextualAction("edit_image")
-          },
-          ComposerChipSpec("analyze_image", "Analyze Image", Icons.Outlined.ImageSearch, ElectricBlue) {
-            onContextualAction("analyze_image")
-          },
-          ComposerChipSpec("enhance", "Enhance", Icons.Outlined.AutoFixHigh, NeonGreen) {
-            onContextualAction("enhance")
-          },
-          ComposerChipSpec("change_bg", "Background", Icons.Outlined.Wallpaper, NeonPurple) {
-            onContextualAction("change_bg")
-          },
-          ComposerChipSpec("add_text", "Add Text", Icons.Outlined.TextFields, WarmAmber) {
-            onContextualAction("add_text")
-          },
-          ComposerChipSpec("remove_obj", "Remove", Icons.Outlined.CleaningServices, NeonMagenta) {
-            onContextualAction("remove_obj")
-          },
-          ComposerChipSpec("draw_region", "Select Region", Icons.Outlined.Brush, NeonCyan) {
-            onContextualAction("draw_region")
-          },
-        )
-      } else {
-        listOf(
-          ComposerChipSpec("generate_image", "Image", Icons.Outlined.AutoAwesome, NeonMagenta) {
-            onContextualAction("open_image_tools")
-          },
-          ComposerChipSpec("camera", "Camera", Icons.Outlined.CameraAlt, NeonCyan) {
-            onOpenCameraCapture()
-          },
-          ComposerChipSpec("attach_file", "Attach", Icons.Outlined.AttachFile, ElectricBlue) {
-            onOpenAttachments()
-          },
-          ComposerChipSpec("deep_research", "Deep Research", Icons.Outlined.Science, NeonGreen) {
-            onContextualAction("deep_research")
-          },
-          ComposerChipSpec("more_tools", "Tools", Icons.Outlined.Tune, WarmAmber) {
-            onContextualAction("open_more_tools")
-          },
-        )
-      }
-    }
-
   val mergedBottomInsets = WindowInsets.navigationBars.union(WindowInsets.ime)
 
   Column(
@@ -583,47 +535,6 @@ fun NeonChatComposer(
       }
     }
 
-    // Primary organized action chip row
-    Row(
-      modifier =
-        Modifier
-          .fillMaxWidth()
-          .widthIn(max = 680.dp)
-          .horizontalScroll(rememberScrollState())
-          .padding(horizontal = 14.dp, vertical = 4.dp)
-          .testTag("contextual_action_chips_row"),
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-      contextualChips.forEach { chip ->
-        Surface(
-          onClick = chip.onClick,
-          shape = CircleShape,
-          color = if (colors.isDark) LiquidGlassDark else MaterialTheme.colorScheme.surfaceVariant,
-          border = BorderStroke(1.dp, chip.accent.copy(alpha = 0.42f)),
-          modifier = Modifier.testTag("context_chip_${chip.id}"),
-        ) {
-          Row(
-            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-          ) {
-            Icon(
-              imageVector = chip.icon,
-              contentDescription = null,
-              tint = chip.accent,
-              modifier = Modifier.size(15.dp),
-            )
-            Text(
-              text = chip.label,
-              color = onBg,
-              style = MaterialTheme.typography.labelMedium,
-              maxLines = 1,
-            )
-          }
-        }
-      }
-    }
-
     Row(
       modifier = Modifier.padding(top = 2.dp, bottom = 6.dp),
       horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -643,9 +554,10 @@ fun NeonChatComposer(
       )
     }
 
-    // Signature Concentric Multicolor Neon Capsule
+    // Signature Concentric Multicolor Neon Capsule with reserved outer glow bleed padding
+    val glowBleedDp = 6.dp
     val outerCorner = MousomiDesignTokens.ComposerCornerRadius
-    val innerCorner = (outerCorner - borderStrokeDp).coerceAtLeast(22.dp)
+    val innerCorner = (outerCorner - borderStrokeDp).coerceAtLeast(20.dp)
     val borderColors = remember(effectiveState) { MousomiDesignTokens.composerBorderColors(effectiveState) }
     val borderIntColors = remember(borderColors) { borderColors.map { it.toArgb() }.toIntArray() }
     val paint =
@@ -665,46 +577,53 @@ fun NeonChatComposer(
         Modifier
           .fillMaxWidth()
           .widthIn(max = 660.dp)
-          .padding(horizontal = 14.dp)
+          .padding(horizontal = 8.dp)
           .testTag("neon_chat_composer"),
     ) {
-      // Aspect-corrected continuous vivid neon border + soft contained glow
+      // Aspect-corrected continuous vivid neon border + soft unclipped glow around all 4 rounded corners
       Canvas(modifier = Modifier.matchParentSize()) {
         val w = size.width
         val h = size.height
-        if (w <= 4f || h <= 4f) return@Canvas
+        if (w <= 8f || h <= 8f) return@Canvas
+
+        val glowBleedPx = glowBleedDp.toPx()
+        val strokePx = borderStrokeDp.toPx()
+        val halfStroke = strokePx / 2f
+        val strokeInset = glowBleedPx + halfStroke
+        if (w <= strokeInset * 2f + 4f || h <= strokeInset * 2f + 4f) return@Canvas
 
         val cx = w / 2f
         val cy = h / 2f
-        val strokePx = borderStrokeDp.toPx()
-        val halfStroke = strokePx / 2f
         val outerCornerPx = outerCorner.toPx()
         val angle = if (reducedMotion) 25f else rotationDeg
 
-        // Normalized square-to-capsule scale transform keeps perimeter angular distribution uniform
-        // on wide single-line AND tall multi-line states, eliminating dim top/bottom midsections.
+        val drawW = (w - glowBleedPx * 2f).coerceAtLeast(4f)
+        val drawH = (h - glowBleedPx * 2f).coerceAtLeast(4f)
+
         val shader = SweepGradient(0f, 0f, borderIntColors, null)
         shaderMatrix.reset()
         shaderMatrix.setRotate(angle)
-        shaderMatrix.postScale(w / 2f, h / 2f)
+        shaderMatrix.postScale(drawW / 2f, drawH / 2f)
         shaderMatrix.postTranslate(cx, cy)
         shader.setLocalMatrix(shaderMatrix)
         paint.shader = shader
 
+        rectF.set(strokeInset, strokeInset, w - strokeInset, h - strokeInset)
+        val maxRadius = minOf(rectF.width(), rectF.height()) * 0.5f
+        val haloCorner = (outerCornerPx - halfStroke).coerceIn(8f, maxRadius)
+
         drawIntoCanvas { canvas ->
           val nc = canvas.nativeCanvas
 
-          // Layer 1: Contained soft bloom (strictly close to capsule, zero bleed into chips)
-          paint.strokeWidth = strokePx * 2.5f
-          paint.alpha = (animatedGlowAlpha * 0.34f * 255f).toInt().coerceIn(8, 255)
-          paint.maskFilter = BlurMaskFilter(strokePx * 2.1f, BlurMaskFilter.Blur.NORMAL)
-          rectF.set(halfStroke, halfStroke, w - halfStroke, h - halfStroke)
-          val haloCorner = (outerCornerPx - halfStroke).coerceAtLeast(8f)
+          // Layer 1: Smooth outer neon bloom inside reserved glowBleedPx (never clipped at corners or edges)
+          paint.strokeWidth = strokePx * 2.4f
+          paint.alpha = (animatedGlowAlpha * 0.42f * 255f).toInt().coerceIn(8, 255)
+          paint.maskFilter = BlurMaskFilter(glowBleedPx * 0.95f, BlurMaskFilter.Blur.NORMAL)
           nc.drawRoundRect(rectF, haloCorner, haloCorner, paint)
 
-          // Layer 2: Crisp luminous concentric stroke aligned with container perimeter
+          // Layer 2: Crisp luminous concentric border aligned to the inner pill perimeter
           paint.strokeWidth = strokePx
-          paint.alpha = (animatedGlowAlpha * 255f).toInt().coerceIn(32, 255)
+          paint.alpha = (animatedGlowAlpha * 255f).toInt().coerceIn(48, 255)
           paint.maskFilter = null
           nc.drawRoundRect(rectF, haloCorner, haloCorner, paint)
         }
@@ -715,7 +634,7 @@ fun NeonChatComposer(
         color =
           if (colors.isDark) Color(0xF20D111D)
           else colors.inputPillContainer.copy(alpha = 0.98f),
-        modifier = Modifier.fillMaxWidth().padding(borderStrokeDp),
+        modifier = Modifier.fillMaxWidth().padding(glowBleedDp + borderStrokeDp),
       ) {
         Row(
           modifier =

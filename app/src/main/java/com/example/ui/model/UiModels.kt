@@ -141,6 +141,7 @@ data class MousomiUiState(
   val isAttachmentSheetOpen: Boolean = false,
   val isProfileDialogOpen: Boolean = false,
   val isGeminiLiveOpen: Boolean = false,
+  val isGeminiLiveMinimized: Boolean = false,
   val isVoiceDialogOpen: Boolean = false,
   val isDrawingOverlayOpen: Boolean = false,
   val isQuickNoteDialogOpen: Boolean = false,
@@ -180,6 +181,8 @@ data class MousomiUiState(
   val isImageToolsSheetOpen: Boolean = false,
   val isMoreToolsSheetOpen: Boolean = false,
   val isCompletedPulseActive: Boolean = false,
+  val pendingNavigateToLens: Boolean = false,
+  val authSession: com.example.domain.auth.AuthUserSession = com.example.domain.auth.AuthUserSession(),
 ) {
   val pendingAttachment: AttachmentPreview?
     get() = pendingAttachments.firstOrNull()

@@ -10,7 +10,9 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.R
+import com.example.ai.firebase.FirebaseAiLogicService
 import com.example.ai.image.ImageStorageManager
+import com.example.ai.media.VideoAndMusicGenerationService
 import com.example.ai.provider.OneTapApiActivationService
 import com.example.core.alarms.ReminderManager
 import com.example.core.alarms.TimerManager
@@ -28,10 +30,13 @@ import com.example.core.security.SecurityValidator
 import com.example.core.storage.TempMediaCacheManager
 import com.example.core.voice.VoiceController
 import com.example.core.voice.VoiceState
+import com.example.data.remote.firestore.FirestoreCloudSyncRepository
 import com.example.data.repository.AddOnRepository
+import com.example.data.repository.ChatRepositoryImpl
 import com.example.data.repository.Part4OperationsRepository
 import com.example.data.repository.Part5Repository
 import com.example.domain.agent.AutonomousAgentOrchestrator
+import com.example.domain.auth.OptionalAuthGateway
 import com.example.domain.memory.LongTermMemoryManager
 import com.example.domain.memory.MemoryWriteOutcome
 import com.example.domain.model.ActiveEditImageTarget
@@ -50,7 +55,11 @@ import com.example.domain.model.DomainMessage
 import com.example.domain.model.EdgeLightConfig
 import com.example.domain.model.FloatingOrbConfig
 import com.example.domain.model.GeneratedImageResult
+import com.example.domain.model.GeneratedMusicResult
+import com.example.domain.model.GeneratedVideoResult
 import com.example.domain.model.ImageGenerationStatus
+import com.example.domain.model.LensAnalysisResult
+import com.example.domain.model.LensFollowUpTurn
 import com.example.domain.model.ManagedTaskItem
 import com.example.domain.model.MediaAttachmentKind
 import com.example.domain.model.MemoryCategory
@@ -84,6 +93,7 @@ import com.example.ui.model.MousomiUiState
 import com.example.ui.model.SuggestionIconType
 import com.example.ui.model.SuggestionItem
 import com.example.ui.theme.AppThemeMode
+import com.google.firebase.firestore.FirebaseFirestoreException
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -98,6 +108,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -130,6 +141,10 @@ class MousomiViewModel @Inject constructor(
   private val taskStateManager: TaskStateManager? = null,
   private val addOnRepository: AddOnRepository? = null,
   private val oneTapApiActivationService: OneTapApiActivationService? = null,
+  private val authGateway: OptionalAuthGateway? = null,
+  private val firestoreSync: FirestoreCloudSyncRepository? = null,
+  private val videoAndMusicService: VideoAndMusicGenerationService? = null,
+  private val firebaseAiLogicService: FirebaseAiLogicService? = null,
 ) : ViewModel() {
 
   constructor(
@@ -166,6 +181,10 @@ class MousomiViewModel @Inject constructor(
     taskStateManager = null,
     addOnRepository = null,
     oneTapApiActivationService = null,
+    authGateway = null,
+    firestoreSync = null,
+    videoAndMusicService = null,
+    firebaseAiLogicService = null,
   )
 
   val defaultSuggestions: List<SuggestionItem> =
@@ -194,6 +213,8 @@ class MousomiViewModel @Inject constructor(
   private var completedPulseJob: Job? = null
   private var messagesObserverJob: Job? = null
   private var imageVersionsObserverJob: Job? = null
+  private var firestoreConversationsJob: Job? = null
+  private var firestoreMessagesJob: Job? = null
   private var activeAssistantMessageId: String? = null
   private var liveSessionStartedAtMs: Long? = null
   private var liveSessionTurnsCount: Int = 0
@@ -201,6 +222,7 @@ class MousomiViewModel @Inject constructor(
   private var nextRequestDeepResearchFlag: Boolean = false
 
   init {
+    observeAuthAndCloudSync()
     observeSettings()
     observeConversations()
     observeVoiceState()
@@ -219,12 +241,77 @@ class MousomiViewModel @Inject constructor(
       _uiState.update {
         it.copy(
           isGeminiLiveOpen = false,
+          isGeminiLiveMinimized = false,
           isVoiceDialogOpen = false,
           responseState = AiResponseState.Cancelled,
           statusToastMessage = "Emergency Stop executed: all active sessions stopped.",
         )
       }
     }
+  }
+
+  private fun observeAuthAndCloudSync() {
+    val gateway = authGateway ?: return
+    gateway.registerBeforeSignOutHook { stopCloudAndMediaSessions() }
+    viewModelScope.launch {
+      gateway.observeSession().collectLatest { session ->
+        _uiState.update { it.copy(authSession = session) }
+        if (session.isSignedIn && session.uid.isNotBlank() && firestoreSync != null) {
+          firestoreSync.syncUserProfileAndPreferences(
+            displayName = session.displayName,
+            email = session.email,
+            photoUrl = session.photoUrl,
+            settings = buildCurrentAppSettingsSnapshot(),
+          )
+          startFirestoreConversationsObserver()
+        } else {
+          firestoreConversationsJob?.cancel()
+          firestoreMessagesJob?.cancel()
+        }
+      }
+    }
+  }
+
+  private fun startFirestoreConversationsObserver() {
+    val sync = firestoreSync ?: return
+    val impl = chatRepository as? ChatRepositoryImpl ?: return
+    firestoreConversationsJob?.cancel()
+    firestoreConversationsJob =
+      viewModelScope.launch {
+        sync.observeConversations()
+          .catch { error ->
+            val firestoreError = generateSequence(error) { it.cause }
+              .filterIsInstance<FirebaseFirestoreException>()
+              .firstOrNull()
+            if (firestoreError == null && error is CancellationException) throw error
+            emit(emptyList())
+          }
+          .collectLatest { remoteConvs ->
+            if (remoteConvs.isNotEmpty()) {
+              impl.mergeRemoteConversations(remoteConvs)
+            }
+          }
+      }
+  }
+
+  fun onSignOut() {
+    stopCloudAndMediaSessions()
+    viewModelScope.launch {
+      authGateway?.signOut()
+    }
+  }
+
+  private fun stopCloudAndMediaSessions() {
+    activeGenerationJob?.cancel()
+    activeGenerationJob = null
+    firestoreConversationsJob?.cancel()
+    firestoreMessagesJob?.cancel()
+    messagesObserverJob?.cancel()
+    imageVersionsObserverJob?.cancel()
+    completedPulseJob?.cancel()
+    activeAssistantMessageId = null
+    voiceController.stopListening()
+    voiceController.stopSpeaking()
   }
 
   fun refreshPowerState() {
@@ -459,6 +546,28 @@ class MousomiViewModel @Inject constructor(
           }
         }
     }
+
+    firestoreMessagesJob?.cancel()
+    val sync = firestoreSync
+    val impl = chatRepository as? ChatRepositoryImpl
+    if (sync != null && impl != null && authGateway?.getCurrentSession()?.isSignedIn == true) {
+      firestoreMessagesJob =
+        viewModelScope.launch {
+          sync.observeMessages(conversationId)
+            .catch { error ->
+              val firestoreError = generateSequence(error) { it.cause }
+                .filterIsInstance<FirebaseFirestoreException>()
+                .firstOrNull()
+              if (firestoreError == null && error is CancellationException) throw error
+              emit(emptyList())
+            }
+            .collectLatest { remoteMsgs ->
+              if (remoteMsgs.isNotEmpty()) {
+                impl.mergeRemoteMessages(remoteMsgs)
+              }
+            }
+        }
+    }
   }
 
   fun onClearStatusToast() {
@@ -602,6 +711,9 @@ class MousomiViewModel @Inject constructor(
       }
       "open_more_tools" -> {
         _uiState.update { it.copy(isMoreToolsSheetOpen = true) }
+      }
+      "open_lens" -> {
+        onRequestOpenLens()
       }
       "generate_image", "create_image" -> {
         nextRequestImageGenFlag = true
@@ -830,6 +942,70 @@ class MousomiViewModel @Inject constructor(
     }
   }
 
+  fun onSaveGeneratedVideo(video: GeneratedVideoResult) {
+    if (video.filePath.isBlank()) return
+    viewModelScope.launch {
+      val res = videoAndMusicService?.saveVideoToGallery(video.filePath, video.prompt)
+      val toast =
+        res?.fold(
+          onSuccess = { "Saved video to Movies/Mousomi AI" },
+          onFailure = { err -> err.message ?: "Unable to save video." },
+        ) ?: "Video stored at: ${video.filePath}"
+      _uiState.update { it.copy(statusToastMessage = toast) }
+    }
+  }
+
+  fun onShareGeneratedVideo(context: Context, video: GeneratedVideoResult) {
+    if (video.filePath.isBlank()) return
+    runCatching {
+      val uri =
+        videoAndMusicService?.getShareableMediaUri(video.filePath)
+          ?: FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(video.filePath))
+      val intent =
+        Intent(Intent.ACTION_SEND).apply {
+          type = video.mimeType.ifBlank { "video/mp4" }
+          putExtra(Intent.EXTRA_STREAM, uri)
+          putExtra(Intent.EXTRA_TEXT, video.prompt)
+          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+      context.startActivity(Intent.createChooser(intent, "Share Mousomi Video"))
+    }.onFailure { err ->
+      _uiState.update { it.copy(statusToastMessage = "Unable to share video: ${err.localizedMessage}") }
+    }
+  }
+
+  fun onSaveGeneratedMusic(music: GeneratedMusicResult) {
+    if (music.filePath.isBlank()) return
+    viewModelScope.launch {
+      val res = videoAndMusicService?.saveAudioToMusicFolder(music.filePath, music.prompt, music.mimeType)
+      val toast =
+        res?.fold(
+          onSuccess = { "Saved audio track to Music/Mousomi AI" },
+          onFailure = { err -> err.message ?: "Unable to save audio track." },
+        ) ?: "Audio stored at: ${music.filePath}"
+      _uiState.update { it.copy(statusToastMessage = toast) }
+    }
+  }
+
+  fun onShareGeneratedMusic(context: Context, music: GeneratedMusicResult) {
+    if (music.filePath.isBlank()) return
+    runCatching {
+      val uri =
+        videoAndMusicService?.getShareableMediaUri(music.filePath)
+          ?: FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(music.filePath))
+      val intent =
+        Intent(Intent.ACTION_SEND).apply {
+          type = music.mimeType.ifBlank { "audio/*" }
+          putExtra(Intent.EXTRA_STREAM, uri)
+          putExtra(Intent.EXTRA_TEXT, music.prompt)
+          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+      context.startActivity(Intent.createChooser(intent, "Share Mousomi Music"))
+    }.onFailure { err ->
+      _uiState.update { it.copy(statusToastMessage = "Unable to share music: ${err.localizedMessage}") }
+    }
+  }
+
   fun onBeginEditMessage(message: ChatMessage) {
     if (!message.isUser || _uiState.value.isGenerating) return
     _uiState.update {
@@ -860,6 +1036,17 @@ class MousomiViewModel @Inject constructor(
     if (trimmed.isEmpty() && attachments.isEmpty() && editTarget == null) return
 
     val editTargetId = state.editingMessageId
+    if (editTargetId == null && attachments.isEmpty() && editTarget == null && shouldLaunchMousomiLens(trimmed)) {
+      _uiState.update {
+        it.copy(
+          inputText = "",
+          pendingNavigateToLens = true,
+          statusToastMessage = "Opening Mousomi Lens live visual scanner…",
+        )
+      }
+      return
+    }
+
     if (editTargetId != null) {
       val editMessage = state.messages.firstOrNull { it.id == editTargetId }
       if (editMessage != null) {
@@ -971,6 +1158,7 @@ class MousomiViewModel @Inject constructor(
       _uiState.update {
         it.copy(
           isGeminiLiveOpen = false,
+          isGeminiLiveMinimized = false,
           isVoiceDialogOpen = false,
           statusToastMessage = "Emergency Stop executed: active voice, generation, and screen sharing stopped.",
         )
@@ -1724,6 +1912,98 @@ class MousomiViewModel @Inject constructor(
     _uiState.update { it.copy(isProfileDialogOpen = open) }
   }
 
+  fun onRequestOpenLens() {
+    _uiState.update {
+      it.copy(
+        isAttachmentSheetOpen = false,
+        isMoreToolsSheetOpen = false,
+        isImageToolsSheetOpen = false,
+        pendingNavigateToLens = true,
+      )
+    }
+  }
+
+  fun onConsumeNavigateToLens() {
+    _uiState.update { it.copy(pendingNavigateToLens = false) }
+  }
+
+  fun onImportLensAnalysisToChat(
+    result: LensAnalysisResult,
+    followUpTurns: List<LensFollowUpTurn>,
+  ) {
+    val convId = _uiState.value.activeConversationId
+    val now = System.currentTimeMillis()
+    val captureUri =
+      result.capturedFilePath
+        .takeIf { it.isNotBlank() }
+        ?.let { Uri.fromFile(File(it)).toString() }
+    val userPrompt =
+      "Analyzed with Mousomi Lens (${result.mode.label} mode): ${result.identifiedName}"
+    val assistantSummary =
+      buildString {
+        append(result.toChatSummaryMarkdown())
+        if (followUpTurns.isNotEmpty()) {
+          appendLine()
+          appendLine()
+          appendLine("### Lens Follow-Up Q&A")
+          followUpTurns.forEach { turn ->
+            appendLine("**Q:** ${turn.question}")
+            appendLine(turn.answerMarkdown)
+            appendLine()
+          }
+        }
+      }.trim()
+    val blocks =
+      buildList {
+        if (result.verifiedSources.isNotEmpty()) {
+          add(ResponseBlock.SourceCitations(result.verifiedSources))
+        }
+      }
+
+    viewModelScope.launch {
+      chatRepository.ensureConversation(convId, "Lens: ${result.identifiedName}".take(42))
+      chatRepository.upsertMessage(
+        DomainMessage(
+          id = "msg_${UUID.randomUUID()}",
+          conversationId = convId,
+          isUser = true,
+          text = userPrompt,
+          timestampMs = now,
+          imageUris = listOfNotNull(captureUri),
+        )
+      )
+      chatRepository.upsertMessage(
+        DomainMessage(
+          id = "msg_${UUID.randomUUID()}",
+          conversationId = convId,
+          isUser = false,
+          text = assistantSummary,
+          timestampMs = now + 1,
+          modelUsed = result.modelUsed.ifBlank { "Mousomi Lens Vision" },
+          categoryLabel = "Mousomi Lens",
+          blocks = blocks,
+        )
+      )
+      _uiState.update { it.copy(statusToastMessage = "Lens analysis added to Chat") }
+    }
+  }
+
+  private fun shouldLaunchMousomiLens(prompt: String): Boolean {
+    val lower = prompt.trim().lowercase(Locale.US)
+    if (lower.length > 90) return false
+    return lower == "open lens" ||
+      lower == "open mousomi lens" ||
+      lower == "start lens" ||
+      lower == "live lens" ||
+      lower == "launch lens" ||
+      lower.contains("open lens") ||
+      lower.contains("mousomi lens") ||
+      lower.contains("open the camera and analyze") ||
+      lower.contains("open camera and analyze") ||
+      lower.contains("open camera to scan") ||
+      lower.contains("start visual scan")
+  }
+
   fun onToggleGeminiLive(open: Boolean) {
     if (open) {
       liveSessionStartedAtMs = System.currentTimeMillis()
@@ -1754,7 +2034,33 @@ class MousomiViewModel @Inject constructor(
       voiceController.stopListening()
       voiceController.stopSpeaking()
     }
-    _uiState.update { it.copy(isGeminiLiveOpen = open) }
+    _uiState.update {
+      it.copy(
+        isGeminiLiveOpen = open,
+        isGeminiLiveMinimized = if (!open) false else false,
+      )
+    }
+  }
+
+  fun onToggleGeminiLiveMinimized(minimized: Boolean) {
+    _uiState.update {
+      it.copy(
+        isGeminiLiveMinimized = if (it.isGeminiLiveOpen) minimized else false,
+      )
+    }
+  }
+
+  fun onSendLiveFollowUp(promptText: String) {
+    val clean = promptText.trim()
+    if (clean.isEmpty()) return
+    liveSessionTurnsCount += 1
+    viewModelScope.launch {
+      executePrompt(
+        conversationId = _uiState.value.activeConversationId,
+        prompt = clean,
+        attachments = _uiState.value.pendingAttachments,
+      )
+    }
   }
 
   fun onToggleVoiceDialog(open: Boolean) {
@@ -2068,6 +2374,23 @@ class MousomiViewModel @Inject constructor(
               CapabilityActivationBadge("reasoning", "Reasoning & Code", true, "Saved key ready"),
               CapabilityActivationBadge("vision", "Vision & Photos", false, "Requires Gemini key"),
               CapabilityActivationBadge("image_gen", "Image Gen & Edit", false, "Requires Gemini key"),
+              CapabilityActivationBadge("voice", "Voice & Live", hasMic, if (hasMic) "Mic ready" else "Grant mic when needed"),
+            ),
+        )
+      firebaseAiLogicService?.isAvailable() == true ->
+        OneTapActivationResult(
+          status = ActivationHealthStatus.PARTIALLY_ACTIVE,
+          detectedProvider = DetectedProviderKind.FIREBASE_AI_LOGIC,
+          statusMessage =
+            "Firebase AI Logic + App Check active (no user API key needed for Gemini 3.8 Flash chat, vision, audio & Search). Note: Nano Banana image gen, Veo video, and Lyria music require Firebase Blaze billing or a paid Gemini API key.",
+          capabilities =
+            listOf(
+              CapabilityActivationBadge("chat", "AI Chat", true, "Firebase AI Logic"),
+              CapabilityActivationBadge("reasoning", "Reasoning & Code", true, "Firebase AI Logic"),
+              CapabilityActivationBadge("vision", "Vision & Photos", true, "Firebase AI Logic"),
+              CapabilityActivationBadge("research", "Search & Maps", true, "Search grounding ready"),
+              CapabilityActivationBadge("image_gen", "Image Gen & Edit", true, "Blaze or paid key"),
+              CapabilityActivationBadge("video_music", "Veo Video & Music", false, "Requires paid Gemini API billing"),
               CapabilityActivationBadge("voice", "Voice & Live", hasMic, if (hasMic) "Mic ready" else "Grant mic when needed"),
             ),
         )

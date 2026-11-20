@@ -2,6 +2,7 @@ package com.example.ai.image
 
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
@@ -9,6 +10,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.util.Base64
 import androidx.core.content.FileProvider
+import com.example.ai.firebase.FirebaseAiLogicService
 import com.example.ai.provider.api.GeminiApiService
 import com.example.ai.provider.api.ProxyApiService
 import com.example.ai.provider.dto.GeminiContent
@@ -90,6 +92,22 @@ class ImageStorageManager @Inject constructor(
     )
   }
 
+  suspend fun saveBitmap(
+    mediaId: String,
+    bitmap: Bitmap,
+  ): SavedImageInfo = withContext(Dispatchers.IO) {
+    val file = File(outputDir, "$mediaId.png")
+    file.outputStream().use { out ->
+      bitmap.compress(Bitmap.CompressFormat.PNG, 96, out)
+    }
+    SavedImageInfo(
+      filePath = file.absolutePath,
+      width = bitmap.width.coerceAtLeast(0),
+      height = bitmap.height.coerceAtLeast(0),
+      mimeType = "image/png",
+    )
+  }
+
   fun getShareableContentUri(filePath: String): Uri {
     val file = File(filePath)
     return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
@@ -146,6 +164,7 @@ class CompositeImageGenerationProvider @Inject constructor(
   private val proxyApiService: ProxyApiService,
   private val securityValidator: SecurityValidator,
   private val storageManager: ImageStorageManager,
+  private val firebaseAiLogicService: FirebaseAiLogicService? = null,
 ) : ImageGenerationProvider {
 
   override fun generateOrEdit(request: ImageGenerationRequest): Flow<ImageGenerationEvent> = flow {
@@ -170,15 +189,79 @@ class CompositeImageGenerationProvider @Inject constructor(
     } else {
       val key = settings.geminiApiKey.trim()
       if (key.isEmpty()) {
+        if (firebaseAiLogicService != null && firebaseAiLogicService.isAvailable()) {
+          executeViaFirebaseAiLogic(request, modelId, firebaseAiLogicService, this)
+          return@flow
+        }
         emit(
           ImageGenerationEvent.Failure(
-            "Image generation requires a Google Gemini API key or HTTPS Backend Proxy. Open Settings to configure one."
+            "Image generation requires Firebase AI Logic (with Blaze plan) or a Google Gemini API key / HTTPS Backend Proxy in Settings."
           )
         )
         return@flow
       }
       executeViaGemini(request, modelId, key, this)
     }
+  }
+
+  private suspend fun executeViaFirebaseAiLogic(
+    request: ImageGenerationRequest,
+    modelId: String,
+    firebaseAi: FirebaseAiLogicService,
+    collector: kotlinx.coroutines.flow.FlowCollector<ImageGenerationEvent>,
+  ) {
+    collector.emit(ImageGenerationEvent.Stage(ImageGenerationStatus.GENERATING))
+    val sourceBitmap =
+      request.sourceImage?.let { payload ->
+        val raw = Base64.decode(payload.base64Data, Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(raw, 0, raw.size)
+      }
+    val maskBitmap =
+      request.regionOverlayImage?.let { payload ->
+        val raw = Base64.decode(payload.base64Data, Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(raw, 0, raw.size)
+      }
+    val result =
+      firebaseAi.generateOrEditImage(
+        prompt = request.prompt,
+        modelId = modelId,
+        sourceBitmap = sourceBitmap,
+        maskBitmap = maskBitmap,
+      )
+    result.fold(
+      onSuccess = { gen ->
+        collector.emit(ImageGenerationEvent.Stage(ImageGenerationStatus.FINALIZING))
+        val mediaId = "img_${UUID.randomUUID()}"
+        val rootId = request.rootMediaId ?: mediaId
+        val saved = storageManager.saveBitmap(mediaId, gen.bitmap)
+        collector.emit(
+          ImageGenerationEvent.Success(
+            GeneratedImageResult(
+              mediaId = mediaId,
+              rootMediaId = rootId,
+              parentMediaId = request.parentMediaId,
+              versionNumber = request.nextVersionNumber,
+              prompt = request.prompt,
+              editInstruction = request.editInstruction,
+              filePath = saved.filePath,
+              mimeType = saved.mimeType,
+              width = saved.width,
+              height = saved.height,
+              providerModel = gen.modelUsed,
+              captionText = gen.captionText,
+              status = ImageGenerationStatus.COMPLETED,
+            )
+          )
+        )
+      },
+      onFailure = { err ->
+        collector.emit(
+          ImageGenerationEvent.Failure(
+            err.message ?: "Firebase AI Logic image generation failed.",
+          )
+        )
+      },
+    )
   }
 
   private suspend fun executeViaGemini(

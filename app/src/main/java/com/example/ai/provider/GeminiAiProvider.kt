@@ -1,5 +1,6 @@
 package com.example.ai.provider
 
+import com.example.ai.firebase.FirebaseAiLogicService
 import com.example.ai.provider.api.GeminiApiService
 import com.example.ai.provider.dto.GeminiContent
 import com.example.ai.provider.dto.GeminiGenerateRequest
@@ -14,6 +15,7 @@ import com.example.domain.model.TokenUsage
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.Json
 
@@ -21,6 +23,7 @@ import kotlinx.serialization.json.Json
 class GeminiAiProvider @Inject constructor(
   private val apiService: GeminiApiService,
   private val json: Json,
+  private val firebaseAiLogicService: FirebaseAiLogicService? = null,
 ) : AiProvider {
 
   override val providerType: ProviderType = ProviderType.GEMINI
@@ -28,7 +31,11 @@ class GeminiAiProvider @Inject constructor(
   override fun streamChat(request: AiChatRequest): Flow<AiStreamEvent> = flow {
     val apiKey = request.settings.geminiApiKey.trim()
     if (apiKey.isEmpty()) {
-      throw AiProviderException("Google Gemini API key is not configured.")
+      if (firebaseAiLogicService != null && firebaseAiLogicService.isAvailable()) {
+        emitAll(firebaseAiLogicService.streamMultimodalChat(request))
+        return@flow
+      }
+      throw AiProviderException("Google Gemini API key is not configured and Firebase AI Logic is unavailable.")
     }
 
     val contents =

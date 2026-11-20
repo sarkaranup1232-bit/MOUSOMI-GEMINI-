@@ -3,6 +3,7 @@ package com.example.domain.orchestrator
 import com.example.ai.image.ImageGenerationEvent
 import com.example.ai.image.ImageGenerationProvider
 import com.example.ai.image.ImageGenerationRequest
+import com.example.ai.media.VideoAndMusicGenerationService
 import com.example.ai.provider.AiChatRequest
 import com.example.ai.provider.AiProvider
 import com.example.ai.provider.AiStreamEvent
@@ -59,6 +60,7 @@ class Part3IntelligencePipeline @Inject constructor(
   private val deviceActionExecutor: DeviceActionExecutor? = null,
   private val reminderManager: ReminderManager? = null,
   private val taskExecutionEngine: TaskExecutionEngine? = null,
+  private val videoAndMusicService: VideoAndMusicGenerationService? = null,
 ) {
 
   suspend fun handleSpecialIntent(
@@ -326,6 +328,96 @@ class Part3IntelligencePipeline @Inject constructor(
           fullText = narrative,
           blocks = blocks,
           modelName = "Mousomi Multi-Task Agent",
+        )
+      }
+
+      IntelligenceIntent.MAPS_SEARCH -> {
+        collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Searching("Searching verified Google Maps data…")))
+        val mapsRes = searchService.searchMaps(cleanPrompt, settings)
+        if (mapsRes.isFailure) {
+          val reason = mapsRes.exceptionOrNull()?.message ?: "Maps search failed."
+          return PipelinePreparation.Aborted("Maps Grounding Unavailable: $reason")
+        }
+        val sources = mapsRes.getOrThrow().results
+        val blocks =
+          if (sources.isNotEmpty()) listOf(ResponseBlock.SourceCitations(sources)) else emptyList()
+        collector.emit(OrchestrationEvent.BlocksUpdated(blocks))
+        val sourceContext = formatSourcesForPrompt(sources)
+        PipelinePreparation.ContinueWithLlm(
+          extraSystemContext = sourceContext,
+          preEmittedBlocks = blocks,
+        )
+      }
+
+      IntelligenceIntent.IMAGE_TO_VIDEO,
+      IntelligenceIntent.TEXT_TO_VIDEO -> {
+        val svc =
+          videoAndMusicService
+            ?: return PipelinePreparation.Aborted("Video generation engine is not initialized.")
+        val sourceImage = request.currentTurnImages.firstOrNull()
+        if (intent == IntelligenceIntent.IMAGE_TO_VIDEO && sourceImage == null) {
+          return PipelinePreparation.Aborted(
+            "Attach an image first to animate it into a video, or ask to generate a video from text."
+          )
+        }
+        collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Generating("Generating video…")))
+        val videoResult =
+          svc.generateVideo(
+            prompt = cleanPrompt.ifBlank { "Animate this scene smoothly with natural camera motion." },
+            sourceImage = sourceImage,
+            settings = settings,
+            onProgress = { msg ->
+              collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Generating(msg)))
+            },
+          )
+        if (videoResult.isFailure) {
+          return PipelinePreparation.Aborted(
+            videoResult.exceptionOrNull()?.message ?: "Video generation failed."
+          )
+        }
+        val generated = videoResult.getOrThrow()
+        val blocks = listOf(ResponseBlock.GeneratedVideoBlock(generated))
+        collector.emit(OrchestrationEvent.BlocksUpdated(blocks))
+        PipelinePreparation.AlreadyCompleted(
+          fullText = "Generated ${if (generated.isImageToVideo) "image-to-video animation" else "video"} using **${generated.providerModel}**.",
+          blocks = blocks,
+          modelName = generated.providerModel,
+        )
+      }
+
+      IntelligenceIntent.MUSIC_GENERATION -> {
+        val svc =
+          videoAndMusicService
+            ?: return PipelinePreparation.Aborted("Music generation engine is not initialized.")
+        collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Generating("Generating AI music…")))
+        val musicResult =
+          svc.generateMusic(
+            prompt = cleanPrompt.ifBlank { "Compose an uplifting ambient instrumental track." },
+            settings = settings,
+            onProgress = { msg ->
+              collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Generating(msg)))
+            },
+          )
+        if (musicResult.isFailure) {
+          return PipelinePreparation.Aborted(
+            musicResult.exceptionOrNull()?.message ?: "Music generation failed."
+          )
+        }
+        val generated = musicResult.getOrThrow()
+        val blocks = listOf(ResponseBlock.GeneratedMusicBlock(generated))
+        collector.emit(OrchestrationEvent.BlocksUpdated(blocks))
+        val narrative =
+          buildString {
+            appendLine("Generated AI music track using **${generated.providerModel}**.")
+            if (generated.lyricsOrNotes.isNotBlank()) {
+              appendLine()
+              appendLine(generated.lyricsOrNotes)
+            }
+          }.trim()
+        PipelinePreparation.AlreadyCompleted(
+          fullText = narrative,
+          blocks = blocks,
+          modelName = generated.providerModel,
         )
       }
 

@@ -1,15 +1,22 @@
 package com.example.ui.components
 
+import android.media.MediaPlayer
+import android.net.Uri
+import android.widget.VideoView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Alarm
@@ -20,12 +27,17 @@ import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Checklist
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.Place
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Science
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.HorizontalDivider
@@ -36,23 +48,31 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import coil.compose.AsyncImage
 import com.example.domain.model.AgentTaskLifecycleState
 import com.example.domain.model.DeviceActionResult
 import com.example.domain.model.GeneratedImageResult
+import com.example.domain.model.GeneratedMusicResult
+import com.example.domain.model.GeneratedVideoResult
 import com.example.domain.model.ImageVersionRecord
 import com.example.domain.model.ManagedTaskItem
 import com.example.domain.model.ReminderEntry
@@ -62,6 +82,7 @@ import com.example.ui.theme.LocalMousomiColors
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonGreen
 import com.example.ui.theme.WarmAmber
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -83,6 +104,10 @@ fun ResponseBlockRenderer(
   onRetryTask: (ManagedTaskItem) -> Unit = {},
   onCancelTask: (ManagedTaskItem) -> Unit = {},
   onOpenAssistantHub: () -> Unit = {},
+  onSaveVideo: (GeneratedVideoResult) -> Unit = {},
+  onShareVideo: (GeneratedVideoResult) -> Unit = {},
+  onSaveMusic: (GeneratedMusicResult) -> Unit = {},
+  onShareMusic: (GeneratedMusicResult) -> Unit = {},
 ) {
   when (block) {
     is ResponseBlock.MarkdownText ->
@@ -120,6 +145,20 @@ fun ResponseBlockRenderer(
         modifier = modifier,
       )
     }
+    is ResponseBlock.GeneratedVideoBlock ->
+      GeneratedVideoBlockCard(
+        video = block.video,
+        onSaveVideo = { onSaveVideo(block.video) },
+        onShareVideo = { onShareVideo(block.video) },
+        modifier = modifier,
+      )
+    is ResponseBlock.GeneratedMusicBlock ->
+      GeneratedMusicBlockCard(
+        music = block.music,
+        onSaveMusic = { onSaveMusic(block.music) },
+        onShareMusic = { onShareMusic(block.music) },
+        modifier = modifier,
+      )
     is ResponseBlock.RichLinkCardBlock ->
       RichAppCardsGroup(cards = block.cards, modifier = modifier)
     is ResponseBlock.TaskPlanBlock ->
@@ -615,7 +654,6 @@ private fun ResearchReportBlockCard(
   }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SourceCitationsBlockCard(
   sources: List<SearchResultItem>,
@@ -627,43 +665,304 @@ private fun SourceCitationsBlockCard(
 
   Column(
     modifier = modifier.fillMaxWidth().testTag("source_citations_list"),
-    verticalArrangement = Arrangement.spacedBy(6.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
     Text(
       text = "Verified Sources (${sources.size})",
       color = colors.mutedText,
       style = MaterialTheme.typography.labelMedium,
-      fontWeight = FontWeight.Medium,
+      fontWeight = FontWeight.SemiBold,
     )
-    FlowRow(
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
-      verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-      sources.take(8).forEach { src ->
-        Surface(
-          onClick = { runCatching { uriHandler.openUri(src.url) } },
-          shape = RoundedCornerShape(12.dp),
-          color = colors.activeChipContainer,
-          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+    sources.take(8).forEach { src ->
+      val isMapLink =
+        src.url.contains("maps.google", ignoreCase = true) ||
+          src.url.contains("google.com/maps", ignoreCase = true)
+      Surface(
+        onClick = { runCatching { uriHandler.openUri(src.url) } },
+        shape = RoundedCornerShape(14.dp),
+        color = colors.activeChipContainer.copy(alpha = 0.72f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-          Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-          ) {
+          Box(contentAlignment = Alignment.Center, modifier = Modifier.size(26.dp)) {
+            if (isMapLink) {
+              Icon(
+                imageVector = Icons.Outlined.Place,
+                contentDescription = "Google Maps location",
+                tint = NeonGreen,
+                modifier = Modifier.size(20.dp),
+              )
+            } else {
+              val faviconUrl = "https://www.google.com/s2/favicons?domain=${src.sourceDomain}&sz=64"
+              AsyncImage(
+                model = faviconUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(20.dp).clip(CircleShape),
+              )
+            }
+          }
+          Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
-              text = src.title.take(28),
-              style = MaterialTheme.typography.labelSmall,
+              text = src.title.ifBlank { src.sourceDomain },
+              style = MaterialTheme.typography.labelLarge,
+              fontWeight = FontWeight.Medium,
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
             )
-            Icon(
-              imageVector = Icons.Outlined.OpenInNew,
-              contentDescription = "Open source ${src.url}",
-              modifier = Modifier.size(13.dp),
-              tint = MaterialTheme.colorScheme.primary,
-            )
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              Icon(
+                imageVector = if (isMapLink) Icons.Outlined.Place else Icons.Outlined.Public,
+                contentDescription = null,
+                tint = NeonCyan,
+                modifier = Modifier.size(12.dp),
+              )
+              Text(
+                text = "${src.sourceDomain} • ${src.verificationStatus.label}",
+                color = colors.mutedText,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
+            if (src.snippet.isNotBlank()) {
+              Text(
+                text = src.snippet.take(110),
+                color = colors.mutedText.copy(alpha = 0.9f),
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
           }
+          Icon(
+            imageVector = Icons.Outlined.OpenInNew,
+            contentDescription = "Open source ${src.url}",
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.primary,
+          )
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun GeneratedVideoBlockCard(
+  video: GeneratedVideoResult,
+  onSaveVideo: () -> Unit,
+  onShareVideo: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val colors = LocalMousomiColors.current
+  val fileExists = remember(video.filePath) { video.filePath.isNotBlank() && File(video.filePath).exists() }
+  var isPlaying by remember(video.mediaId) { mutableStateOf(false) }
+  var videoViewRef by remember(video.mediaId) { mutableStateOf<VideoView?>(null) }
+
+  Surface(
+    shape = RoundedCornerShape(18.dp),
+    color = colors.activeChipContainer.copy(alpha = 0.65f),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)),
+    modifier = modifier.fillMaxWidth().testTag("generated_video_card"),
+  ) {
+    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          Icon(Icons.Outlined.VideoLibrary, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp))
+          Text(
+            text = if (video.isImageToVideo) "Image-to-Video Animation" else "Generated Video",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+          )
+        }
+        Text(
+          text = "${video.durationSeconds}s • ${video.providerModel}",
+          color = colors.mutedText,
+          style = MaterialTheme.typography.labelSmall,
+        )
+      }
+
+      if (fileExists) {
+        AndroidView(
+          factory = { ctx ->
+            VideoView(ctx).apply {
+              setVideoURI(Uri.fromFile(File(video.filePath)))
+              setOnPreparedListener { mp -> mp.isLooping = true }
+              setOnCompletionListener { isPlaying = false }
+              videoViewRef = this
+            }
+          },
+          modifier =
+            Modifier
+              .fillMaxWidth()
+              .height(210.dp)
+              .clip(RoundedCornerShape(14.dp)),
+        )
+      } else {
+        Text(
+          text = "Video file unavailable at ${video.filePath}",
+          color = colors.mutedText,
+          style = MaterialTheme.typography.bodySmall,
+        )
+      }
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        OutlinedButton(
+          onClick = {
+            val view = videoViewRef
+            if (view != null) {
+              if (view.isPlaying) {
+                view.pause()
+                isPlaying = false
+              } else {
+                view.start()
+                isPlaying = true
+              }
+            }
+          },
+          enabled = fileExists,
+        ) {
+          Icon(
+            imageVector = if (isPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+            contentDescription = if (isPlaying) "Pause video" else "Play video",
+            modifier = Modifier.size(16.dp),
+          )
+          Spacer(modifier = Modifier.size(4.dp))
+          Text(if (isPlaying) "Pause" else "Play")
+        }
+        OutlinedButton(onClick = onSaveVideo, enabled = fileExists) {
+          Icon(Icons.Outlined.Download, contentDescription = "Save video", modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.size(4.dp))
+          Text("Save")
+        }
+        OutlinedButton(onClick = onShareVideo, enabled = fileExists) {
+          Icon(Icons.Outlined.Share, contentDescription = "Share video", modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.size(4.dp))
+          Text("Share")
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun GeneratedMusicBlockCard(
+  music: GeneratedMusicResult,
+  onSaveMusic: () -> Unit,
+  onShareMusic: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val colors = LocalMousomiColors.current
+  val context = LocalContext.current
+  val fileExists = remember(music.filePath) { music.filePath.isNotBlank() && File(music.filePath).exists() }
+  var isPlaying by remember(music.mediaId) { mutableStateOf(false) }
+  var player by remember(music.mediaId) { mutableStateOf<MediaPlayer?>(null) }
+
+  DisposableEffect(music.mediaId) {
+    onDispose {
+      runCatching {
+        player?.stop()
+        player?.release()
+      }
+      player = null
+    }
+  }
+
+  Surface(
+    shape = RoundedCornerShape(18.dp),
+    color = colors.activeChipContainer.copy(alpha = 0.65f),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)),
+    modifier = modifier.fillMaxWidth().testTag("generated_music_card"),
+  ) {
+    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          Icon(Icons.Outlined.MusicNote, contentDescription = null, tint = WarmAmber, modifier = Modifier.size(18.dp))
+          Text(
+            text = "AI Music Track",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+          )
+        }
+        Text(
+          text = music.providerModel,
+          color = colors.mutedText,
+          style = MaterialTheme.typography.labelSmall,
+        )
+      }
+
+      if (music.lyricsOrNotes.isNotBlank()) {
+        Text(
+          text = music.lyricsOrNotes.take(180),
+          color = colors.mutedText,
+          style = MaterialTheme.typography.bodySmall,
+        )
+      }
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        OutlinedButton(
+          onClick = {
+            if (!fileExists) return@OutlinedButton
+            val current = player
+            if (current != null && current.isPlaying) {
+              current.pause()
+              isPlaying = false
+            } else if (current != null) {
+              current.start()
+              isPlaying = true
+            } else {
+              runCatching {
+                val created =
+                  MediaPlayer.create(context, Uri.fromFile(File(music.filePath)))?.apply {
+                    setOnCompletionListener { isPlaying = false }
+                    start()
+                  }
+                player = created
+                isPlaying = created != null
+              }
+            }
+          },
+          enabled = fileExists,
+        ) {
+          Icon(
+            imageVector = if (isPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+            contentDescription = if (isPlaying) "Pause track" else "Play track",
+            modifier = Modifier.size(16.dp),
+          )
+          Spacer(modifier = Modifier.size(4.dp))
+          Text(if (isPlaying) "Pause" else "Play Track")
+        }
+        OutlinedButton(onClick = onSaveMusic, enabled = fileExists) {
+          Icon(Icons.Outlined.Download, contentDescription = "Save audio", modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.size(4.dp))
+          Text("Save")
+        }
+        OutlinedButton(onClick = onShareMusic, enabled = fileExists) {
+          Icon(Icons.Outlined.Share, contentDescription = "Share audio", modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.size(4.dp))
+          Text("Share")
         }
       }
     }

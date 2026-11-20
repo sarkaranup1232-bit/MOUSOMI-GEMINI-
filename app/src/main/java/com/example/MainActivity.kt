@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -40,6 +41,8 @@ import androidx.navigation.compose.rememberNavController
 import com.example.core.assistant.AssistantRoleHelper
 import com.example.core.edge.EdgeLightStateMapper
 import com.example.core.permissions.PermissionCenterHelper
+import com.example.core.security.configureAppCheck
+import com.example.domain.auth.OptionalAuthGateway
 import com.example.domain.model.OrbPopupAction
 import com.example.domain.model.OrbQuickAction
 import com.example.service.LiveVoiceSessionService
@@ -48,14 +51,19 @@ import com.example.service.MousomiOverlayService
 import com.example.ui.components.EdgeLightPerimeterOverlay
 import com.example.ui.components.MousomiDesignTokens
 import com.example.ui.screens.AssistantHubScreen
+import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.ControlCenterScreen
 import com.example.ui.screens.MainChatScreen
+import com.example.ui.screens.MousomiLensScreen
 import com.example.ui.screens.PermissionCenterScreen
 import com.example.ui.screens.SettingsScreen
+import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.MousomiTheme
+import com.example.ui.viewmodel.LensViewModel
 import com.example.ui.viewmodel.MousomiViewModel
 import dagger.hilt.android.AndroidEntryPoint
 import java.util.Calendar
+import javax.inject.Inject
 
 object MousomiRoutes {
   const val CHAT = "chat"
@@ -63,10 +71,13 @@ object MousomiRoutes {
   const val CONTROL_CENTER = "control_center"
   const val PERMISSIONS = "permissions"
   const val ASSISTANT_HUB = "assistant_hub"
+  const val LENS = "lens"
 }
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+  @Inject lateinit var authGateway: OptionalAuthGateway
 
   private var pendingQuickActionState = mutableStateOf<OrbQuickAction?>(null)
   private var pendingPopupActionState = mutableStateOf<OrbPopupAction?>(null)
@@ -80,6 +91,7 @@ class MainActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    configureAppCheck(this, intent)
     WindowCompat.setDecorFitsSystemWindows(window, false)
     enableEdgeToEdge()
 
@@ -87,9 +99,24 @@ class MainActivity : ComponentActivity() {
     pendingPopupActionState.value = extractPopupAction(intent)
 
     setContent {
-      val viewModel: MousomiViewModel = hiltViewModel()
-      val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-      val navController = rememberNavController()
+      val authSession by
+        authGateway.observeSession().collectAsStateWithLifecycle(
+          initialValue = authGateway.getCurrentSession()
+        )
+      val activeUid = authSession.uid.takeIf { authSession.isSignedIn && it.isNotBlank() }
+
+      if (activeUid == null) {
+        MousomiTheme(themeMode = AppThemeMode.DARK) {
+          AuthScreen(
+            authGateway = authGateway,
+            onAuthSuccess = {},
+          )
+        }
+      } else {
+        key(activeUid) {
+          val viewModel: MousomiViewModel = hiltViewModel(key = activeUid)
+          val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+          val navController = rememberNavController()
 
       val screenCaptureLauncher =
         rememberLauncherForActivityResult(
@@ -191,18 +218,23 @@ class MainActivity : ComponentActivity() {
           modifier =
             Modifier
               .fillMaxSize()
-              .clip(RoundedCornerShape(MousomiDesignTokens.ScreenCornerRadius))
-              .clipToBounds()
               .background(MaterialTheme.colorScheme.background)
         ) {
-          NavHost(
-            navController = navController,
-            startDestination = MousomiRoutes.CHAT,
-            enterTransition = { fadeIn() + slideInHorizontally { it / 12 } },
-            exitTransition = { fadeOut() },
-            popEnterTransition = { fadeIn() },
-            popExitTransition = { fadeOut() + slideOutHorizontally { it / 12 } },
+          Box(
+            modifier =
+              Modifier
+                .fillMaxSize()
+                .clip(RoundedCornerShape(MousomiDesignTokens.ScreenCornerRadius))
+                .clipToBounds()
           ) {
+            NavHost(
+              navController = navController,
+              startDestination = MousomiRoutes.CHAT,
+              enterTransition = { fadeIn() + slideInHorizontally { it / 12 } },
+              exitTransition = { fadeOut() },
+              popEnterTransition = { fadeIn() },
+              popExitTransition = { fadeOut() + slideOutHorizontally { it / 12 } },
+            ) {
             composable(MousomiRoutes.CHAT) {
               MainChatScreen(
                 uiState = uiState,
@@ -223,6 +255,24 @@ class MainActivity : ComponentActivity() {
                   viewModel.onSetRequestedHubTab(tab)
                   navController.navigate(MousomiRoutes.ASSISTANT_HUB) { launchSingleTop = true }
                 },
+                onNavigateToLens = {
+                  navController.navigate(MousomiRoutes.LENS) { launchSingleTop = true }
+                },
+              )
+            }
+
+            composable(MousomiRoutes.LENS) {
+              val lensViewModel: LensViewModel = hiltViewModel()
+              MousomiLensScreen(
+                viewModel = lensViewModel,
+                onContinueInChat = { result ->
+                  viewModel.onImportLensAnalysisToChat(
+                    result = result,
+                    followUpTurns = lensViewModel.uiState.value.followUpTurns,
+                  )
+                  navController.popBackStack()
+                },
+                onBack = { navController.popBackStack() },
               )
             }
 
@@ -375,6 +425,7 @@ class MainActivity : ComponentActivity() {
                 onBack = { navController.popBackStack() },
               )
             }
+            }
           }
 
           val currentHour = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
@@ -390,6 +441,8 @@ class MainActivity : ComponentActivity() {
               currentHour = currentHour,
             )
           EdgeLightPerimeterOverlay(params = edgeParams)
+        }
+      }
         }
       }
     }

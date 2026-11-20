@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.outlined.AudioFile
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.CenterFocusWeak
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
@@ -84,6 +85,8 @@ import com.example.core.voice.VoiceState
 import com.example.domain.model.AiResponseState
 import com.example.domain.model.DomainConversation
 import com.example.domain.model.GeneratedImageResult
+import com.example.domain.model.GeneratedMusicResult
+import com.example.domain.model.GeneratedVideoResult
 import com.example.domain.model.ImageVersionRecord
 import com.example.domain.model.ManagedTaskItem
 import com.example.domain.model.MediaAttachmentKind
@@ -111,6 +114,7 @@ fun GeminiTopBar(
   isEmergencyActive: Boolean = false,
   onEmergencyStop: () -> Unit = {},
   onOpenPermissions: () -> Unit = {},
+  onOpenLens: () -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   val colors = LocalMousomiColors.current
@@ -138,49 +142,50 @@ fun GeminiTopBar(
 
     Spacer(modifier = Modifier.width(2.dp))
 
-    Row(
-      modifier =
-        Modifier
-          .clip(RoundedCornerShape(20.dp))
-          .clickable(onClick = onOpenModelSelector)
-          .padding(horizontal = 10.dp, vertical = 10.dp)
-          .testTag("model_selector_button"),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Text(
-        text = stringResource(R.string.top_bar_gemini),
-        color = onBg,
-        fontFamily = DisplayFontFamily,
-        fontWeight = FontWeight.Medium,
-        fontSize = 18.sp,
-      )
-      Spacer(modifier = Modifier.width(5.dp))
-      Text(
-        text = selectedModel.shortLabel,
-        color = colors.mutedText,
-        fontFamily = DisplayFontFamily,
-        fontWeight = FontWeight.Normal,
-        fontSize = 17.sp,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-      Spacer(modifier = Modifier.width(2.dp))
-      Icon(
-        imageVector = Icons.Rounded.KeyboardArrowDown,
-        contentDescription = stringResource(R.string.cd_model_selector),
-        tint = colors.mutedText,
-        modifier = Modifier.size(18.dp),
-      )
+    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+      Row(
+        modifier =
+          Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .clickable(onClick = onOpenModelSelector)
+            .padding(horizontal = 8.dp, vertical = 10.dp)
+            .testTag("model_selector_button"),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Text(
+          text = stringResource(R.string.top_bar_gemini),
+          color = onBg,
+          fontFamily = DisplayFontFamily,
+          fontWeight = FontWeight.Medium,
+          fontSize = 18.sp,
+          maxLines = 1,
+        )
+        Spacer(modifier = Modifier.width(5.dp))
+        Text(
+          text = selectedModel.shortLabel,
+          color = colors.mutedText,
+          fontFamily = DisplayFontFamily,
+          fontWeight = FontWeight.Normal,
+          fontSize = 16.sp,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(modifier = Modifier.width(2.dp))
+        Icon(
+          imageVector = Icons.Rounded.KeyboardArrowDown,
+          contentDescription = stringResource(R.string.cd_model_selector),
+          tint = colors.mutedText,
+          modifier = Modifier.size(18.dp),
+        )
+      }
     }
-
-    Spacer(modifier = Modifier.weight(1f))
 
     if (isEmergencyActive) {
       Surface(
         onClick = onEmergencyStop,
         shape = CircleShape,
         color = Color(0xFFDC2626),
-        modifier = Modifier.height(34.dp).padding(end = 6.dp).testTag("emergency_stop_topbar_button"),
+        modifier = Modifier.height(34.dp).padding(end = 4.dp).testTag("emergency_stop_topbar_button"),
       ) {
         Row(
           modifier = Modifier.padding(horizontal = 10.dp),
@@ -191,6 +196,18 @@ fun GeminiTopBar(
           Text("Stop", color = Color.White, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
         }
       }
+    }
+
+    IconButton(
+      onClick = onOpenLens,
+      modifier = Modifier.minimumInteractiveComponentSize().testTag("topbar_lens_button"),
+    ) {
+      Icon(
+        imageVector = Icons.Outlined.CenterFocusWeak,
+        contentDescription = "Open Mousomi Lens Visual AI",
+        tint = NeonCyan,
+        modifier = Modifier.size(21.dp),
+      )
     }
 
     IconButton(
@@ -427,6 +444,10 @@ fun ChatMessagesList(
   onRetryTask: (ManagedTaskItem) -> Unit = {},
   onCancelTask: (ManagedTaskItem) -> Unit = {},
   onOpenAssistantHub: () -> Unit = {},
+  onSaveVideo: (GeneratedVideoResult) -> Unit = {},
+  onShareVideo: (GeneratedVideoResult) -> Unit = {},
+  onSaveMusic: (GeneratedMusicResult) -> Unit = {},
+  onShareMusic: (GeneratedMusicResult) -> Unit = {},
 ) {
   val listState = rememberLazyListState()
   val lastTextLen = messages.lastOrNull()?.text?.length ?: 0
@@ -495,6 +516,10 @@ fun ChatMessagesList(
           onRetryTask = onRetryTask,
           onCancelTask = onCancelTask,
           onOpenAssistantHub = onOpenAssistantHub,
+          onSaveVideo = onSaveVideo,
+          onShareVideo = onShareVideo,
+          onSaveMusic = onSaveMusic,
+          onShareMusic = onShareMusic,
         )
       }
     }
@@ -588,6 +613,10 @@ private fun AssistantChatBubble(
   onRetryTask: (ManagedTaskItem) -> Unit = {},
   onCancelTask: (ManagedTaskItem) -> Unit = {},
   onOpenAssistantHub: () -> Unit = {},
+  onSaveVideo: (GeneratedVideoResult) -> Unit = {},
+  onShareVideo: (GeneratedVideoResult) -> Unit = {},
+  onSaveMusic: (GeneratedMusicResult) -> Unit = {},
+  onShareMusic: (GeneratedMusicResult) -> Unit = {},
 ) {
   val colors = LocalMousomiColors.current
   val onBg = MaterialTheme.colorScheme.onBackground
@@ -655,6 +684,10 @@ private fun AssistantChatBubble(
                 onRetryTask = onRetryTask,
                 onCancelTask = onCancelTask,
                 onOpenAssistantHub = onOpenAssistantHub,
+                onSaveVideo = onSaveVideo,
+                onShareVideo = onShareVideo,
+                onSaveMusic = onSaveMusic,
+                onShareMusic = onShareMusic,
               )
             }
           }

@@ -14,6 +14,7 @@ data class GeminiGenerateRequest(
 @Serializable
 data class GeminiTool(
   val google_search: JsonObject? = null,
+  val google_maps: JsonObject? = null,
 )
 
 @Serializable
@@ -63,12 +64,20 @@ data class GeminiGroundingMetadata(
 @Serializable
 data class GeminiGroundingChunk(
   val web: GeminiGroundingWeb? = null,
+  val maps: GeminiGroundingMaps? = null,
 )
 
 @Serializable
 data class GeminiGroundingWeb(
   val uri: String? = null,
   val title: String? = null,
+)
+
+@Serializable
+data class GeminiGroundingMaps(
+  val uri: String? = null,
+  val title: String? = null,
+  val placeId: String? = null,
 )
 
 @Serializable
@@ -101,3 +110,41 @@ data class GeminiModelInfoDto(
   val supportedGenerationMethods: List<String> = emptyList(),
 )
 
+@Serializable
+data class GeminiLongRunningRequest(
+  val instances: List<GeminiLongRunningInstance>,
+  val parameters: GeminiLongRunningParameters? = null,
+)
+
+@Serializable
+data class GeminiLongRunningInstance(
+  val prompt: String,
+  val image: GeminiLongRunningImage? = null,
+)
+
+@Serializable
+data class GeminiLongRunningImage(
+  val bytesBase64Encoded: String,
+  val mimeType: String,
+)
+
+@Serializable
+data class GeminiLongRunningParameters(
+  val aspectRatio: String? = null,
+  val durationSeconds: Int? = null,
+  val sampleCount: Int? = 1,
+)
+
+@Serializable
+data class GeminiOperationResponse(
+  val name: String = "",
+  val done: Boolean = false,
+  val error: GeminiOperationErrorDto? = null,
+  val response: JsonObject? = null,
+)
+
+@Serializable
+data class GeminiOperationErrorDto(
+  val code: Int? = null,
+  val message: String? = null,
+)
