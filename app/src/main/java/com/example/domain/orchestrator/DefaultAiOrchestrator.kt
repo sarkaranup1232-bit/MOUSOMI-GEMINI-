@@ -576,7 +576,12 @@ class DefaultAiOrchestrator @Inject constructor(
         append("The user is in Task Mode: deliver a clear structured plan with concrete deliverables, verification checks, and exact next steps. Never claim an external or unapproved device action was completed if it awaits user confirmation. ")
       }
       if (hasImages) {
-        append("Analyze attached image(s) carefully—describe visual contents, text/OCR, and answer accurately without guessing unreadable text. ")
+        append(
+          "Grounded visual & screen-analysis rules: " +
+            "(1) Distinguish strictly between facts directly visible in the attached image/screen frame and inferences or assumptions. " +
+            "(2) If any text, price, button, or area is blurry, cropped, cut off, or partially obscured, say so explicitly rather than guessing. " +
+            "(3) Adapt concisely to what is shown: for videos/players, explain what is visible on screen and key context; for shopping/products, extract visible product title, specs, price/ratings, and practical comparison points without inventing unseen specs; for websites/apps/forms, explain the current screen state and clear next interactive steps. "
+        )
       }
       append("Routed pipeline: ${intent.label} ($categoryLabel). ")
       if (toolNotes.isNotEmpty()) {

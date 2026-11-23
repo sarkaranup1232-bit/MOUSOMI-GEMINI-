@@ -18,9 +18,11 @@ data class ScreenSelectionUiState(
   val undoHistory: List<SelectionGeometryResult> = emptyList(),
   val sourceFrameFilePath: String? = null,
   val captureMetadata: ScreenCaptureMetadata? = null,
-  val statusHint: String = "Circle, draw, or drag around anything",
+  val statusHint: String = "Circle or draw a box around anything (10s)",
   val errorMessage: String? = null,
   val lastAttachedVisual: AttachedVisualItem? = null,
+  val remainingSeconds: Int = ScreenSelectionManager.SELECTION_TIMEOUT_SECONDS,
+  val hasTimedOut: Boolean = false,
 )
 
 /**
@@ -64,8 +66,10 @@ class ScreenSelectionManager @Inject constructor(
         undoHistory = emptyList(),
         sourceFrameFilePath = sourceFramePath,
         captureMetadata = metadata,
-        statusHint = "Circle, draw, or drag around anything",
+        statusHint = "Draw or circle a region to select (${SELECTION_TIMEOUT_SECONDS}s)",
         errorMessage = null,
+        remainingSeconds = SELECTION_TIMEOUT_SECONDS,
+        hasTimedOut = false,
       )
     }
   }
@@ -105,8 +109,8 @@ class ScreenSelectionManager @Inject constructor(
         activeStrokePoints = emptyList(),
         snappedResult = result,
         statusHint =
-          if (result != null) "Drag corners to adjust or tap Select"
-          else "Circle, draw, or drag around anything",
+          if (result != null) "Adjust handles, Redraw, or Confirm"
+          else "Draw or circle a region to select (${it.remainingSeconds}s)",
       )
     }
     return result
@@ -131,7 +135,8 @@ class ScreenSelectionManager @Inject constructor(
           snappedResult = null,
           activeStrokePoints = emptyList(),
           stage = SelectionStage.READY_TO_DRAW,
-          statusHint = "Circle, draw, or drag around anything",
+          statusHint = "Draw or circle a region to select (${SELECTION_TIMEOUT_SECONDS}s)",
+          remainingSeconds = SELECTION_TIMEOUT_SECONDS,
         )
       } else {
         val restored = current.undoHistory.last()
@@ -154,10 +159,20 @@ class ScreenSelectionManager @Inject constructor(
         snappedResult = null,
         undoHistory = prevHistory.takeLast(8),
         stage = SelectionStage.READY_TO_DRAW,
-        statusHint = "Circle, draw, or drag around anything",
+        statusHint = "Draw or circle a region to select (${SELECTION_TIMEOUT_SECONDS}s)",
         errorMessage = null,
+        remainingSeconds = SELECTION_TIMEOUT_SECONDS,
+        hasTimedOut = false,
       )
     }
+  }
+
+  fun tickCountdown(): Boolean {
+    val (nextState, timedOut) = advanceCountdown(_state.value)
+    if (nextState !== _state.value) {
+      _state.value = nextState
+    }
+    return timedOut
   }
 
   suspend fun confirmAndAutoCrop(
@@ -256,5 +271,26 @@ class ScreenSelectionManager @Inject constructor(
   fun stopAndCleanup() {
     _state.value = ScreenSelectionUiState()
     mediaProjectionManager.release("Selection session stopped.")
+  }
+
+  companion object {
+    const val SELECTION_TIMEOUT_SECONDS = 10
+
+    fun advanceCountdown(current: ScreenSelectionUiState): Pair<ScreenSelectionUiState, Boolean> {
+      if (!current.isActive ||
+        current.stage != SelectionStage.READY_TO_DRAW ||
+        current.snappedResult != null
+      ) {
+        return current to false
+      }
+      val next = (current.remainingSeconds - 1).coerceAtLeast(0)
+      if (next <= 0) {
+        return ScreenSelectionUiState(hasTimedOut = true) to true
+      }
+      return current.copy(
+        remainingSeconds = next,
+        statusHint = "Draw or circle a region to select (${next}s)",
+      ) to false
+    }
   }
 }

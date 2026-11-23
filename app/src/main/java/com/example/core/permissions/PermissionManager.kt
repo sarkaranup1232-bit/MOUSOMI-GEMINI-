@@ -344,6 +344,24 @@ class PermissionManager @Inject constructor(
         relatedFeature = "Hardware Telemetry",
         lastCheckedAtMs = checkedAt,
       ),
+      run {
+        val roleStatus = com.example.core.assistant.AssistantRoleHelper.getStatus(context)
+        PermissionCategoryItem(
+          category = PermissionCategory.DEFAULT_ASSISTANT,
+          state =
+            when {
+              roleStatus.isDefaultAssistant -> PermissionState.GRANTED
+              roleStatus.isRoleSupported -> PermissionState.REQUIRES_SETTINGS
+              else -> PermissionState.NOT_AVAILABLE
+            },
+          whyNeeded = "Allows Power hold / corner-swipe / Home hold gestures to summon Mousomi VoiceInteractionSession over any app.",
+          dataUsageDisclosure = roleStatus.setupSummary,
+          howToManage = "Tap Open System Settings to select Mousomi AI as your Default Digital Assistant.",
+          requiresSpecialSettings = true,
+          relatedFeature = "System Default Assistant",
+          lastCheckedAtMs = checkedAt,
+        )
+      },
     )
   }
 

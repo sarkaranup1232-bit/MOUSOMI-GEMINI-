@@ -36,12 +36,13 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.CenterFocusWeak
 import androidx.compose.material.icons.outlined.Crop
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MicOff
@@ -52,7 +53,8 @@ import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.DragIndicator
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
@@ -84,6 +86,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.core.overlay.FloatingAttachmentItem
 import com.example.core.overlay.FloatingChatTurn
+import com.example.core.voice.LiveVoiceSessionManager
 import com.example.core.voice.LiveVoiceSessionStatus
 import com.example.core.voice.VoiceState
 import com.example.domain.model.AiResponseState
@@ -93,12 +96,15 @@ import com.example.ui.theme.LiquidGlassBorder
 import com.example.ui.theme.LiquidGlassDark
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonPurple
+import com.example.ui.theme.NeonViolet
 import com.example.ui.theme.WarmAmber
 import java.io.File
 
 /**
  * Compact translucent Liquid Glass Floating Control Bar rendered above other apps.
- * Includes: Expand, Screen Selection, Assistant Profile, Pause/Resume, and Close controls.
+ * Matches the neon cyan-to-violet bordered floating control pill with:
+ * `<` collapse/expand, Draw/Annotate, `[o]` Screen Selection, `||` Pause/Resume, solid Red Stop,
+ * plus a dark duration timer (`00:00:24`) & Assistant Profile trigger row underneath.
  */
 @Composable
 fun FloatingControlBar(
@@ -112,135 +118,193 @@ fun FloatingControlBar(
   onPauseToggleClick: () -> Unit,
   onCloseClick: () -> Unit,
   modifier: Modifier = Modifier,
+  elapsedSeconds: Long = 0L,
+  isDrawActive: Boolean = false,
+  onDrawClick: () -> Unit = onScreenSelectionClick,
 ) {
   val borderBrush =
-    if (isBusyOrListening && !isPaused) {
-      Brush.linearGradient(MousomiDesignTokens.GoogleNeonSpectrum)
+    if (isPaused) {
+      Brush.horizontalGradient(listOf(WarmAmber.copy(alpha = 0.75f), NeonPurple.copy(alpha = 0.55f)))
     } else {
-      Brush.linearGradient(
-        listOf(
-          Color.White.copy(alpha = 0.28f),
-          NeonCyan.copy(alpha = 0.35f),
-          NeonPurple.copy(alpha = 0.30f),
-          Color.White.copy(alpha = 0.22f),
-        )
-      )
+      Brush.horizontalGradient(listOf(NeonCyan, ElectricBlue, NeonViolet, NeonPurple))
     }
 
-  Surface(
-    shape = RoundedCornerShape(28.dp),
-    color = LiquidGlassDark.copy(alpha = 0.88f),
-    border = BorderStroke(1.2.dp, borderBrush),
-    shadowElevation = 18.dp,
-    modifier = modifier.testTag("floating_control_bar"),
+  Column(
+    modifier = modifier,
+    horizontalAlignment = Alignment.End,
+    verticalArrangement = Arrangement.spacedBy(6.dp),
   ) {
-    Row(
-      modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(2.dp),
+    Surface(
+      shape = RoundedCornerShape(28.dp),
+      color = Color(0xFF0A0F1E).copy(alpha = 0.88f),
+      border = BorderStroke(if (isBusyOrListening && !isPaused) 1.7.dp else 1.35.dp, borderBrush),
+      shadowElevation = 18.dp,
+      modifier = Modifier.testTag("floating_control_bar"),
     ) {
-      // Visual drag grip & status sparkle (dragging is handled smoothly at WindowManager layer)
       Row(
+        modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.padding(start = 4.dp, end = 2.dp),
       ) {
-        Icon(
-          imageVector = Icons.Rounded.DragIndicator,
-          contentDescription = "Drag floating toolbar",
-          tint = Color.White.copy(alpha = 0.48f),
-          modifier = Modifier.size(16.dp),
-        )
-        Spacer(modifier = Modifier.width(2.dp))
-        GeminiFourPointSparkle(size = 15.dp, animated = !isPaused)
-      }
-
-      // 1. Expand / Toggle Floating Chat Panel
-      Surface(
-        onClick = onExpandClick,
-        shape = CircleShape,
-        color = if (isPanelOpen) NeonCyan.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.08f),
-        modifier = Modifier.size(44.dp).testTag("floating_bar_expand"),
-      ) {
-        Box(contentAlignment = Alignment.Center) {
+        // 1. Back / Expand / Collapse Floating Chat Panel (`<`)
+        Box(
+          modifier =
+            Modifier
+              .size(42.dp)
+              .clip(CircleShape)
+              .background(if (isPanelOpen) NeonCyan.copy(alpha = 0.16f) else Color.Transparent)
+              .clickable(onClick = onExpandClick)
+              .testTag("floating_bar_expand"),
+          contentAlignment = Alignment.Center,
+        ) {
           Icon(
-            imageVector = Icons.Outlined.GridView,
-            contentDescription = if (isPanelOpen) "Minimize or expand assistant" else "Expand assistant panel",
+            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowLeft,
+            contentDescription = if (isPanelOpen) "Collapse assistant panel" else "Expand assistant panel",
             tint = if (isPanelOpen) NeonCyan else Color.White,
-            modifier = Modifier.size(20.dp),
+            modifier = Modifier.size(22.dp),
           )
         }
-      }
 
-      // 2. Screen Selection (pencil/region capture)
-      Surface(
-        onClick = onScreenSelectionClick,
-        shape = CircleShape,
-        color = Color.White.copy(alpha = 0.08f),
-        modifier = Modifier.size(44.dp).testTag("floating_bar_screen_select"),
-      ) {
-        Box(contentAlignment = Alignment.Center) {
+        FloatingControlBarDivider()
+
+        // 2. Draw / Annotate Screen (`Pencil`)
+        Box(
+          modifier =
+            Modifier
+              .size(42.dp)
+              .clip(CircleShape)
+              .background(if (isDrawActive) ElectricBlue.copy(alpha = 0.22f) else Color.Transparent)
+              .clickable(onClick = onDrawClick)
+              .testTag("floating_bar_draw"),
+          contentAlignment = Alignment.Center,
+        ) {
           Icon(
             imageVector = Icons.Outlined.Edit,
+            contentDescription = "Draw or annotate screen",
+            tint = if (isDrawActive) NeonCyan else Color.White,
+            modifier = Modifier.size(19.dp),
+          )
+        }
+
+        FloatingControlBarDivider()
+
+        // 3. Screen Selection (`[o]`)
+        Box(
+          modifier =
+            Modifier
+              .size(42.dp)
+              .clip(CircleShape)
+              .clickable(onClick = onScreenSelectionClick)
+              .testTag("floating_bar_screen_select"),
+          contentAlignment = Alignment.Center,
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.CenterFocusWeak,
             contentDescription = "Select screen region",
             tint = Color.White,
             modifier = Modifier.size(20.dp),
           )
         }
+
+        FloatingControlBarDivider()
+
+        // 4. Pause / Resume (`||`)
+        Box(
+          modifier =
+            Modifier
+              .size(42.dp)
+              .clip(CircleShape)
+              .background(if (isPaused) WarmAmber.copy(alpha = 0.22f) else Color.Transparent)
+              .clickable(onClick = onPauseToggleClick)
+              .testTag("floating_bar_pause"),
+          contentAlignment = Alignment.Center,
+        ) {
+          Icon(
+            imageVector = if (isPaused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
+            contentDescription = if (isPaused) "Resume Assistant" else "Pause Assistant",
+            tint = if (isPaused) WarmAmber else Color.White,
+            modifier = Modifier.size(21.dp),
+          )
+        }
+
+        FloatingControlBarDivider()
+
+        // 5. Close / Stop Floating Assistant (Solid Red rounded square)
+        Box(
+          modifier =
+            Modifier
+              .size(42.dp)
+              .clip(CircleShape)
+              .clickable(onClick = onCloseClick)
+              .testTag("floating_bar_close"),
+          contentAlignment = Alignment.Center,
+        ) {
+          Box(
+            modifier =
+              Modifier
+                .size(18.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .background(Color(0xFFEF4444))
+          )
+        }
+      }
+    }
+
+    // Companion row below right edge: Live Timer (`00:00:24`) + Profile / Edge Light studio toggle
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+      if (elapsedSeconds > 0L || isBusyOrListening) {
+        Surface(
+          shape = RoundedCornerShape(14.dp),
+          color = Color(0xFF080D1B).copy(alpha = 0.86f),
+          border = BorderStroke(0.8.dp, Color.White.copy(alpha = 0.14f)),
+          modifier = Modifier.testTag("floating_live_timer_pill"),
+        ) {
+          Text(
+            text = LiveVoiceSessionManager.formatElapsedMmSs(elapsedSeconds),
+            color = Color.White.copy(alpha = 0.94f),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+          )
+        }
       }
 
-      // 3. Assistant Profile & Edge Light quick controls
       Surface(
         onClick = onProfileClick,
         shape = CircleShape,
-        color = if (isProfileMenuOpen) NeonPurple.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.08f),
-        modifier = Modifier.size(44.dp).testTag("floating_bar_profile"),
+        color = if (isProfileMenuOpen) NeonPurple.copy(alpha = 0.36f) else Color(0xFF080D1B).copy(alpha = 0.84f),
+        border =
+          BorderStroke(
+            width = 0.9.dp,
+            color = if (isProfileMenuOpen) NeonCyan else Color.White.copy(alpha = 0.2f),
+          ),
+        modifier = Modifier.size(32.dp).testTag("floating_bar_profile"),
       ) {
         Box(contentAlignment = Alignment.Center) {
           Icon(
             imageVector = Icons.Outlined.PersonOutline,
             contentDescription = "Assistant Profile and Edge Light settings",
-            tint = if (isProfileMenuOpen) NeonCyan else Color.White,
-            modifier = Modifier.size(20.dp),
-          )
-        }
-      }
-
-      // 4. Pause / Resume
-      Surface(
-        onClick = onPauseToggleClick,
-        shape = CircleShape,
-        color = if (isPaused) WarmAmber.copy(alpha = 0.24f) else Color.White.copy(alpha = 0.08f),
-        modifier = Modifier.size(44.dp).testTag("floating_bar_pause"),
-      ) {
-        Box(contentAlignment = Alignment.Center) {
-          Icon(
-            imageVector = if (isPaused) Icons.Outlined.PlayArrow else Icons.Outlined.Pause,
-            contentDescription = if (isPaused) "Resume Assistant" else "Pause Assistant",
-            tint = if (isPaused) WarmAmber else Color.White,
-            modifier = Modifier.size(20.dp),
-          )
-        }
-      }
-
-      // 5. Close Floating Assistant completely
-      Surface(
-        onClick = onCloseClick,
-        shape = CircleShape,
-        color = Color(0xFFEF4444).copy(alpha = 0.18f),
-        border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.45f)),
-        modifier = Modifier.size(44.dp).testTag("floating_bar_close"),
-      ) {
-        Box(contentAlignment = Alignment.Center) {
-          Icon(
-            imageVector = Icons.Rounded.Stop,
-            contentDescription = "Close Floating Assistant",
-            tint = Color(0xFFFCA5A5),
-            modifier = Modifier.size(20.dp),
+            tint = if (isProfileMenuOpen) NeonCyan else Color.White.copy(alpha = 0.88f),
+            modifier = Modifier.size(16.dp),
           )
         }
       }
     }
   }
+}
+
+@Composable
+private fun FloatingControlBarDivider() {
+  Box(
+    modifier =
+      Modifier
+        .padding(horizontal = 1.dp)
+        .width(1.dp)
+        .height(18.dp)
+        .background(Color.White.copy(alpha = 0.22f))
+  )
 }
 
 /**
@@ -460,6 +524,9 @@ fun FloatingChatPanelCard(
   onExpandApp: () -> Unit,
   onMinimizePanel: () -> Unit,
   modifier: Modifier = Modifier,
+  isScreenShareActive: Boolean = false,
+  onShareScreenWithLive: () -> Unit = onStartScreenSelection,
+  onStartLiveVoice: () -> Unit = onToggleVoice,
 ) {
   val isBusy =
     responseState is AiResponseState.Loading ||
@@ -479,31 +546,78 @@ fun FloatingChatPanelCard(
     }
   }
 
-  Surface(
-    shape = RoundedCornerShape(28.dp),
-    color = LiquidGlassDark.copy(alpha = 0.94f),
-    border =
-      BorderStroke(
-        width = 1.8.dp,
-        brush =
-          if (isMicActive || isBusy) Brush.linearGradient(MousomiDesignTokens.GoogleNeonSpectrum)
-          else Brush.linearGradient(listOf(NeonCyan.copy(alpha = 0.52f), NeonPurple.copy(alpha = 0.45f))),
-      ),
-    shadowElevation = 22.dp,
-    modifier =
-      modifier
-        .fillMaxWidth()
-        .widthIn(max = 430.dp)
-        .heightIn(max = maxCardHeightDp.dp)
-        .animateContentSize(
-          animationSpec =
-            spring(
-              dampingRatio = Spring.DampingRatioNoBouncy,
-              stiffness = Spring.StiffnessMediumLow,
-            )
-        )
-        .testTag("floating_chat_panel"),
+  Column(
+    modifier = modifier.fillMaxWidth().widthIn(max = 430.dp),
+    horizontalAlignment = Alignment.CenterHorizontally,
+    verticalArrangement = Arrangement.spacedBy(10.dp),
   ) {
+    // Centered "Share screen with Live >" floating pill above composer (matches reference)
+    Surface(
+      onClick = onShareScreenWithLive,
+      shape = RoundedCornerShape(24.dp),
+      color = Color(0xFF070C1A).copy(alpha = 0.88f),
+      border =
+        BorderStroke(
+          width = 1.15.dp,
+          brush =
+            Brush.horizontalGradient(
+              if (isScreenShareActive) listOf(NeonCyan, ElectricBlue, NeonCyan)
+              else listOf(Color.White.copy(alpha = 0.35f), NeonCyan.copy(alpha = 0.55f), NeonViolet.copy(alpha = 0.45f))
+            ),
+        ),
+      shadowElevation = 14.dp,
+      modifier = Modifier.testTag("share_screen_with_live_pill"),
+    ) {
+      Row(
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        Icon(
+          imageVector = Icons.Outlined.CenterFocusWeak,
+          contentDescription = null,
+          tint = if (isScreenShareActive) NeonCyan else Color.White,
+          modifier = Modifier.size(18.dp),
+        )
+        Text(
+          text = if (isScreenShareActive) "Sharing screen with Live" else "Share screen with Live",
+          color = Color.White,
+          fontSize = 13.5.sp,
+          fontWeight = FontWeight.Medium,
+        )
+        Icon(
+          imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+          contentDescription = null,
+          tint = Color.White.copy(alpha = 0.85f),
+          modifier = Modifier.size(18.dp),
+        )
+      }
+    }
+
+    Surface(
+      shape = RoundedCornerShape(28.dp),
+      color = Color(0xFF0A1020).copy(alpha = 0.92f),
+      border =
+        BorderStroke(
+          width = 1.8.dp,
+          brush =
+            if (isMicActive || isBusy) Brush.horizontalGradient(MousomiDesignTokens.GoogleNeonSpectrum)
+            else Brush.horizontalGradient(listOf(NeonCyan, ElectricBlue, NeonViolet, NeonPurple)),
+        ),
+      shadowElevation = 22.dp,
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .heightIn(max = maxCardHeightDp.dp)
+          .animateContentSize(
+            animationSpec =
+              spring(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = Spring.StiffnessMediumLow,
+              )
+          )
+          .testTag("floating_chat_panel"),
+    ) {
     Column(
       modifier = Modifier.padding(14.dp),
       verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -836,7 +950,7 @@ fun FloatingChatPanelCard(
         }
       }
 
-      // Composer Row: [+] [Ask Mousomi…] [Mic] [Send]
+      // Composer Row: [+] [Ask Mousomi…] [Solid Electric Blue Mic] [Send or Three-Bar Live]
       Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -845,8 +959,9 @@ fun FloatingChatPanelCard(
         Surface(
           onClick = onAttachImage,
           shape = CircleShape,
-          color = Color.White.copy(alpha = 0.12f),
-          modifier = Modifier.size(46.dp).testTag("floating_attach_image_button"),
+          color = Color.White.copy(alpha = 0.08f),
+          border = BorderStroke(0.9.dp, Color.White.copy(alpha = 0.16f)),
+          modifier = Modifier.size(44.dp).testTag("floating_attach_image_button"),
         ) {
           Box(contentAlignment = Alignment.Center) {
             Icon(
@@ -864,8 +979,8 @@ fun FloatingChatPanelCard(
           placeholder = {
             Text(
               text = if (pendingAttachments.isNotEmpty()) "Ask about selection…" else "Ask Mousomi…",
-              color = Color.White.copy(alpha = 0.56f),
-              fontSize = 13.5.sp,
+              color = Color.White.copy(alpha = 0.62f),
+              fontSize = 14.sp,
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
             )
@@ -886,10 +1001,10 @@ fun FloatingChatPanelCard(
               focusedTextColor = Color.White,
               unfocusedTextColor = Color.White,
               cursorColor = NeonCyan,
-              focusedBorderColor = NeonCyan.copy(alpha = 0.65f),
-              unfocusedBorderColor = Color.White.copy(alpha = 0.22f),
-              focusedContainerColor = Color.White.copy(alpha = 0.07f),
-              unfocusedContainerColor = Color.White.copy(alpha = 0.05f),
+              focusedBorderColor = Color.Transparent,
+              unfocusedBorderColor = Color.Transparent,
+              focusedContainerColor = Color.Transparent,
+              unfocusedContainerColor = Color.Transparent,
             ),
           modifier = Modifier.weight(1f).testTag("floating_prompt_input"),
         )
@@ -897,44 +1012,66 @@ fun FloatingChatPanelCard(
         Surface(
           onClick = onToggleVoice,
           shape = CircleShape,
-          color = if (isMicActive) NeonCyan else Color.White.copy(alpha = 0.13f),
-          modifier = Modifier.size(46.dp).testTag("floating_mic_button"),
+          color = if (isMicActive) NeonCyan else ElectricBlue,
+          modifier = Modifier.size(44.dp).testTag("floating_mic_button"),
         ) {
           Box(contentAlignment = Alignment.Center) {
             Icon(
               imageVector = if (isMicActive) Icons.Outlined.MicOff else Icons.Outlined.Mic,
               contentDescription = if (isMicActive) "Pause Voice Input" else "Start Voice Input",
               tint = if (isMicActive) Color.Black else Color.White,
-              modifier = Modifier.size(20.dp),
+              modifier = Modifier.size(21.dp),
             )
           }
         }
 
-        Surface(
-          onClick = { if (!isBusy && hasContentToSend) onSendPrompt(promptText) },
-          shape = CircleShape,
-          color = if (hasContentToSend && !isBusy) ElectricBlue else Color.White.copy(alpha = 0.12f),
-          modifier = Modifier.size(46.dp).testTag("floating_send_button"),
-        ) {
-          Box(contentAlignment = Alignment.Center) {
-            if (isBusy) {
-              CircularProgressIndicator(
-                color = NeonCyan,
-                strokeWidth = 2.dp,
-                modifier = Modifier.size(18.dp),
-              )
-            } else {
-              Icon(
-                imageVector = Icons.AutoMirrored.Rounded.Send,
-                contentDescription = "Send prompt",
-                tint = Color.White,
-                modifier = Modifier.size(19.dp),
+        if (hasContentToSend || isBusy) {
+          Surface(
+            onClick = { if (!isBusy && hasContentToSend) onSendPrompt(promptText) },
+            shape = CircleShape,
+            color = ElectricBlue,
+            modifier = Modifier.size(44.dp).testTag("floating_send_button"),
+          ) {
+            Box(contentAlignment = Alignment.Center) {
+              if (isBusy) {
+                CircularProgressIndicator(
+                  color = Color.White,
+                  strokeWidth = 2.dp,
+                  modifier = Modifier.size(18.dp),
+                )
+              } else {
+                Icon(
+                  imageVector = Icons.AutoMirrored.Rounded.Send,
+                  contentDescription = "Send prompt",
+                  tint = Color.White,
+                  modifier = Modifier.size(19.dp),
+                )
+              }
+            }
+          }
+        } else {
+          Surface(
+            onClick = onStartLiveVoice,
+            shape = CircleShape,
+            color = if (liveStatus == LiveVoiceSessionStatus.Active) NeonCyan else Color.White.copy(alpha = 0.09f),
+            border =
+              BorderStroke(
+                width = 0.9.dp,
+                color = if (liveStatus == LiveVoiceSessionStatus.Active) NeonCyan else Color.White.copy(alpha = 0.16f),
+              ),
+            modifier = Modifier.size(44.dp).testTag("floating_live_button"),
+          ) {
+            Box(contentAlignment = Alignment.Center) {
+              GeminiLiveWaveformIcon(
+                tint = if (liveStatus == LiveVoiceSessionStatus.Active) Color.Black else Color.White,
+                size = 21.dp,
               )
             }
           }
         }
       }
     }
+  }
   }
 }
 

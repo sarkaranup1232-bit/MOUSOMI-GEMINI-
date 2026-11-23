@@ -234,17 +234,25 @@ fun SelectionHighlightRenderer(
           blendMode = BlendMode.Clear,
         )
         drawOval(
-          brush = Brush.linearGradient(listOf(NeonCyan, ElectricBlue, NeonViolet, NeonMagenta)),
+          brush = Brush.linearGradient(listOf(NeonCyan, ElectricBlue, NeonViolet, NeonMagenta, Color(0xFFFDE68A))),
           topLeft = circleRect.topLeft,
           size = circleRect.size,
           style = Stroke(width = 4f * density),
         )
       } else {
         val smoothPath = buildSmoothQuadraticPath(pts)
-        // Outer luminous cyan-violet halo
+        // Outer luminous cyan-violet-magenta-gold halo
         drawPath(
           path = smoothPath,
-          brush = Brush.linearGradient(listOf(NeonCyan.copy(alpha = 0.55f), ElectricBlue.copy(alpha = 0.55f), NeonMagenta.copy(alpha = 0.55f))),
+          brush = Brush.linearGradient(
+            listOf(
+              NeonCyan.copy(alpha = 0.60f),
+              ElectricBlue.copy(alpha = 0.58f),
+              NeonViolet.copy(alpha = 0.55f),
+              NeonMagenta.copy(alpha = 0.58f),
+              Color(0xFFFDE68A).copy(alpha = 0.55f),
+            )
+          ),
           style = Stroke(width = 14f * density, cap = StrokeCap.Round, join = StrokeJoin.Round),
         )
         // Crisp glowing white-cyan inner core

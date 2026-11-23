@@ -160,7 +160,9 @@ class MainActivity : ComponentActivity() {
       val assistantRoleLauncher =
         rememberLauncherForActivityResult(
           contract = ActivityResultContracts.StartActivityForResult()
-        ) { _ -> }
+        ) { _ ->
+          viewModel.onRefreshPermissions()
+        }
 
       val startScreenShareFlow: () -> Unit = {
         viewModel.onMarkScreenShareRequestingConsent()

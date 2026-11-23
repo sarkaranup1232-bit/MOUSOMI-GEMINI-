@@ -85,6 +85,7 @@ import com.example.core.assistant.AssistantSessionStateManager
 import com.example.core.assistant.EdgeActivationEdge
 import com.example.core.display.DisplayGeometry
 import com.example.core.display.DisplayGeometryManager
+import com.example.core.edge.BorderLightController
 import com.example.core.edge.EdgeLightStateMapper
 import com.example.core.notifications.NotificationIntelligenceEngine
 import com.example.core.overlay.FloatingAssistantSessionStore
@@ -99,6 +100,8 @@ import com.example.core.screen.SelectionStage
 import com.example.core.screen.VisualQueryProcessor
 import com.example.core.voice.AudioSmokeAnalyzer
 import com.example.core.voice.GeminiLiveVoiceEngine
+import com.example.core.voice.LiveSessionPhase
+import com.example.core.voice.LiveVoiceSessionManager
 import com.example.core.voice.LiveVoiceSessionStatus
 import com.example.core.voice.VoiceController
 import com.example.core.voice.VoiceState
@@ -608,7 +611,7 @@ private class DraggableOverlayFrameLayout(
 }
 
 @AndroidEntryPoint
-class MousomiOverlayService : Service() {
+open class MousomiOverlayService : Service() {
 
   @Inject lateinit var settingsRepository: SettingsRepository
   @Inject lateinit var audioSmokeAnalyzer: AudioSmokeAnalyzer
@@ -616,6 +619,8 @@ class MousomiOverlayService : Service() {
   @Inject lateinit var aiOrchestrator: AiOrchestrator
   @Inject lateinit var voiceController: VoiceController
   @Inject lateinit var geminiLiveVoiceEngine: GeminiLiveVoiceEngine
+  @Inject lateinit var liveVoiceSessionManager: LiveVoiceSessionManager
+  @Inject lateinit var borderLightController: BorderLightController
   @Inject lateinit var sessionStateManager: AssistantSessionStateManager
   @Inject lateinit var displayGeometryManager: DisplayGeometryManager
   @Inject lateinit var screenShareSessionManager: ScreenShareSessionManager
@@ -920,6 +925,8 @@ class MousomiOverlayService : Service() {
           val settings by settingsRepository.observeSettings().collectAsState(initial = null)
           val voiceState by voiceController.voiceState.collectAsState()
           val voiceRms by voiceController.audioRmsNormalized.collectAsState()
+          val orbFrame by liveVoiceSessionManager.orbFrame.collectAsState()
+          val borderState by borderLightController.state.collectAsState()
           val panelResponse by overlayResponseState.collectAsState()
           val paused by isOverlayPaused.collectAsState()
           val sessionPhase by sessionStateManager.currentPhase.collectAsState()
@@ -935,12 +942,19 @@ class MousomiOverlayService : Service() {
             when {
               !screenOn -> AssistantSessionPhase.PAUSED
               paused -> AssistantSessionPhase.PAUSED
+              borderState.isActive && sessionPhase == AssistantSessionPhase.INACTIVE -> borderState.mappedPhase
               liveStatus == LiveVoiceSessionStatus.Active &&
                 sessionPhase == AssistantSessionPhase.INACTIVE -> AssistantSessionPhase.LISTENING
               floatingState.isPanelOpen &&
                 sessionPhase == AssistantSessionPhase.INACTIVE -> AssistantSessionPhase.PANEL_EXPANDED
               else -> sessionPhase
             }
+
+          val effectiveRms =
+            maxOf(
+              voiceRms,
+              if (borderState.isActive) orbFrame.reactiveAmplitude else 0f,
+            ).coerceIn(0f, 1f)
 
           val baseCfg = settings?.edgeLightConfig ?: EdgeLightConfig()
           val effectiveConfig =
@@ -954,7 +968,7 @@ class MousomiOverlayService : Service() {
               config = effectiveConfig,
               responseState = panelResponse,
               voiceState = voiceState,
-              voiceRmsNormalized = voiceRms,
+              voiceRmsNormalized = effectiveRms,
               screenShareStatus = screenShareStatus,
               notificationAlertActive = false,
               isSystemPowerSave = sysPowerSave,
@@ -1085,12 +1099,15 @@ class MousomiOverlayService : Service() {
           val responseState by overlayResponseState.collectAsState()
           val voiceState by voiceController.voiceState.collectAsState()
           val liveStatus by geminiLiveVoiceEngine.status.collectAsState()
+          val liveElapsed by liveVoiceSessionManager.elapsedSeconds.collectAsState()
+          val livePhase by liveVoiceSessionManager.phase.collectAsState()
           val isBusyOrListening =
             responseState is AiResponseState.Loading ||
               responseState is AiResponseState.Thinking ||
               responseState is AiResponseState.Streaming ||
               voiceState is VoiceState.Listening ||
-              liveStatus == LiveVoiceSessionStatus.Active
+              liveStatus == LiveVoiceSessionStatus.Active ||
+              (livePhase != LiveSessionPhase.IDLE && livePhase != LiveSessionPhase.ENDED && livePhase != LiveSessionPhase.PAUSED)
 
           MousomiTheme {
             FloatingControlBar(
@@ -1098,6 +1115,7 @@ class MousomiOverlayService : Service() {
               isProfileMenuOpen = overlayUi.isProfileQuickMenuOpen,
               isPaused = paused,
               isBusyOrListening = isBusyOrListening,
+              elapsedSeconds = liveElapsed,
               onExpandClick = {
                 if (floatingSessionStore.state.value.isPanelOpen) {
                   collapsePanelToBubble()
@@ -1108,6 +1126,7 @@ class MousomiOverlayService : Service() {
                   showAssistantPanel(autoStartVoice = false)
                 }
               },
+              onDrawClick = { launchScreenSelectionFromOverlay() },
               onScreenSelectionClick = {
                 launchScreenSelectionFromOverlay()
               },
@@ -1370,6 +1389,7 @@ class MousomiOverlayService : Service() {
         setContent {
           val settings by settingsRepository.observeSettings().collectAsState(initial = null)
           val audioMetrics by audioSmokeAnalyzer.metrics.collectAsState()
+          val orbFrame by liveVoiceSessionManager.orbFrame.collectAsState()
           val paused by isOverlayPaused.collectAsState()
           val phase by sessionStateManager.currentPhase.collectAsState()
           val orbCfg = settings?.floatingOrbConfig
@@ -1378,6 +1398,7 @@ class MousomiOverlayService : Service() {
               mode =
                 when {
                   paused -> OrbVisualMode.IDLE
+                  orbFrame.sessionPhase != LiveSessionPhase.IDLE -> orbFrame.orbMode
                   phase == AssistantSessionPhase.USER_SPEAKING ||
                     phase == AssistantSessionPhase.LISTENING -> OrbVisualMode.LISTENING
                   phase == AssistantSessionPhase.AI_RESPONDING -> OrbVisualMode.SPEAKING
@@ -1389,6 +1410,7 @@ class MousomiOverlayService : Service() {
               reducedMotion = paused || settings?.edgeLightConfig?.reducedMotion == true,
               orbSize = (orbCfg?.sizeDp ?: 56f).coerceIn(48f, 64f).dp,
               showCenterSparkle = true,
+              reactiveFrame = if (orbFrame.sessionPhase != LiveSessionPhase.IDLE) orbFrame else null,
             )
           }
         }
@@ -1600,6 +1622,7 @@ class MousomiOverlayService : Service() {
     overlayQueryJob?.cancel()
     overlayVoiceCollectorJob?.cancel()
     geminiLiveVoiceEngine.stopAndClose()
+    liveVoiceSessionManager.onEnded(keepScreenShare = false)
     voiceController.stopListening()
     voiceController.stopSpeaking()
     voiceController.resetState()
@@ -1803,6 +1826,7 @@ class MousomiOverlayService : Service() {
           val responseState by overlayResponseState.collectAsState()
           val voiceState by voiceController.voiceState.collectAsState()
           val liveStatus by geminiLiveVoiceEngine.status.collectAsState()
+          val screenShareStatus by screenShareSessionManager.status.collectAsState()
           val userLiveTranscript by geminiLiveVoiceEngine.userTranscript.collectAsState()
           val aiLiveTranscript by geminiLiveVoiceEngine.assistantTranscript.collectAsState()
           val paused by isOverlayPaused.collectAsState()
@@ -1866,6 +1890,18 @@ class MousomiOverlayService : Service() {
                 } else {
                   startOverlayVoiceListening()
                 }
+              },
+              onStartLiveVoice = {
+                if (liveStatus == LiveVoiceSessionStatus.Active || liveStatus == LiveVoiceSessionStatus.Connecting) {
+                  endLiveAssistantSession(stopServiceCompletely = false)
+                } else {
+                  startOverlayVoiceListening()
+                }
+              },
+              isScreenShareActive = screenShareStatus != ScreenShareStatus.STOPPED,
+              onShareScreenWithLive = {
+                startOverlayVoiceListening()
+                launchScreenSelectionFromOverlay()
               },
               onTogglePause = { toggleOverlayPause() },
               onEndLive = { endLiveAssistantSession(stopServiceCompletely = false) },
@@ -2000,13 +2036,22 @@ class MousomiOverlayService : Service() {
     overlayVoiceCollectorJob =
       scope.launch {
         voiceController.voiceState.collectLatest { vState ->
-          if (vState is VoiceState.TranscriptReady) {
-            val clean = vState.transcript.trim()
-            voiceController.resetState()
-            if (clean.isNotBlank()) {
-              floatingSessionStore.updatePromptText(clean)
-              submitOverlayPrompt(clean)
+          when (vState) {
+            is VoiceState.TranscriptReady -> {
+              val clean = vState.transcript.trim()
+              voiceController.resetState()
+              if (clean.isNotBlank()) {
+                val existing = floatingSessionStore.state.value.promptText
+                val merged =
+                  com.example.core.voice.DictationTranscriptMerger.appendFinalTurn(existing, clean)
+                floatingSessionStore.updatePromptText(merged)
+                floatingSessionStore.setStatusBanner(null)
+              }
             }
+            is VoiceState.Error -> {
+              floatingSessionStore.setStatusBanner(vState.message)
+            }
+            else -> Unit
           }
         }
       }
@@ -2292,38 +2337,6 @@ class MousomiNotificationListenerService : NotificationListenerService() {
   override fun onDestroy() {
     super.onDestroy()
     scope.cancel()
-  }
-}
-
-class MousomiVoiceInteractionService : VoiceInteractionService()
-
-class MousomiVoiceInteractionSessionService : VoiceInteractionSessionService() {
-  override fun onNewSession(args: Bundle?): VoiceInteractionSession =
-    MousomiAssistantSession(this)
-}
-
-private class MousomiAssistantSession(context: Context) : VoiceInteractionSession(context) {
-  override fun onShow(args: Bundle?, showFlags: Int) {
-    super.onShow(args, showFlags)
-    if (Settings.canDrawOverlays(context)) {
-      val overlayIntent =
-        MousomiOverlayService.buildActivateAssistantIntent(
-          context = context,
-          edge = EdgeActivationEdge.BOTTOM_CORNER,
-          expandPanel = true,
-          autoVoice = true,
-        )
-      ContextCompat.startForegroundService(context, overlayIntent)
-    } else {
-      val launch =
-        Intent(context, MainActivity::class.java).apply {
-          action = Intent.ACTION_ASSIST
-          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-          putExtra(MainActivity.EXTRA_QUICK_ACTION, OrbQuickAction.START_VOICE.name)
-        }
-      context.startActivity(launch)
-    }
-    finish()
   }
 }
 

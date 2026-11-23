@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ScreenShare
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.Analytics
 import androidx.compose.material.icons.outlined.Apps
@@ -105,18 +106,47 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import com.example.core.edge.EdgeLightRenderParams
+import com.example.core.edge.EdgeLightStateMapper
+import com.example.core.voice.LiveConnectionState
+import com.example.core.voice.LiveSessionPhase
+import com.example.core.voice.LiveVoiceSessionManager
+import com.example.core.voice.OrbReactiveFrame
 import com.example.core.voice.VoiceState
+import com.example.domain.model.AiResponseState
 import com.example.domain.model.DomainConversation
+import com.example.domain.model.EdgeLightConfig
+import com.example.domain.model.EdgeLightIntensity
+import com.example.domain.model.EdgeLightPreset
+import com.example.domain.model.ScreenShareStatus
 import com.example.domain.model.VoiceAudioMetrics
 import com.example.domain.model.VoiceGender
 import com.example.ui.components.AnimatedAIOrb
+import com.example.ui.components.DraggableLiveOrbStage
+import com.example.ui.components.EdgeLightPerimeterOverlay
 import com.example.ui.components.GeminiFourPointSparkle
+import com.example.ui.components.RainbowLiveWaveformDiscButton
 import com.example.ui.components.VoiceWaveform
 import com.example.ui.model.AiModelOption
 import com.example.ui.theme.DisplayFontFamily
+import com.example.ui.theme.ElectricBlue
 import com.example.ui.theme.LocalMousomiColors
 import com.example.ui.theme.NeonCyan
+import com.example.ui.theme.NeonViolet
 import com.example.ui.theme.WarmAmber
+import java.util.Calendar
 
 @Composable
 fun MousomiDrawerContent(
@@ -971,324 +1001,456 @@ fun GeminiLiveOverlay(
   onEmergencyStop: () -> Unit = {},
   onClose: () -> Unit,
   audioMetrics: VoiceAudioMetrics = VoiceAudioMetrics.SILENT,
+  reactiveFrame: OrbReactiveFrame? = null,
+  liveConnectionState: LiveConnectionState = LiveConnectionState.Disconnected,
+  liveElapsedSeconds: Long = 0L,
+  isScreenShareActive: Boolean = false,
+  onShareScreenWithLive: () -> Unit = {},
 ) {
   BackHandler(onBack = onClose)
 
   var followUpText by remember { mutableStateOf("") }
+  var showControlsDrawer by remember { mutableStateOf(false) }
+
+  val liveAmplitude =
+    if (isPaused || isMuted) 0f
+    else (reactiveFrame?.reactiveAmplitude ?: voiceRmsNormalized)
+
+  val effectiveFrame =
+    reactiveFrame
+      ?: OrbReactiveFrame(
+        reactiveAmplitude = liveAmplitude,
+        lowBandEnergy = audioMetrics.lowBandEnergy,
+        midBandEnergy = audioMetrics.midBandEnergy,
+        highBandEnergy = audioMetrics.highBandEnergy,
+        sessionPhase =
+          when {
+            isPaused -> LiveSessionPhase.PAUSED
+            isThinking -> LiveSessionPhase.AI_PROCESSING
+            voiceState is VoiceState.Speaking -> LiveSessionPhase.AI_SPEAKING
+            voiceState is VoiceState.Listening -> LiveSessionPhase.LISTENING
+            else -> LiveSessionPhase.IDLE
+          },
+      )
+
+  val authenticStatusLabel =
+    when {
+      isPaused -> "Paused"
+      isMuted -> "Muted"
+      liveConnectionState is LiveConnectionState.Connecting ||
+        effectiveFrame.sessionPhase == LiveSessionPhase.CONNECTING -> "Connecting…"
+      liveConnectionState is LiveConnectionState.Reconnecting ||
+        effectiveFrame.sessionPhase == LiveSessionPhase.RECONNECTING -> "Reconnecting…"
+      liveConnectionState is LiveConnectionState.Failed -> "Connection Issue"
+      voiceState is VoiceState.Speaking ||
+        effectiveFrame.sessionPhase == LiveSessionPhase.AI_SPEAKING -> "AI Speaking"
+      effectiveFrame.sessionPhase == LiveSessionPhase.USER_SPEAKING -> "Speech Active"
+      isThinking || effectiveFrame.sessionPhase == LiveSessionPhase.AI_PROCESSING -> "Thinking"
+      voiceState is VoiceState.Listening ||
+        effectiveFrame.sessionPhase == LiveSessionPhase.LISTENING -> "Listening"
+      liveConnectionState is LiveConnectionState.Connected -> "Connected"
+      liveConnectionState is LiveConnectionState.FallbackContinuous -> "Voice Active"
+      voiceState is VoiceState.Error && voiceState.isRecoverableSilence -> "Reconnecting…"
+      voiceState is VoiceState.Error -> "Mic Issue"
+      else -> "Live Ready"
+    }
+
+  val edgeParams: EdgeLightRenderParams =
+    EdgeLightStateMapper.resolve(
+      config =
+        EdgeLightConfig(
+          enabled = true,
+          assistantEdgeGlowEnabled = true,
+          preset = EdgeLightPreset.GEMINI_FLOW,
+          intensity = EdgeLightIntensity.BRIGHT,
+          brightness = 0.96f,
+          borderThicknessDp = 5.5f,
+          cornerRadiusDp = 34f,
+        ),
+      responseState = if (isThinking) AiResponseState.Thinking() else AiResponseState.Idle,
+      voiceState = voiceState,
+      voiceRmsNormalized = liveAmplitude,
+      screenShareStatus = if (isScreenShareActive) ScreenShareStatus.ACTIVE else ScreenShareStatus.STOPPED,
+      notificationAlertActive = false,
+      isSystemPowerSave = false,
+      currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY),
+      forcePreview = true,
+    )
+
+  val bottomInsets = WindowInsets.navigationBars.union(WindowInsets.ime)
 
   Box(
     modifier =
       Modifier
         .fillMaxSize()
-        .background(
-          Brush.verticalGradient(
-            listOf(Color(0xFF000000), Color(0xFF04143D), Color(0xFF0B2B7E))
-          )
-        )
-        .statusBarsPadding()
-        .navigationBarsPadding()
-        .padding(20.dp)
+        .background(Color.Black)
         .testTag("mousomi_live_overlay")
   ) {
-    Row(
-      modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
-      horizontalArrangement = Arrangement.SpaceBetween,
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        GeminiFourPointSparkle(size = 26.dp, animated = !isPaused)
-        Spacer(modifier = Modifier.width(10.dp))
-        Text(
-          text = "Mousomi Live",
-          color = Color.White,
-          fontFamily = DisplayFontFamily,
-          fontWeight = FontWeight.Medium,
-          fontSize = 20.sp,
-        )
-      }
-      Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-      ) {
-        Surface(
-          shape = CircleShape,
-          color = Color.White.copy(alpha = 0.12f),
-        ) {
-          Text(
-            text =
-              when {
-                isPaused -> "Paused"
-                isMuted -> "Muted"
-                isThinking -> "Thinking"
-                voiceState is VoiceState.Listening -> "Listening"
-                voiceState is VoiceState.Speaking -> "Speaking"
-                voiceState is VoiceState.Error && voiceState.isRecoverableSilence -> "Reconnecting"
-                else -> "Live Ready"
-              },
-            color = if (isPaused) WarmAmber else NeonCyan,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-          )
-        }
-        IconButton(
-          onClick = onMinimize,
-          modifier = Modifier.size(40.dp).testTag("minimize_gemini_live_button"),
-        ) {
-          Icon(
-            imageVector = Icons.Outlined.CloseFullscreen,
-            contentDescription = "Minimize Live Assistant",
-            tint = Color.White,
-            modifier = Modifier.size(20.dp),
-          )
-        }
-      }
-    }
+    // Full-screen rounded neon Border Light matching Reference Image 2
+    EdgeLightPerimeterOverlay(params = edgeParams)
 
+    // Top minimal bar (status pill, timer, minimize, pause/stop controls)
     Column(
       modifier =
         Modifier
-          .align(Alignment.Center)
+          .align(Alignment.TopCenter)
           .fillMaxWidth()
-          .padding(vertical = 56.dp),
-      horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-      AnimatedAIOrb(
-        voiceState = if (isPaused) VoiceState.Idle else voiceState,
-        voiceRmsNormalized = if (isPaused || isMuted) 0f else voiceRmsNormalized,
-        isThinking = !isPaused && isThinking,
-        isMuted = isMuted || isPaused,
-        orbSize = 180.dp,
-        audioMetrics = audioMetrics,
-      )
-
-      Spacer(modifier = Modifier.height(12.dp))
-
-      VoiceWaveform(
-        isActive = !isPaused && !isMuted && (voiceState is VoiceState.Listening || voiceState is VoiceState.Speaking),
-        rmsNormalized = if (isPaused || isMuted) 0f else voiceRmsNormalized,
-      )
-
-      Spacer(modifier = Modifier.height(16.dp))
-
-      Text(
-        text =
-          when {
-            isPaused -> "Live conversation paused"
-            isMuted -> "Microphone muted"
-            isThinking -> "Processing your request…"
-            voiceState is VoiceState.Listening && voiceState.partialTranscript.isNotBlank() ->
-              voiceState.partialTranscript
-            voiceState is VoiceState.Listening -> "Listening continuously…"
-            voiceState is VoiceState.Speaking -> "Speaking response (tap Pause/Mic to interrupt)…"
-            voiceState is VoiceState.Error && voiceState.isRecoverableSilence -> "Listening for your voice…"
-            voiceState is VoiceState.Error -> voiceState.message
-            else -> "Tap mic to speak with Mousomi AI"
-          },
-        color = Color.White,
-        fontFamily = DisplayFontFamily,
-        fontSize = 21.sp,
-        textAlign = TextAlign.Center,
-      )
-      Spacer(modifier = Modifier.height(6.dp))
-      Text(
-        text = "${voiceGender.label} • $selectedModelLabel • Continuous bidirectional turn loop",
-        color = Color.White.copy(alpha = 0.72f),
-        style = MaterialTheme.typography.bodyMedium,
-        textAlign = TextAlign.Center,
-      )
-
-      if (latestAssistantText.isNotBlank()) {
-        Spacer(modifier = Modifier.height(10.dp))
-        Surface(
-          shape = RoundedCornerShape(16.dp),
-          color = Color.White.copy(alpha = 0.1f),
-          border = BorderStroke(1.dp, Color.White.copy(alpha = 0.16f)),
-          modifier = Modifier.fillMaxWidth().heightIn(max = 110.dp),
-        ) {
-          Text(
-            text = latestAssistantText.take(260),
-            color = Color.White.copy(alpha = 0.92f),
-            style = MaterialTheme.typography.bodySmall,
-            maxLines = 4,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(12.dp),
-          )
-        }
-      }
-
-      Spacer(modifier = Modifier.height(12.dp))
-
-      Row(
-        modifier = Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-      ) {
-        VoiceGender.entries.forEach { gender ->
-          FilterChip(
-            selected = voiceGender == gender,
-            onClick = { onSelectVoiceGender(gender) },
-            label = { Text(gender.label) },
-            colors =
-              FilterChipDefaults.filterChipColors(
-                selectedContainerColor = NeonCyan.copy(alpha = 0.25f),
-                selectedLabelColor = Color.White,
-                labelColor = Color.White.copy(alpha = 0.75f),
-              ),
-            modifier = Modifier.testTag("live_voice_gender_${gender.name}"),
-          )
-        }
-      }
-
-      Spacer(modifier = Modifier.height(8.dp))
-
-      Row(
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-      ) {
-        OutlinedButton(
-          onClick = onOpenCamera,
-          border = BorderStroke(1.dp, Color.White.copy(alpha = 0.28f)),
-        ) {
-          Icon(Icons.Outlined.CameraAlt, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-          Spacer(modifier = Modifier.width(6.dp))
-          Text("Camera Vision", color = Color.White, style = MaterialTheme.typography.labelMedium)
-        }
-        OutlinedButton(
-          onClick = onRunDeepSearch,
-          border = BorderStroke(1.dp, Color.White.copy(alpha = 0.28f)),
-        ) {
-          Icon(Icons.Outlined.Public, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-          Spacer(modifier = Modifier.width(6.dp))
-          Text("Deep Research", color = Color.White, style = MaterialTheme.typography.labelMedium)
-        }
-      }
-    }
-
-    Column(
-      modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
-      horizontalAlignment = Alignment.CenterHorizontally,
-      verticalArrangement = Arrangement.spacedBy(12.dp),
+          .statusBarsPadding()
+          .padding(horizontal = 18.dp, vertical = 14.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
       Row(
         modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
       ) {
-        OutlinedTextField(
-          value = followUpText,
-          onValueChange = { followUpText = it },
-          placeholder = { Text("Type a quick follow-up…", color = Color.White.copy(alpha = 0.5f)) },
-          singleLine = true,
-          shape = CircleShape,
-          modifier = Modifier.weight(1f).testTag("live_follow_up_input"),
-        )
-        Surface(
-          onClick = {
-            if (followUpText.isNotBlank()) {
-              val q = followUpText.trim()
-              followUpText = ""
-              onSendFollowUp(q)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          Surface(
+            onClick = { showControlsDrawer = !showControlsDrawer },
+            shape = CircleShape,
+            color = Color(0xFF101524).copy(alpha = 0.85f),
+            border = BorderStroke(0.8.dp, Color.White.copy(alpha = 0.16f)),
+          ) {
+            Row(
+              modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              GeminiFourPointSparkle(size = 16.dp, animated = !isPaused)
+              Text(
+                text = authenticStatusLabel,
+                color = if (isPaused || liveConnectionState is LiveConnectionState.Failed) WarmAmber else NeonCyan,
+                style = MaterialTheme.typography.labelSmall,
+              )
             }
-          },
-          shape = CircleShape,
-          color = NeonCyan,
-          modifier = Modifier.size(48.dp).testTag("live_follow_up_send"),
+          }
+
+          if (liveElapsedSeconds > 0L) {
+            Surface(
+              shape = CircleShape,
+              color = Color(0xFF080D1B).copy(alpha = 0.86f),
+              border = BorderStroke(0.8.dp, Color.White.copy(alpha = 0.16f)),
+              modifier = Modifier.testTag("live_overlay_timer_pill"),
+            ) {
+              Text(
+                text = LiveVoiceSessionManager.formatElapsedMmSs(liveElapsedSeconds),
+                color = Color.White.copy(alpha = 0.94f),
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+              )
+            }
+          }
+        }
+
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-          Box(contentAlignment = Alignment.Center) {
+          Surface(
+            onClick = {
+              if (isPaused) onTogglePause() else if (voiceState !is VoiceState.Listening && !isThinking) onStartListening() else onTogglePause()
+            },
+            shape = CircleShape,
+            color = if (isPaused) NeonCyan else Color(0xFF101524).copy(alpha = 0.85f),
+            border = BorderStroke(0.8.dp, Color.White.copy(alpha = 0.16f)),
+            modifier = Modifier.height(34.dp).testTag("live_pause_toggle_button"),
+          ) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 10.dp)) {
+              Text(
+                text = if (isPaused) "Resume" else "Pause",
+                color = if (isPaused) Color.Black else Color.White,
+                style = MaterialTheme.typography.labelSmall,
+              )
+            }
+          }
+
+          IconButton(
+            onClick = onMinimize,
+            modifier = Modifier.size(36.dp).testTag("minimize_gemini_live_button"),
+          ) {
             Icon(
-              imageVector = Icons.AutoMirrored.Rounded.Send,
-              contentDescription = "Send follow-up",
-              tint = Color.Black,
-              modifier = Modifier.size(20.dp),
+              imageVector = Icons.Outlined.CloseFullscreen,
+              contentDescription = "Minimize Live Assistant",
+              tint = Color.White,
+              modifier = Modifier.size(18.dp),
             )
+          }
+
+          Surface(
+            onClick = {
+              onEmergencyStop()
+              onClose()
+            },
+            shape = CircleShape,
+            color = Color(0xFF991B1B),
+            border = BorderStroke(1.dp, Color(0xFFEF4444)),
+            modifier = Modifier.size(34.dp).testTag("live_emergency_stop_button"),
+          ) {
+            Box(contentAlignment = Alignment.Center) {
+              Icon(Icons.Rounded.Stop, contentDescription = "Emergency Stop", tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+          }
+
+          Surface(
+            onClick = onClose,
+            shape = CircleShape,
+            color = Color(0xFFDC2626),
+            modifier = Modifier.size(34.dp).testTag("close_gemini_live_button"),
+          ) {
+            Box(contentAlignment = Alignment.Center) {
+              Icon(Icons.Rounded.Close, contentDescription = "End Live Voice", tint = Color.White, modifier = Modifier.size(18.dp))
+            }
           }
         }
       }
 
-      Row(
-        modifier = Modifier.padding(bottom = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
+      if (showControlsDrawer) {
+        Surface(
+          shape = RoundedCornerShape(18.dp),
+          color = Color(0xFF0E1320).copy(alpha = 0.90f),
+          border = BorderStroke(1.dp, Color.White.copy(alpha = 0.14f)),
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+              text = "${voiceGender.label} • $selectedModelLabel",
+              color = Color.White.copy(alpha = 0.80f),
+              style = MaterialTheme.typography.labelSmall,
+            )
+            Row(
+              modifier = Modifier.horizontalScroll(rememberScrollState()),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              VoiceGender.entries.forEach { gender ->
+                FilterChip(
+                  selected = voiceGender == gender,
+                  onClick = { onSelectVoiceGender(gender) },
+                  label = { Text(gender.label) },
+                  colors =
+                    FilterChipDefaults.filterChipColors(
+                      selectedContainerColor = NeonCyan.copy(alpha = 0.25f),
+                      selectedLabelColor = Color.White,
+                      labelColor = Color.White.copy(alpha = 0.75f),
+                    ),
+                  modifier = Modifier.testTag("live_voice_gender_${gender.name}"),
+                )
+              }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+              OutlinedButton(
+                onClick = onOpenCamera,
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.28f)),
+              ) {
+                Icon(Icons.Outlined.CameraAlt, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Camera Vision", color = Color.White, style = MaterialTheme.typography.labelMedium)
+              }
+              OutlinedButton(
+                onClick = onRunDeepSearch,
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.28f)),
+              ) {
+                Icon(Icons.Outlined.Public, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Deep Research", color = Color.White, style = MaterialTheme.typography.labelMedium)
+              }
+            }
+          }
+        }
+      }
+
+      if (latestAssistantText.isNotBlank() ||
+        (voiceState is VoiceState.Listening && voiceState.partialTranscript.isNotBlank())
       ) {
         Surface(
-          onClick = onToggleMute,
-          shape = CircleShape,
-          color = if (isMuted) Color.White else Color.White.copy(alpha = 0.16f),
-          modifier = Modifier.size(56.dp).testTag("live_mute_toggle_button"),
+          shape = RoundedCornerShape(18.dp),
+          color = Color(0xFF0E1320).copy(alpha = 0.82f),
+          border = BorderStroke(1.dp, Color.White.copy(alpha = 0.14f)),
+          modifier = Modifier.fillMaxWidth().heightIn(max = 150.dp),
         ) {
-          Box(contentAlignment = Alignment.Center) {
+          Column(modifier = Modifier.padding(12.dp).verticalScroll(rememberScrollState())) {
+            if (voiceState is VoiceState.Listening && voiceState.partialTranscript.isNotBlank()) {
+              Text(
+                text = "\"${voiceState.partialTranscript}\"",
+                color = NeonCyan,
+                style = MaterialTheme.typography.bodySmall,
+              )
+            }
+            if (latestAssistantText.isNotBlank()) {
+              Text(
+                text = latestAssistantText,
+                color = Color.White.copy(alpha = 0.94f),
+                style = MaterialTheme.typography.bodySmall,
+              )
+            }
+          }
+        }
+      }
+    }
+
+    // Bottom Left-Aligned "Share screen with Live" Pill + Glassmorphic "Ask Mousomi..." Bar (Reference Image 2)
+    Column(
+      modifier =
+        Modifier
+          .align(Alignment.BottomCenter)
+          .fillMaxWidth()
+          .windowInsetsPadding(bottomInsets)
+          .padding(horizontal = 16.dp, vertical = 14.dp),
+      horizontalAlignment = Alignment.Start,
+      verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+      Surface(
+        onClick = onShareScreenWithLive,
+        shape = RoundedCornerShape(24.dp),
+        color = Color(0xFF141824).copy(alpha = 0.88f),
+        border =
+          BorderStroke(
+            width = 1.dp,
+            color =
+              if (isScreenShareActive) NeonCyan.copy(alpha = 0.75f)
+              else Color.White.copy(alpha = 0.16f),
+          ),
+        shadowElevation = 10.dp,
+        modifier = Modifier.testTag("live_share_screen_pill"),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 15.dp, vertical = 10.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          Icon(
+            imageVector = Icons.AutoMirrored.Outlined.ScreenShare,
+            contentDescription = null,
+            tint = if (isScreenShareActive) NeonCyan else Color.White.copy(alpha = 0.92f),
+            modifier = Modifier.size(18.dp),
+          )
+          Text(
+            text = if (isScreenShareActive) "Sharing screen with Live" else "Share screen with Live",
+            color = Color.White.copy(alpha = 0.94f),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+          )
+        }
+      }
+
+      Surface(
+        shape = RoundedCornerShape(32.dp),
+        color = Color(0xFF121622).copy(alpha = 0.90f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.15f)),
+        shadowElevation = 14.dp,
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        Row(
+          modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          IconButton(onClick = { showControlsDrawer = !showControlsDrawer }) {
+            Icon(
+              imageVector = Icons.Rounded.Add,
+              contentDescription = "Live options",
+              tint = Color.White.copy(alpha = 0.90f),
+              modifier = Modifier.size(23.dp),
+            )
+          }
+
+          Box(
+            modifier = Modifier.weight(1f).padding(horizontal = 6.dp, vertical = 8.dp),
+            contentAlignment = Alignment.CenterStart,
+          ) {
+            if (followUpText.isEmpty()) {
+              Text(
+                text = "Ask Mousomi...",
+                color = Color.White.copy(alpha = 0.56f),
+                fontSize = 16.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
+            BasicTextField(
+              value = followUpText,
+              onValueChange = { followUpText = it },
+              textStyle = TextStyle(color = Color.White, fontSize = 16.sp),
+              cursorBrush = SolidColor(NeonCyan),
+              maxLines = 3,
+              keyboardOptions =
+                KeyboardOptions(
+                  capitalization = KeyboardCapitalization.Sentences,
+                  imeAction = ImeAction.Send,
+                ),
+              keyboardActions =
+                KeyboardActions(
+                  onSend = {
+                    val q = followUpText.trim()
+                    if (q.isNotEmpty()) {
+                      followUpText = ""
+                      onSendFollowUp(q)
+                    }
+                  }
+                ),
+              modifier = Modifier.fillMaxWidth().testTag("live_follow_up_input"),
+            )
+          }
+
+          IconButton(
+            onClick = onToggleMute,
+            modifier = Modifier.testTag("live_mute_toggle_button"),
+          ) {
             Icon(
               imageVector = if (isMuted) Icons.Outlined.MicOff else Icons.Outlined.Mic,
               contentDescription = if (isMuted) "Unmute" else "Mute",
-              tint = if (isMuted) Color.Black else Color.White,
-              modifier = Modifier.size(24.dp),
+              tint = if (isMuted) WarmAmber else Color.White.copy(alpha = 0.88f),
+              modifier = Modifier.size(22.dp),
             )
           }
-        }
 
-        Surface(
-          onClick = {
-            if (isPaused) onTogglePause() else if (voiceState !is VoiceState.Listening && !isThinking) onStartListening() else onTogglePause()
-          },
-          shape = CircleShape,
-          color = if (isPaused) NeonCyan else Color.White.copy(alpha = 0.16f),
-          border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.65f)),
-          modifier = Modifier.height(50.dp).testTag("live_pause_toggle_button"),
-        ) {
-          Row(
-            modifier = Modifier.padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-          ) {
-            Icon(
-              imageVector = if (isPaused) Icons.Outlined.Mic else Icons.Rounded.Stop,
-              contentDescription = if (isPaused) "Resume Live Voice" else "Pause Live Voice",
-              tint = if (isPaused) Color.Black else Color.White,
-              modifier = Modifier.size(18.dp),
-            )
-            Text(
-              text = if (isPaused) "Resume" else "Pause",
-              color = if (isPaused) Color.Black else Color.White,
-              style = MaterialTheme.typography.labelLarge,
-            )
-          }
-        }
+          Spacer(modifier = Modifier.width(4.dp))
 
-        Surface(
-          onClick = {
-            onEmergencyStop()
-            onClose()
-          },
-          shape = CircleShape,
-          color = Color(0xFF991B1B),
-          border = BorderStroke(1.dp, Color(0xFFEF4444)),
-          modifier = Modifier.height(50.dp).testTag("live_emergency_stop_button"),
-        ) {
-          Row(
-            modifier = Modifier.padding(horizontal = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-          ) {
-            Icon(Icons.Rounded.Stop, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
-            Text("Stop", color = Color.White, style = MaterialTheme.typography.labelLarge)
-          }
-        }
-
-        Surface(
-          onClick = onClose,
-          shape = CircleShape,
-          color = Color(0xFFDC2626),
-          modifier = Modifier.size(56.dp).testTag("close_gemini_live_button"),
-        ) {
-          Box(contentAlignment = Alignment.Center) {
-            Icon(
-              imageVector = Icons.Rounded.Close,
-              contentDescription = "End Live Voice",
-              tint = Color.White,
-              modifier = Modifier.size(26.dp),
+          if (followUpText.isNotBlank()) {
+            Surface(
+              onClick = {
+                val q = followUpText.trim()
+                followUpText = ""
+                onSendFollowUp(q)
+              },
+              shape = CircleShape,
+              color = ElectricBlue,
+              modifier = Modifier.size(44.dp).testTag("live_follow_up_send"),
+            ) {
+              Box(contentAlignment = Alignment.Center) {
+                Icon(
+                  imageVector = Icons.AutoMirrored.Rounded.Send,
+                  contentDescription = "Send follow-up",
+                  tint = Color.White,
+                  modifier = Modifier.size(20.dp),
+                )
+              }
+            }
+          } else {
+            RainbowLiveWaveformDiscButton(
+              onClick = onClose,
+              size = 44.dp,
+              isLiveActive = true,
+              contentDescriptionText = "Return to Standard Assistant",
+              modifier = Modifier.testTag("live_follow_up_send"),
             )
           }
         }
       }
     }
+
+    // Floating Draggable Iridescent Smoke Orb + Organic Audio Waveform above it (Reference Image 2)
+    DraggableLiveOrbStage(
+      reactiveFrame = effectiveFrame,
+      isPaused = isPaused,
+      isMuted = isMuted,
+      reducedMotion = false,
+      onOrbTap = {
+        if (isPaused) onTogglePause()
+        else if (voiceState !is VoiceState.Listening && !isThinking) onStartListening()
+        else onToggleMute()
+      },
+      onDismissLive = onClose,
+      modifier = Modifier.windowInsetsPadding(bottomInsets),
+    )
   }
 }
 
@@ -1307,6 +1469,7 @@ fun MinimizedGeminiLivePill(
   onExpand: () -> Unit,
   onClose: () -> Unit,
   modifier: Modifier = Modifier,
+  reactiveFrame: OrbReactiveFrame? = null,
 ) {
   var offsetX by remember { mutableStateOf(0f) }
   var offsetY by remember { mutableStateOf(0f) }
@@ -1335,20 +1498,27 @@ fun MinimizedGeminiLivePill(
     ) {
       AnimatedAIOrb(
         voiceState = if (isPaused) VoiceState.Idle else voiceState,
-        voiceRmsNormalized = if (isPaused || isMuted) 0f else voiceRmsNormalized,
+        voiceRmsNormalized =
+          if (isPaused || isMuted) 0f else (reactiveFrame?.reactiveAmplitude ?: voiceRmsNormalized),
         isThinking = !isPaused && isThinking,
         isMuted = isMuted || isPaused,
         orbSize = 34.dp,
         audioMetrics = audioMetrics,
+        reactiveFrame = reactiveFrame,
       )
       Text(
         text =
           when {
             isPaused -> "Paused"
             isMuted -> "Muted"
-            isThinking -> "Thinking"
-            voiceState is VoiceState.Listening -> "Listening"
-            voiceState is VoiceState.Speaking -> "Speaking"
+            reactiveFrame?.sessionPhase == LiveSessionPhase.CONNECTING -> "Connecting"
+            reactiveFrame?.sessionPhase == LiveSessionPhase.RECONNECTING -> "Reconnecting"
+            isThinking || reactiveFrame?.sessionPhase == LiveSessionPhase.AI_PROCESSING -> "Thinking"
+            voiceState is VoiceState.Speaking ||
+              reactiveFrame?.sessionPhase == LiveSessionPhase.AI_SPEAKING -> "Speaking"
+            voiceState is VoiceState.Listening ||
+              reactiveFrame?.sessionPhase == LiveSessionPhase.LISTENING ||
+              reactiveFrame?.sessionPhase == LiveSessionPhase.USER_SPEAKING -> "Listening"
             else -> "Live"
           },
         color = Color.White,

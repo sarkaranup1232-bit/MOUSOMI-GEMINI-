@@ -1,32 +1,17 @@
 package com.example.core.voice
 
-import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.util.Log
-import androidx.core.content.ContextCompat
 import com.example.core.assistant.AssistantSessionStateManager
 import com.example.core.assistant.VoiceSubsystemPhase
-import com.example.domain.model.ResponseLanguage
-import com.example.domain.model.VerifiedModelCatalog
-import com.example.domain.model.VoiceGender
 import com.example.domain.model.VoicePreferences
-import com.google.firebase.Firebase
-import com.google.firebase.FirebaseApp
-import com.google.firebase.ai.ai
-import com.google.firebase.ai.type.AudioTranscriptionConfig
 import com.google.firebase.ai.type.LiveSession
 import com.google.firebase.ai.type.PublicPreviewAPI
-import com.google.firebase.ai.type.ResponseModality
-import com.google.firebase.ai.type.SpeechConfig
-import com.google.firebase.ai.type.Voice
-import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.liveAudioConversationConfig
-import com.google.firebase.ai.type.liveGenerationConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
@@ -58,9 +43,10 @@ sealed interface LiveVoiceSessionStatus {
 
 /**
  * Real bidirectional Gemini Live Audio engine backed by Firebase AI Logic LiveSession.
- * - Maintains a persistent WebSocket session across multi-second silence pauses with zero
- *   repeated SpeechRecognizer chimes or mic contention.
- * - Releases AudioSmokeAnalyzer before acquiring hardware AudioRecord.
+ * - Coordinates handshake through [LiveConnectionManager] (no fake Connected state before handshake).
+ * - Acquires exclusive hardware mic ownership through [MicrophoneInputManager].
+ * - Drives real outgoing AI playback metering through [AudioOutputAnalyzer] & [LiveVoiceSessionManager].
+ * - Tolerates ordinary silent pauses cleanly without drops or fake audio spikes.
  * - Manages Android AudioFocus cleanly for interruptions and phone calls.
  */
 @OptIn(PublicPreviewAPI::class)
@@ -69,6 +55,10 @@ class GeminiLiveVoiceEngine @Inject constructor(
   @ApplicationContext private val context: Context,
   private val audioSmokeAnalyzer: AudioSmokeAnalyzer,
   private val sessionStateManager: AssistantSessionStateManager,
+  private val connectionManager: LiveConnectionManager,
+  private val micManager: MicrophoneInputManager,
+  private val liveVoiceSessionManager: LiveVoiceSessionManager,
+  private val audioOutputAnalyzer: AudioOutputAnalyzer,
 ) {
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -77,6 +67,7 @@ class GeminiLiveVoiceEngine @Inject constructor(
   private var activeSession: LiveSession? = null
   private var sessionJob: Job? = null
   private var reconnectJob: Job? = null
+  private var outputDecayJob: Job? = null
   private var focusRequest: AudioFocusRequest? = null
 
   private val isUserPaused = AtomicBoolean(false)
@@ -106,17 +97,14 @@ class GeminiLiveVoiceEngine @Inject constructor(
           }
         }
         AudioManager.AUDIOFOCUS_GAIN -> {
-          // User can tap Resume intentionally; avoid sudden unrequested mic hot-start after calls
+          // Wait for explicit Resume so calls never unexpectedly re-open mic
         }
       }
     }
 
-  fun isFirebaseAvailable(): Boolean =
-    runCatching { FirebaseApp.getApps(context).isNotEmpty() }.getOrDefault(false)
+  fun isFirebaseAvailable(): Boolean = connectionManager.isFirebaseAvailable()
 
-  fun hasMicPermission(): Boolean =
-    ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-      PackageManager.PERMISSION_GRANTED
+  fun hasMicPermission(): Boolean = micManager.hasMicPermission()
 
   fun startSession(
     preferences: VoicePreferences,
@@ -124,34 +112,40 @@ class GeminiLiveVoiceEngine @Inject constructor(
     allowInterruptions: Boolean = true,
     onFallbackRequired: ((String) -> Unit)? = null,
   ) {
+    lastPreferences = preferences
+    lastSystemInstruction =
+      connectionManager.buildSystemInstruction(systemInstruction, preferences.preferredLanguage)
+    lastAllowInterruptions = allowInterruptions
+
     if (!hasMicPermission()) {
       val msg = "Microphone permission is required for Live Voice."
       _status.value = LiveVoiceSessionStatus.Failed(msg)
+      liveVoiceSessionManager.onFailed(msg)
       sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.ERROR, msg)
       return
     }
     if (!isFirebaseAvailable()) {
-      val msg = "Firebase AI Logic is not initialized; falling back to standard speech mode."
+      val msg = "Firebase AI Logic is not initialized; falling back to standard continuous speech."
+      connectionManager.markFallbackContinuous(msg)
       _status.value = LiveVoiceSessionStatus.Failed(msg)
+      liveVoiceSessionManager.onBeginSession(preferences, allowInterruptions)
       onFallbackRequired?.invoke(msg)
       return
     }
 
-    lastPreferences = preferences
-    lastSystemInstruction =
-      buildSystemInstruction(systemInstruction, preferences.preferredLanguage)
-    lastAllowInterruptions = allowInterruptions
     isShuttingDown.set(false)
     isUserPaused.set(false)
     isUserMuted.set(false)
     reconnectAttempts = 0
 
-    // Guarantee exclusive hardware mic ownership before LiveSession opens AudioRecord
-    audioSmokeAnalyzer.stopCapture()
+    // Guarantee single exclusive mic owner before LiveSession opens AudioRecord
+    micManager.acquireExclusiveForExternal(OWNER_TAG)
     sessionJob?.cancel()
     reconnectJob?.cancel()
+    outputDecayJob?.cancel()
 
     _status.value = LiveVoiceSessionStatus.Connecting
+    liveVoiceSessionManager.onBeginSession(preferences, allowInterruptions)
     sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.CONNECTING)
 
     sessionJob =
@@ -160,21 +154,16 @@ class GeminiLiveVoiceEngine @Inject constructor(
           closeExistingSessionQuietly()
           requestLiveAudioFocus()
 
-          val voiceName = voiceNameFor(preferences.voiceGender)
-          val liveModel =
-            Firebase.ai.liveModel(
-              modelName = VerifiedModelCatalog.DEFAULT_LIVE_AUDIO_MODEL_ID,
-              generationConfig =
-                liveGenerationConfig {
-                  responseModality = ResponseModality.AUDIO
-                  speechConfig = SpeechConfig(voice = Voice(voiceName))
-                  inputAudioTranscription = AudioTranscriptionConfig()
-                  outputAudioTranscription = AudioTranscriptionConfig()
-                },
-              systemInstruction = content { text(lastSystemInstruction) },
+          val connectResult =
+            connectionManager.openVerifiedLiveSession(
+              preferences = preferences,
+              systemInstruction = lastSystemInstruction,
             )
+          val session =
+            connectResult.getOrElse { err ->
+              throw err
+            }
 
-          val session = liveModel.connect()
           activeSession = session
           if (isShuttingDown.get()) {
             closeExistingSessionQuietly()
@@ -182,8 +171,8 @@ class GeminiLiveVoiceEngine @Inject constructor(
           }
 
           _status.value = LiveVoiceSessionStatus.Active
+          liveVoiceSessionManager.onHandshakeSucceeded()
           sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.LISTENING)
-          audioSmokeAnalyzer.publishExternalRms(0.24f)
 
           val conversationConfig =
             liveAudioConversationConfig {
@@ -193,16 +182,21 @@ class GeminiLiveVoiceEngine @Inject constructor(
                 val modelText = outputTranscript?.text?.trim().orEmpty()
                 if (userText.isNotBlank()) {
                   _userTranscript.value = userText
+                  liveVoiceSessionManager.onUserSpeakingDetected()
                   sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.USER_SPEAKING)
-                  audioSmokeAnalyzer.publishExternalRms(0.62f)
+                  scheduleSilenceReturnToListening()
                 }
                 if (modelText.isNotBlank()) {
                   _assistantTranscript.value = modelText
+                  liveVoiceSessionManager.onAiSpeakingStarted(0)
+                  audioOutputAnalyzer.onPlaybackAmplitudeSample(
+                    estimateSyllableImpulse(modelText)
+                  )
                   sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.AI_RESPONDING)
-                  audioSmokeAnalyzer.publishExternalRms(0.75f)
+                  scheduleOutputIdleReturn()
                 } else if (userText.isBlank() && !isUserPaused.get() && !isUserMuted.get()) {
+                  liveVoiceSessionManager.onSilenceTick()
                   sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.LISTENING)
-                  audioSmokeAnalyzer.publishExternalRms(0.2f)
                 }
               }
               goAwayHandler = { _ ->
@@ -217,17 +211,44 @@ class GeminiLiveVoiceEngine @Inject constructor(
           throw ce
         } catch (t: Throwable) {
           Log.w(TAG, "Gemini Live session error", t)
-          audioSmokeAnalyzer.publishExternalRms(0f)
+          audioOutputAnalyzer.stopMonitoring()
+          micManager.releaseExternalOwnership(OWNER_TAG)
           if (!isShuttingDown.get() && !isUserPaused.get()) {
-            val errMsg = t.localizedMessage?.takeIf { it.isNotBlank() } ?: "Unable to connect to Gemini Live session."
+            val errMsg =
+              t.localizedMessage?.takeIf { it.isNotBlank() } ?: "Unable to connect to Gemini Live session."
             if (reconnectAttempts == 0 && isTransientNetworkError(t)) {
               scheduleBoundedReconnect(onFallbackRequired)
             } else {
               _status.value = LiveVoiceSessionStatus.Failed(errMsg)
+              liveVoiceSessionManager.onFailed(errMsg)
               sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.ERROR, errMsg)
               onFallbackRequired?.invoke(errMsg)
             }
           }
+        }
+      }
+  }
+
+  private fun scheduleOutputIdleReturn() {
+    outputDecayJob?.cancel()
+    outputDecayJob =
+      scope.launch {
+        delay(900L)
+        if (!isShuttingDown.get() && !isUserPaused.get()) {
+          liveVoiceSessionManager.onAiSpeakingFinished()
+          sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.LISTENING)
+        }
+      }
+  }
+
+  private fun scheduleSilenceReturnToListening() {
+    outputDecayJob?.cancel()
+    outputDecayJob =
+      scope.launch {
+        delay(750L)
+        if (!isShuttingDown.get() && !isUserPaused.get() && !isUserMuted.get()) {
+          liveVoiceSessionManager.onSilenceTick()
+          sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.LISTENING)
         }
       }
   }
@@ -239,9 +260,11 @@ class GeminiLiveVoiceEngine @Inject constructor(
 
   private fun pauseSessionInternal(reasonToast: String?) {
     reconnectJob?.cancel()
+    outputDecayJob?.cancel()
     runCatching { activeSession?.stopAudioConversation() }
     abandonLiveAudioFocus()
-    audioSmokeAnalyzer.publishExternalRms(0f)
+    audioOutputAnalyzer.stopMonitoring()
+    liveVoiceSessionManager.onPaused()
     _status.value = LiveVoiceSessionStatus.Paused
     sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.PAUSED, reasonToast)
   }
@@ -249,6 +272,8 @@ class GeminiLiveVoiceEngine @Inject constructor(
   fun resumeSession(onFallbackRequired: ((String) -> Unit)? = null) {
     if (!hasMicPermission()) return
     isUserPaused.set(false)
+    micManager.acquireExclusiveForExternal(OWNER_TAG)
+    liveVoiceSessionManager.onResumed()
     val existing = activeSession
     if (existing != null && !existing.isAudioConversationActive()) {
       sessionJob?.cancel()
@@ -257,6 +282,7 @@ class GeminiLiveVoiceEngine @Inject constructor(
           try {
             requestLiveAudioFocus()
             _status.value = LiveVoiceSessionStatus.Active
+            liveVoiceSessionManager.onHandshakeSucceeded()
             sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.LISTENING)
             existing.startAudioConversation(
               liveAudioConversationConfig {
@@ -266,11 +292,18 @@ class GeminiLiveVoiceEngine @Inject constructor(
                   val modelText = outputTranscript?.text?.trim().orEmpty()
                   if (userText.isNotBlank()) {
                     _userTranscript.value = userText
+                    liveVoiceSessionManager.onUserSpeakingDetected()
                     sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.USER_SPEAKING)
+                    scheduleSilenceReturnToListening()
                   }
                   if (modelText.isNotBlank()) {
                     _assistantTranscript.value = modelText
+                    liveVoiceSessionManager.onAiSpeakingStarted(0)
+                    audioOutputAnalyzer.onPlaybackAmplitudeSample(
+                      estimateSyllableImpulse(modelText)
+                    )
                     sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.AI_RESPONDING)
+                    scheduleOutputIdleReturn()
                   }
                 }
                 goAwayHandler = {
@@ -293,9 +326,9 @@ class GeminiLiveVoiceEngine @Inject constructor(
 
   fun setMuted(muted: Boolean) {
     isUserMuted.set(muted)
+    liveVoiceSessionManager.setMuted(muted)
     if (muted) {
       runCatching { activeSession?.stopAudioConversation() }
-      audioSmokeAnalyzer.publishExternalRms(0f)
       if (!isUserPaused.get()) {
         _status.value = LiveVoiceSessionStatus.Paused
         sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.PAUSED)
@@ -309,6 +342,7 @@ class GeminiLiveVoiceEngine @Inject constructor(
     val clean = text.trim()
     val session = activeSession ?: return
     if (clean.isBlank()) return
+    liveVoiceSessionManager.onAiProcessing()
     scope.launch {
       runCatching {
         session.send(clean, true)
@@ -316,20 +350,23 @@ class GeminiLiveVoiceEngine @Inject constructor(
     }
   }
 
-  fun stopAndClose() {
+  fun stopAndClose(keepScreenShare: Boolean = false) {
     isShuttingDown.set(true)
     isUserPaused.set(false)
     isUserMuted.set(false)
     reconnectJob?.cancel()
     reconnectJob = null
+    outputDecayJob?.cancel()
+    outputDecayJob = null
     sessionJob?.cancel()
     sessionJob = null
-    audioSmokeAnalyzer.publishExternalRms(0f)
+    micManager.releaseExternalOwnership(OWNER_TAG)
+    audioOutputAnalyzer.stopMonitoring()
     abandonLiveAudioFocus()
     val toClose = activeSession
     activeSession = null
     _status.value = LiveVoiceSessionStatus.Disconnected
-    sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.IDLE)
+    liveVoiceSessionManager.onEnded(keepScreenShare = keepScreenShare)
     if (toClose != null) {
       scope.launch {
         runCatching { toClose.stopAudioConversation() }
@@ -342,12 +379,14 @@ class GeminiLiveVoiceEngine @Inject constructor(
     if (reconnectAttempts >= 2 || isShuttingDown.get()) {
       val msg = "Live voice connection closed after retry attempts."
       _status.value = LiveVoiceSessionStatus.Failed(msg)
+      liveVoiceSessionManager.onFailed(msg)
       sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.ERROR, msg)
       onFallbackRequired?.invoke(msg)
       return
     }
     reconnectAttempts += 1
     _status.value = LiveVoiceSessionStatus.Reconnecting(reconnectAttempts)
+    liveVoiceSessionManager.onReconnecting(reconnectAttempts)
     reconnectJob?.cancel()
     reconnectJob =
       scope.launch {
@@ -399,31 +438,19 @@ class GeminiLiveVoiceEngine @Inject constructor(
     }
   }
 
-  private fun voiceNameFor(gender: VoiceGender): String =
-    when (gender) {
-      VoiceGender.MALE -> "Charon"
-      VoiceGender.FEMALE -> "Aoede"
-    }
-
-  private fun buildSystemInstruction(custom: String?, language: ResponseLanguage): String {
-    val langHint =
-      when (language) {
-        ResponseLanguage.BENGALI -> "Respond concisely and naturally in Bengali unless asked otherwise."
-        ResponseLanguage.HINDI -> "Respond concisely and naturally in Hindi unless asked otherwise."
-        ResponseLanguage.ENGLISH -> "Respond concisely and naturally in English."
-        ResponseLanguage.AUTO -> "Match the user's spoken language naturally and respond concisely."
-      }
-    val base = custom?.takeIf { it.isNotBlank() } ?: DEFAULT_SYSTEM_INSTRUCTION
-    return "$base $langHint"
-  }
-
   private fun isTransientNetworkError(t: Throwable): Boolean {
     val msg = t.message.orEmpty().lowercase()
     return msg.contains("timeout") || msg.contains("socket") || msg.contains("connection") || msg.contains("unavailable")
   }
 
+  private fun estimateSyllableImpulse(deltaText: String): Float {
+    val vowels = deltaText.count { it.lowercaseChar() in "aeiouáéíóúঅআইঈউঊএঐওঔ" }.coerceAtLeast(1)
+    return (0.28f + (vowels.coerceAtMost(8) / 14f)).coerceIn(0.28f, 0.85f)
+  }
+
   companion object {
     private const val TAG = "GeminiLiveVoiceEngine"
+    private const val OWNER_TAG = "gemini_live_session"
     private const val DEFAULT_SYSTEM_INSTRUCTION =
       "You are Mousomi AI, a fast, helpful, conversational Android assistant."
   }

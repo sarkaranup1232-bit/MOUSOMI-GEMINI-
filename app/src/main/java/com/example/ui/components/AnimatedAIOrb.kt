@@ -46,9 +46,12 @@ fun AnimatedAIOrb(
   modifier: Modifier = Modifier,
   audioMetrics: VoiceAudioMetrics = VoiceAudioMetrics.SILENT,
   reducedMotion: Boolean = false,
+  lowPowerMode: Boolean = false,
+  reactiveFrame: com.example.core.voice.OrbReactiveFrame? = null,
 ) {
   val mode =
     when {
+      reactiveFrame != null -> reactiveFrame.orbMode
       isThinking -> OrbVisualMode.PROCESSING
       voiceState is VoiceState.Speaking -> OrbVisualMode.SPEAKING
       voiceState is VoiceState.Listening -> OrbVisualMode.LISTENING
@@ -66,8 +69,10 @@ fun AnimatedAIOrb(
       fallbackRms = voiceRmsNormalized,
       isMuted = isMuted,
       reducedMotion = reducedMotion,
+      lowPowerMode = lowPowerMode,
       orbSize = orbSize,
       showCenterSparkle = true,
+      reactiveFrame = reactiveFrame,
     )
   }
 }

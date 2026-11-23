@@ -63,8 +63,6 @@ object AssistantRoleHelper {
         return roleManager.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT)
       }
     }
-    return Intent(Settings.ACTION_VOICE_INPUT_SETTINGS).apply {
-      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    }
+    return Intent(Settings.ACTION_VOICE_INPUT_SETTINGS)
   }
 }

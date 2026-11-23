@@ -4,8 +4,8 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 enum class VoiceGender(val label: String, val preferredPitch: Float) {
-  FEMALE("Female (Default)", 1.06f),
-  MALE("Male", 0.88f),
+  FEMALE("Female (Default)", 1.0f),
+  MALE("Male", 0.96f),
 }
 
 @Serializable
@@ -153,6 +153,7 @@ enum class PermissionCategory(val title: String, val group: String) {
   BATTERY_OPTIMIZATION("Battery Optimization & Background", "Performance"),
   NFC_HARDWARE("NFC Hardware Status", "Other Hardware"),
   USB_DEVICES("USB Device Connection", "Other Hardware"),
+  DEFAULT_ASSISTANT("Default Digital Assistant Role", "System Assistant"),
 }
 
 data class PermissionCategoryItem(

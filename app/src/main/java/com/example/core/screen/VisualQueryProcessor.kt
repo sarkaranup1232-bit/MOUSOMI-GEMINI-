@@ -4,7 +4,9 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
 import com.example.core.image.ImageProcessor
+import com.example.domain.model.NormBoundingBox
 import com.example.domain.model.ProcessedImagePayload
+import com.example.domain.model.ScreenShareStatus
 import com.example.ui.model.AttachmentPreview
 import java.io.File
 import javax.inject.Inject
@@ -25,6 +27,13 @@ class VisualQueryProcessor @Inject constructor(
     val userDisplayPrompt: String,
     val modelPrompt: String,
     val payloads: List<ProcessedImagePayload>,
+  )
+
+  data class PreparedScreenSharePayload(
+    val payload: ProcessedImagePayload,
+    val uriString: String,
+    val width: Int,
+    val height: Int,
   )
 
   suspend fun prepareQuery(
@@ -72,6 +81,68 @@ class VisualQueryProcessor @Inject constructor(
         userDisplayPrompt = if (trimmed.isNotEmpty()) trimmed else "Analyze selected screen region",
         modelPrompt = effectivePrompt,
         payloads = payloads,
+      )
+    }
+
+  suspend fun prepareScreenSharePayload(
+    screenShareSessionManager: ScreenShareSessionManager?,
+    screenshotCaptureManager: ScreenshotCaptureManager? = null,
+    smartCropEngine: SmartCropEngine? = null,
+    cropBox: NormBoundingBox? = null,
+  ): PreparedScreenSharePayload? =
+    withContext(Dispatchers.IO) {
+      val shareMgr = screenShareSessionManager ?: return@withContext null
+      if (shareMgr.status.value == ScreenShareStatus.STOPPED ||
+        shareMgr.status.value == ScreenShareStatus.REQUESTING_CONSENT
+      ) {
+        return@withContext null
+      }
+
+      var resolvedPath: String? = null
+      var resolvedMeta: ScreenCaptureMetadata? = null
+
+      if (screenshotCaptureManager != null) {
+        when (val outcome = screenshotCaptureManager.captureAuthorizedScreenFrame()) {
+          is ScreenshotCaptureManager.CaptureOutcome.Success -> {
+            resolvedPath = outcome.filePath
+            resolvedMeta = outcome.metadata
+          }
+          else -> Unit
+        }
+      }
+
+      if (resolvedPath.isNullOrBlank()) {
+        val cached = shareMgr.getLatestFrame()
+        if (cached != null && File(cached.filePath).exists()) {
+          resolvedPath = cached.filePath
+        }
+      }
+
+      val framePath = resolvedPath ?: return@withContext null
+      val finalFilePath =
+        if (cropBox != null && cropBox.isValid() && smartCropEngine != null) {
+          smartCropEngine
+            .cropFromFile(
+              sourceFilePath = framePath,
+              normBox = cropBox,
+              metadata = resolvedMeta,
+              prefix = "share_crop_",
+            )
+            .getOrNull()
+            ?.file
+            ?.absolutePath
+            ?: framePath
+        } else {
+          framePath
+        }
+
+      val uriString = Uri.fromFile(File(finalFilePath)).toString()
+      val payload = decodeLocalFilePayload(finalFilePath, uriString) ?: return@withContext null
+      PreparedScreenSharePayload(
+        payload = payload,
+        uriString = uriString,
+        width = payload.width,
+        height = payload.height,
       )
     }
 

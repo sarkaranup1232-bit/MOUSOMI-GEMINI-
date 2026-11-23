@@ -404,11 +404,11 @@ class AddOnModulesTest {
   }
 
   @Test
-  fun `PermissionCenterScreen displays all 20 categories including Exact Alarm, Location, NFC, and USB`() {
+  fun `PermissionCenterScreen displays all 21 categories including Exact Alarm, Location, NFC, USB, and Default Assistant`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val categories = PermissionManager(context).refreshAll(ScreenShareStatus.STOPPED)
-    assertEquals(20, PermissionCategory.entries.size)
-    assertEquals(20, categories.size)
+    assertEquals(21, PermissionCategory.entries.size)
+    assertEquals(21, categories.size)
 
     composeRule.setContent {
       MousomiTheme(themeMode = AppThemeMode.DARK) {

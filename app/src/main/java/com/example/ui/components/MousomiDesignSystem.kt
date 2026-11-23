@@ -351,6 +351,14 @@ fun NeonChatComposer(
   attachedVisualsByUri: Map<String, AttachedVisualItem> = emptyMap(),
   onEditImagesClick: (() -> Unit)? = null,
   composerFocusRequester: FocusRequester? = null,
+  voiceRmsNormalized: Float = 0f,
+  isVoiceListening: Boolean = false,
+  isInlineDictationActive: Boolean = false,
+  isInlineDictationPaused: Boolean = false,
+  inlineDictationError: String? = null,
+  onPauseVoiceDictation: () -> Unit = {},
+  onStopVoiceDictation: () -> Unit = {},
+  onRetryVoiceDictation: () -> Unit = {},
 ) {
   val colors = LocalMousomiColors.current
   val onBg = MaterialTheme.colorScheme.onBackground
@@ -745,6 +753,20 @@ fun NeonChatComposer(
         modifier = Modifier.fillMaxWidth().padding(glowBleedDp + borderStrokeDp),
       ) {
         Column(modifier = Modifier.fillMaxWidth().animateContentSize()) {
+          if (isInlineDictationActive || !inlineDictationError.isNullOrBlank()) {
+            ChatBarVoiceWaveformStrip(
+              rmsNormalized = voiceRmsNormalized,
+              isListening = isVoiceListening && !isInlineDictationPaused,
+              isPaused = isInlineDictationPaused,
+              errorMessage = inlineDictationError,
+              onStartOrResume = onVoiceClick,
+              onPause = onPauseVoiceDictation,
+              onStop = onStopVoiceDictation,
+              onRetry = onRetryVoiceDictation,
+              modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 2.dp),
+            )
+          }
+
           if (pendingAttachments.isNotEmpty()) {
             ChatComposerAttachmentView(
               pendingAttachments = pendingAttachments,
@@ -887,16 +909,15 @@ fun NeonChatComposer(
                   }
                 }
                 else ->
-                  Surface(
+                  RainbowLiveWaveformDiscButton(
                     onClick = onLiveClick,
-                    shape = CircleShape,
-                    color = ElectricBlue,
-                    modifier = Modifier.size(44.dp).testTag("gemini_live_button"),
-                  ) {
-                    Box(contentAlignment = Alignment.Center) {
-                      GeminiLiveWaveformIcon(tint = Color.White, size = 21.dp)
-                    }
-                  }
+                    size = 44.dp,
+                    isLiveActive = false,
+                    isMicActive = isVoiceListening && !isInlineDictationPaused,
+                    voiceRmsNormalized = voiceRmsNormalized,
+                    contentDescriptionText = stringResource(R.string.cd_gemini_live),
+                    modifier = Modifier.testTag("gemini_live_button"),
+                  )
               }
             }
           }

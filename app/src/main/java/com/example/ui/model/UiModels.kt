@@ -2,9 +2,14 @@ package com.example.ui.model
 
 import com.example.core.assistant.AssistantSessionPhase
 import com.example.core.assistant.EdgeActivationSignal
+import com.example.core.device.PendingPhoneAction
+import com.example.core.device.PendingSocialAction
 import com.example.core.screen.AttachedVisualItem
 import com.example.core.screen.ImageEditState
 import com.example.core.screen.ScreenSelectionUiState
+import com.example.core.voice.LiveConnectionState
+import com.example.core.voice.LiveSessionPhase
+import com.example.core.voice.OrbReactiveFrame
 import com.example.core.voice.VoiceState
 import com.example.domain.model.ActiveEditImageTarget
 import com.example.domain.model.AgentBudgetConfig
@@ -241,6 +246,9 @@ data class MousomiUiState(
   val isLiveVoicePaused: Boolean = false,
   val isLiveVoiceMuted: Boolean = false,
   val isVoiceDialogOpen: Boolean = false,
+  val isInlineDictationSessionActive: Boolean = false,
+  val isInlineDictationPaused: Boolean = false,
+  val inlineDictationError: String? = null,
   val isDrawingOverlayOpen: Boolean = false,
   val isQuickNoteDialogOpen: Boolean = false,
   val hasAudioPermission: Boolean = false,
@@ -297,6 +305,12 @@ data class MousomiUiState(
   val edgeActivationSignal: EdgeActivationSignal = EdgeActivationSignal(),
   val liveAssistantTranscript: String = "",
   val isUsingGeminiLiveSocket: Boolean = false,
+  val liveSessionPhase: LiveSessionPhase = LiveSessionPhase.IDLE,
+  val liveConnectionState: LiveConnectionState = LiveConnectionState.Disconnected,
+  val liveElapsedSeconds: Long = 0L,
+  val orbReactiveFrame: OrbReactiveFrame = OrbReactiveFrame.IDLE,
+  val pendingPhoneAction: PendingPhoneAction? = null,
+  val pendingSocialAction: PendingSocialAction? = null,
 ) {
   val pendingAttachment: AttachmentPreview?
     get() = pendingAttachments.firstOrNull()

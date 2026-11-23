@@ -62,7 +62,14 @@ enum class ResponseLanguage(val label: String, val localeTag: String) {
   AUTO("Auto (Match Prompt)", "en-US"),
   ENGLISH("English", "en-US"),
   BENGALI("বাংলা (Bengali)", "bn-BD"),
-  HINDI("हिन्दी (Hindi)", "hi-IN"),
+  HINDI("हिन्दी (Hindi)", "hi-IN");
+
+  fun effectiveLocaleTag(): String =
+    if (this == AUTO) {
+      java.util.Locale.getDefault().toLanguageTag().takeIf { it.isNotBlank() && it != "und" } ?: "en-US"
+    } else {
+      localeTag
+    }
 }
 
 data class AiCapabilities(

@@ -28,9 +28,12 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ScreenShare
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -56,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.core.edge.EdgeLightStateMapper
+import com.example.core.voice.VoiceState
 import com.example.domain.model.MemoryCategory
 import com.example.domain.model.ScreenShareStatus
 import com.example.ui.components.ChatMessagesList
@@ -425,8 +429,8 @@ fun MainChatScreen(
               if (granted) {
                 viewModel.onToggleGeminiLive(true)
               } else {
+                viewModel.onRequestPendingLiveAfterPermission()
                 audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                viewModel.onToggleGeminiLive(true)
               }
             },
             onSendClick = viewModel::onSendMessage,
@@ -435,6 +439,14 @@ fun MainChatScreen(
             attachedVisualsByUri = uiState.attachedVisualsByUri,
             onEditImagesClick = { viewModel.onOpenCompactImageEditor() },
             composerFocusRequester = composerFocusRequester,
+            voiceRmsNormalized = uiState.voiceRmsNormalized,
+            isVoiceListening = uiState.voiceState is VoiceState.Listening,
+            isInlineDictationActive = uiState.isInlineDictationSessionActive,
+            isInlineDictationPaused = uiState.isInlineDictationPaused,
+            inlineDictationError = uiState.inlineDictationError,
+            onPauseVoiceDictation = viewModel::onPauseInlineDictation,
+            onStopVoiceDictation = viewModel::onStopInlineDictation,
+            onRetryVoiceDictation = viewModel::onRetryInlineDictation,
             modifier = Modifier.widthIn(max = 760.dp),
           )
         }
@@ -573,17 +585,6 @@ fun MainChatScreen(
         )
       }
 
-      if (uiState.isVoiceDialogOpen) {
-        VoiceInputDialog(
-          hasAudioPermission = uiState.hasAudioPermission,
-          voiceState = uiState.voiceState,
-          onStartListening = viewModel::onStartVoiceListening,
-          onStopListening = viewModel::onStopVoiceListening,
-          onUseTranscript = viewModel::onInputChanged,
-          onDismiss = { viewModel.onToggleVoiceDialog(false) },
-        )
-      }
-
       AnimatedVisibility(
         visible = uiState.isGeminiLiveOpen && !uiState.isGeminiLiveMinimized,
         enter = fadeIn(),
@@ -620,6 +621,11 @@ fun MainChatScreen(
           onEmergencyStop = viewModel::onTriggerEmergencyStop,
           onClose = { viewModel.onToggleGeminiLive(false) },
           audioMetrics = uiState.voiceAudioMetrics,
+          reactiveFrame = uiState.orbReactiveFrame,
+          liveConnectionState = uiState.liveConnectionState,
+          liveElapsedSeconds = uiState.liveElapsedSeconds,
+          isScreenShareActive = uiState.screenShareStatus != ScreenShareStatus.STOPPED,
+          onShareScreenWithLive = { viewModel.onShareScreenWithLive(onRequestStartScreenShare) },
         )
       }
 
@@ -646,6 +652,7 @@ fun MainChatScreen(
           onToggleMute = viewModel::onToggleMuteLiveVoice,
           onExpand = { viewModel.onToggleGeminiLiveMinimized(false) },
           onClose = { viewModel.onToggleGeminiLive(false) },
+          reactiveFrame = uiState.orbReactiveFrame,
         )
       }
 
@@ -717,6 +724,48 @@ fun MainChatScreen(
           onResetCrop = viewModel::onResetEditorCrop,
           onCancel = viewModel::onCancelImageEditor,
           onConfirm = viewModel::onConfirmImageEditor,
+        )
+      }
+
+      uiState.pendingPhoneAction?.let { phoneAction ->
+        AlertDialog(
+          onDismissRequest = viewModel::onDismissPendingActions,
+          title = { Text(phoneAction.type.title) },
+          text = { Text(phoneAction.summary) },
+          confirmButton = {
+            Button(
+              onClick = viewModel::onConfirmPendingPhoneAction,
+              modifier = Modifier.testTag("confirm_phone_action_button"),
+            ) {
+              Text("Open Composer")
+            }
+          },
+          dismissButton = {
+            OutlinedButton(onClick = viewModel::onDismissPendingActions) {
+              Text("Cancel")
+            }
+          },
+        )
+      }
+
+      uiState.pendingSocialAction?.let { socialAction ->
+        AlertDialog(
+          onDismissRequest = viewModel::onDismissPendingActions,
+          title = { Text("Confirm ${socialAction.platform.displayName}") },
+          text = { Text(socialAction.summary) },
+          confirmButton = {
+            Button(
+              onClick = viewModel::onConfirmPendingSocialAction,
+              modifier = Modifier.testTag("confirm_social_action_button"),
+            ) {
+              Text("Open ${socialAction.platform.displayName}")
+            }
+          },
+          dismissButton = {
+            OutlinedButton(onClick = viewModel::onDismissPendingActions) {
+              Text("Cancel")
+            }
+          },
         )
       }
     }

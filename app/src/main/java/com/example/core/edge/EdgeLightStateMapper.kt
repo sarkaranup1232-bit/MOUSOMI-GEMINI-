@@ -200,10 +200,12 @@ object EdgeLightStateMapper {
         listOf(
           0xFF06B6D4L, // Crisp Neon Cyan
           0xFF22D3EEL, // Luminous Bright Cyan
-          0xFF3B82F6L, // Electric Blue
-          0xFF6366F1L, // Crisp Indigo
+          0xFF3B82F6L, // Royal / Electric Blue
           0xFF8B5CF6L, // Vibrant Violet
           0xFFA855F7L, // Deep Neon Purple
+          0xFFEC4899L, // Magenta Pink
+          0xFFFDE68AL, // Soft Warm Gold (right/bottom-right transition)
+          0xFFEC4899L, // Magenta Return Bridge
           0xFF3B82F6L, // Blue Return Bridge
           0xFF06B6D4L, // Seamless Closure
         )
@@ -216,7 +218,16 @@ object EdgeLightStateMapper {
       EdgeLightPreset.AI_THINKING ->
         listOf(0xFF2563EBL, 0xFF6366F1L, 0xFF8B5CF6L, 0xFFA855F7L, 0xFF2563EBL)
       EdgeLightPreset.VOICE_LISTENING ->
-        listOf(0xFF22D3EEL, 0xFF06B6D4L, 0xFF3B82F6L, 0xFF8B5CF6L, 0xFFA855F7L, 0xFF22D3EEL)
+        listOf(
+          0xFF22D3EEL,
+          0xFF3B82F6L,
+          0xFF8B5CF6L,
+          0xFFEC4899L,
+          0xFFFDE68AL,
+          0xFFEC4899L,
+          0xFF3B82F6L,
+          0xFF22D3EEL,
+        )
       EdgeLightPreset.LIVE_SEARCH ->
         listOf(0xFF0EA5E9L, 0xFF38BDF8L, 0xFF6366F1L, 0xFF8B5CF6L, 0xFF0EA5E9L)
       EdgeLightPreset.DEEP_RESEARCH ->
@@ -229,7 +240,7 @@ object EdgeLightStateMapper {
           0xFF8B5CF6L,
           0xFFA855F7L,
           0xFFEC4899L,
-          0xFF38BDF8L,
+          0xFFFDE68AL,
           0xFF22D3EEL,
         )
       EdgeLightPreset.NOTIFICATION_ALERT ->

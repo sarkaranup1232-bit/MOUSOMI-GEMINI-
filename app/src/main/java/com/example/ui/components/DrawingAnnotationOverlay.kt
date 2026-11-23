@@ -49,10 +49,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -77,6 +75,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.core.screen.DrawingController
 import com.example.core.screen.RegionCropper
 import com.example.domain.model.AnnotationStroke
 import com.example.domain.model.DrawingTool
@@ -85,7 +84,6 @@ import com.example.domain.model.NormPoint
 import com.example.ui.theme.ElectricBlue
 import com.example.ui.theme.NeonCyan
 import java.io.File
-import java.util.UUID
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -103,7 +101,7 @@ private val DRAWING_PALETTE =
   )
 
 /**
- * Dedicated isolated On-Screen Drawing & Annotation Studio.
+ * Dedicated isolated On-Screen Drawing & Annotation Studio backed by [DrawingController].
  * - Blocks underlying touch targets cleanly.
  * - Supports Pen, Highlighter, Selection Box, Arrow, Circle, Box, Pointer, Text, Eraser.
  * - Supports Undo, Redo, Clear, Save Drawing, Submit to AI, and unsaved-stroke Discard confirmation.
@@ -116,32 +114,23 @@ fun DrawingAnnotationOverlay(
   backgroundImageUri: String? = null,
   onSaveDrawing: ((NormBoundingBox, List<AnnotationStroke>) -> Unit)? = null,
 ) {
-  val strokes = remember { mutableStateListOf<AnnotationStroke>() }
-  val redoStack = remember { mutableStateListOf<AnnotationStroke>() }
-  var selectedTool by remember { mutableStateOf(DrawingTool.FREEHAND) }
-  var selectedColorArgb by remember { mutableLongStateOf(0xFF38BDF8L) }
-  var strokeWidthPx by remember { mutableFloatStateOf(9f) }
-  var strokeAlpha by remember { mutableFloatStateOf(0.92f) }
+  val controller = remember { DrawingController() }
+  val drawState by controller.state.collectAsState()
   var isMinimized by remember { mutableStateOf(false) }
 
-  var activePoints by remember { mutableStateOf<List<NormPoint>>(emptyList()) }
   var pendingTextLocation by remember { mutableStateOf<NormPoint?>(null) }
   var textInput by remember { mutableStateOf("") }
-  var hasUnsavedTemporaryStrokes by remember { mutableStateOf(false) }
   var showDiscardConfirmDialog by remember { mutableStateOf(false) }
   val textMeasurer = rememberTextMeasurer()
 
   val clearTemporarySessionState: () -> Unit = {
-    strokes.clear()
-    redoStack.clear()
-    activePoints = emptyList()
+    controller.clear()
     pendingTextLocation = null
     textInput = ""
-    hasUnsavedTemporaryStrokes = false
   }
 
   val handleRequestClose: () -> Unit = {
-    if (hasUnsavedTemporaryStrokes && strokes.isNotEmpty()) {
+    if (drawState.hasUnsavedChanges && drawState.strokes.isNotEmpty()) {
       showDiscardConfirmDialog = true
     } else {
       clearTemporarySessionState()
@@ -185,95 +174,54 @@ fun DrawingAnnotationOverlay(
       modifier =
         Modifier
           .fillMaxSize()
-          .pointerInput(selectedTool, selectedColorArgb, strokeWidthPx, strokeAlpha) {
+          .pointerInput(drawState.selectedTool, drawState.selectedColorArgb, drawState.strokeWidthPx, drawState.strokeAlpha) {
             detectTapGestures { offset ->
               val norm = NormPoint((offset.x / size.width).coerceIn(0f, 1f), (offset.y / size.height).coerceIn(0f, 1f))
-              if (selectedTool == DrawingTool.POINTER) {
-                redoStack.clear()
-                strokes.add(
-                  AnnotationStroke(
-                    id = "str_${UUID.randomUUID()}",
-                    tool = DrawingTool.POINTER,
-                    colorArgb = selectedColorArgb,
-                    strokeWidthPx = strokeWidthPx,
-                    alpha = strokeAlpha,
-                    points = listOf(norm),
-                  )
-                )
-                hasUnsavedTemporaryStrokes = true
-              } else if (selectedTool == DrawingTool.TEXT) {
-                pendingTextLocation = norm
-                textInput = ""
-              } else if (selectedTool == DrawingTool.ERASER && strokes.isNotEmpty()) {
-                val removed = strokes.removeAt(strokes.lastIndex)
-                redoStack.add(removed)
-                hasUnsavedTemporaryStrokes = strokes.isNotEmpty()
+              when (drawState.selectedTool) {
+                DrawingTool.POINTER -> controller.addPointerDot(norm)
+                DrawingTool.TEXT -> {
+                  pendingTextLocation = norm
+                  textInput = ""
+                }
+                DrawingTool.ERASER -> controller.undo()
+                else -> Unit
               }
             }
           }
-          .pointerInput(selectedTool, selectedColorArgb, strokeWidthPx, strokeAlpha) {
+          .pointerInput(drawState.selectedTool, drawState.selectedColorArgb, drawState.strokeWidthPx, drawState.strokeAlpha) {
             detectDragGestures(
               onDragStart = { start ->
                 val norm = NormPoint((start.x / size.width).coerceIn(0f, 1f), (start.y / size.height).coerceIn(0f, 1f))
-                activePoints = listOf(norm)
+                controller.beginStroke(norm)
               },
               onDrag = { change, _ ->
                 change.consume()
                 val pos = change.position
                 val norm = NormPoint((pos.x / size.width).coerceIn(0f, 1f), (pos.y / size.height).coerceIn(0f, 1f))
-                if (selectedTool == DrawingTool.ERASER) {
-                  val idx =
-                    strokes.indexOfLast { s ->
-                      s.points.any { p -> hypot(p.x - norm.x, p.y - norm.y) < 0.04f }
-                    }
-                  if (idx >= 0) {
-                    redoStack.add(strokes.removeAt(idx))
-                    hasUnsavedTemporaryStrokes = strokes.isNotEmpty()
-                  }
-                } else {
-                  activePoints = activePoints + norm
-                }
+                controller.appendStrokePoint(norm)
               },
-              onDragEnd = {
-                if (selectedTool != DrawingTool.ERASER && activePoints.size >= 2) {
-                  redoStack.clear()
-                  strokes.add(
-                    AnnotationStroke(
-                      id = "str_${UUID.randomUUID()}",
-                      tool = selectedTool,
-                      colorArgb = selectedColorArgb,
-                      strokeWidthPx =
-                        if (selectedTool == DrawingTool.HIGHLIGHTER) strokeWidthPx * 2.4f else strokeWidthPx,
-                      alpha =
-                        if (selectedTool == DrawingTool.HIGHLIGHTER) (strokeAlpha * 0.42f).coerceIn(0.15f, 0.6f)
-                        else strokeAlpha,
-                      points = activePoints,
-                    )
-                  )
-                  hasUnsavedTemporaryStrokes = true
-                }
-                activePoints = emptyList()
-              },
-              onDragCancel = { activePoints = emptyList() },
+              onDragEnd = { controller.commitStroke() },
+              onDragCancel = { controller.commitStroke() },
             )
           }
     ) {
       val allToRender =
-        if (activePoints.isNotEmpty() && selectedTool != DrawingTool.ERASER) {
-          strokes +
+        if (drawState.activePoints.isNotEmpty() && drawState.selectedTool != DrawingTool.ERASER) {
+          drawState.strokes +
             AnnotationStroke(
               id = "active",
-              tool = selectedTool,
-              colorArgb = selectedColorArgb,
+              tool = drawState.selectedTool,
+              colorArgb = drawState.selectedColorArgb,
               strokeWidthPx =
-                if (selectedTool == DrawingTool.HIGHLIGHTER) strokeWidthPx * 2.4f else strokeWidthPx,
+                if (drawState.selectedTool == DrawingTool.HIGHLIGHTER) drawState.strokeWidthPx * 2.4f
+                else drawState.strokeWidthPx,
               alpha =
-                if (selectedTool == DrawingTool.HIGHLIGHTER) (strokeAlpha * 0.42f).coerceIn(0.15f, 0.6f)
-                else strokeAlpha,
-              points = activePoints,
+                if (drawState.selectedTool == DrawingTool.HIGHLIGHTER) (drawState.strokeAlpha * 0.42f).coerceIn(0.15f, 0.6f)
+                else drawState.strokeAlpha,
+              points = drawState.activePoints,
             )
         } else {
-          strokes
+          drawState.strokes
         }
 
       allToRender.forEach { stroke ->
@@ -321,25 +269,15 @@ fun DrawingAnnotationOverlay(
             )
             Row {
               IconButton(
-                onClick = {
-                  if (strokes.isNotEmpty()) {
-                    redoStack.add(strokes.removeAt(strokes.lastIndex))
-                    hasUnsavedTemporaryStrokes = strokes.isNotEmpty()
-                  }
-                },
-                enabled = strokes.isNotEmpty(),
+                onClick = { controller.undo() },
+                enabled = drawState.canUndo,
                 modifier = Modifier.testTag("drawing_undo_button"),
               ) {
                 Icon(Icons.AutoMirrored.Rounded.Undo, contentDescription = "Undo", tint = Color.White)
               }
               IconButton(
-                onClick = {
-                  if (redoStack.isNotEmpty()) {
-                    strokes.add(redoStack.removeAt(redoStack.lastIndex))
-                    hasUnsavedTemporaryStrokes = true
-                  }
-                },
-                enabled = redoStack.isNotEmpty(),
+                onClick = { controller.redo() },
+                enabled = drawState.canRedo,
                 modifier = Modifier.testTag("drawing_redo_button"),
               ) {
                 Icon(Icons.AutoMirrored.Rounded.Redo, contentDescription = "Redo", tint = Color.White)
@@ -365,8 +303,8 @@ fun DrawingAnnotationOverlay(
           ) {
             DrawingTool.entries.forEach { tool ->
               FilterChip(
-                selected = selectedTool == tool,
-                onClick = { selectedTool = tool },
+                selected = drawState.selectedTool == tool,
+                onClick = { controller.selectTool(tool) },
                 label = { Text(tool.label, fontSize = 12.sp) },
                 modifier = Modifier.testTag("drawing_tool_${tool.name}"),
               )
@@ -380,11 +318,11 @@ fun DrawingAnnotationOverlay(
           ) {
             DRAWING_PALETTE.forEach { colorHex ->
               Surface(
-                onClick = { selectedColorArgb = colorHex },
+                onClick = { controller.selectColor(colorHex) },
                 shape = CircleShape,
                 color = Color(colorHex),
                 border =
-                  if (selectedColorArgb == colorHex) BorderStroke(2.5.dp, Color.White)
+                  if (drawState.selectedColorArgb == colorHex) BorderStroke(2.5.dp, Color.White)
                   else null,
                 modifier = Modifier.size(26.dp),
               ) {}
@@ -392,8 +330,8 @@ fun DrawingAnnotationOverlay(
             Spacer(modifier = Modifier.width(6.dp))
             Text("Width", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp)
             Slider(
-              value = strokeWidthPx,
-              onValueChange = { strokeWidthPx = it },
+              value = drawState.strokeWidthPx,
+              onValueChange = { controller.setStrokeWidth(it) },
               valueRange = 4f..24f,
               modifier = Modifier.weight(1f),
             )
@@ -406,21 +344,19 @@ fun DrawingAnnotationOverlay(
           ) {
             Text("Alpha", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp)
             Slider(
-              value = strokeAlpha,
-              onValueChange = { strokeAlpha = it },
+              value = drawState.strokeAlpha,
+              onValueChange = { controller.setStrokeAlpha(it) },
               valueRange = 0.25f..1.0f,
               modifier = Modifier.weight(1f),
             )
             if (onSaveDrawing != null) {
               OutlinedButton(
                 onClick = {
-                  val box =
-                    RegionCropper.computeBoundingBox(strokes.toList())
-                      ?: NormBoundingBox(0.05f, 0.1f, 0.95f, 0.9f)
-                  onSaveDrawing(box, strokes.toList())
-                  hasUnsavedTemporaryStrokes = false
+                  val box = controller.computeTargetBoundingBox()
+                  onSaveDrawing(box, drawState.strokes)
+                  controller.markSaved()
                 },
-                enabled = strokes.isNotEmpty(),
+                enabled = drawState.strokes.isNotEmpty(),
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.height(44.dp).testTag("drawing_save_button"),
               ) {
@@ -431,11 +367,9 @@ fun DrawingAnnotationOverlay(
             }
             Button(
               onClick = {
-                val box =
-                  RegionCropper.computeBoundingBox(strokes.toList())
-                    ?: NormBoundingBox(0.05f, 0.1f, 0.95f, 0.9f)
-                val finalStrokes = strokes.toList()
-                hasUnsavedTemporaryStrokes = false
+                val box = controller.computeTargetBoundingBox()
+                val finalStrokes = drawState.strokes
+                controller.markSaved()
                 onAnalyzeMarkedRegion(box, finalStrokes)
               },
               colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
@@ -466,21 +400,7 @@ fun DrawingAnnotationOverlay(
         confirmButton = {
           TextButton(
             onClick = {
-              if (textInput.isNotBlank()) {
-                redoStack.clear()
-                strokes.add(
-                  AnnotationStroke(
-                    id = "txt_${UUID.randomUUID()}",
-                    tool = DrawingTool.TEXT,
-                    colorArgb = selectedColorArgb,
-                    strokeWidthPx = strokeWidthPx,
-                    alpha = strokeAlpha,
-                    points = listOf(loc),
-                    textLabel = textInput.trim(),
-                  )
-                )
-                hasUnsavedTemporaryStrokes = true
-              }
+              controller.addTextLabel(loc, textInput)
               pendingTextLocation = null
             }
           ) { Text("Add") }
@@ -499,10 +419,8 @@ fun DrawingAnnotationOverlay(
         confirmButton = {
           Button(
             onClick = {
-              val box =
-                RegionCropper.computeBoundingBox(strokes.toList())
-                  ?: NormBoundingBox(0.05f, 0.1f, 0.95f, 0.9f)
-              onSaveDrawing?.invoke(box, strokes.toList())
+              val box = controller.computeTargetBoundingBox()
+              onSaveDrawing?.invoke(box, drawState.strokes)
               showDiscardConfirmDialog = false
               clearTemporarySessionState()
               onClose()

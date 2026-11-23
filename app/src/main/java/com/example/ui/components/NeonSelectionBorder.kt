@@ -42,6 +42,7 @@ private val SelectionNeonColors =
     NeonViolet.toArgb(),
     NeonPurple.toArgb(),
     NeonMagenta.toArgb(),
+    0xFFFDE68A.toInt(), // Soft Gold accent
     NeonCyan.toArgb(),
   )
 

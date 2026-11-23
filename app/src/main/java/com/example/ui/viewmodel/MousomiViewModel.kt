@@ -21,6 +21,10 @@ import com.example.core.assistant.EdgeActivationEdge
 import com.example.core.automation.ControlledAutomationEngine
 import com.example.core.device.DeviceActionExecutor
 import com.example.core.device.InstalledAppRepository
+import com.example.core.device.PendingPhoneAction
+import com.example.core.device.PendingSocialAction
+import com.example.core.device.PhoneActionController
+import com.example.core.device.SocialIntegrationManager
 import com.example.core.image.ImageProcessor
 import com.example.core.notifications.NotificationIntelligenceEngine
 import com.example.core.performance.SmartPerformanceMonitor
@@ -43,9 +47,14 @@ import com.example.core.screen.SelectionToolMode
 import com.example.core.screen.VisualQueryProcessor
 import com.example.core.security.SecurityValidator
 import com.example.core.storage.TempMediaCacheManager
+import com.example.core.voice.DictationTranscriptMerger
 import com.example.core.voice.GeminiLiveVoiceEngine
+import com.example.core.voice.LiveConnectionState
+import com.example.core.voice.LiveSessionPhase
 import com.example.core.voice.LiveVoiceControlCommand
+import com.example.core.voice.LiveVoiceSessionManager
 import com.example.core.voice.LiveVoiceSessionStatus
+import com.example.core.voice.OrbReactiveFrame
 import com.example.core.voice.VoiceController
 import com.example.core.voice.VoiceState
 import com.example.data.remote.firestore.FirestoreCloudSyncRepository
@@ -174,6 +183,9 @@ class MousomiViewModel @Inject constructor(
   private val visualQueryProcessor: VisualQueryProcessor? = null,
   private val geminiLiveVoiceEngine: GeminiLiveVoiceEngine? = null,
   private val assistantSessionStateManager: AssistantSessionStateManager? = null,
+  private val liveVoiceSessionManager: LiveVoiceSessionManager? = null,
+  private val phoneActionController: PhoneActionController? = null,
+  private val socialIntegrationManager: SocialIntegrationManager? = null,
 ) : ViewModel() {
 
   constructor(
@@ -221,6 +233,9 @@ class MousomiViewModel @Inject constructor(
     visualQueryProcessor = null,
     geminiLiveVoiceEngine = null,
     assistantSessionStateManager = null,
+    liveVoiceSessionManager = null,
+    phoneActionController = null,
+    socialIntegrationManager = null,
   )
 
   val geometryEngineForUi: SelectionGeometryEngine by lazy {
@@ -265,6 +280,8 @@ class MousomiViewModel @Inject constructor(
   private var silentRetryCount: Int = 0
   private var nextRequestImageGenFlag: Boolean = false
   private var nextRequestDeepResearchFlag: Boolean = false
+  private var pendingOpenLiveAfterPermission: Boolean = false
+  private var dictationCommittedPrefix: String = ""
 
   init {
     observeAuthAndCloudSync()
@@ -285,8 +302,11 @@ class MousomiViewModel @Inject constructor(
       activeGenerationJob = null
       activeAssistantMessageId = null
       silentRetryCount = 0
+      pendingOpenLiveAfterPermission = false
+      dictationCommittedPrefix = ""
       screenSelectionManager?.stopAndCleanup()
       imageEditingController?.cancelEdit()
+      liveVoiceSessionManager?.onEnded(keepScreenShare = false)
         _uiState.update {
           it.copy(
             isGeminiLiveOpen = false,
@@ -294,8 +314,15 @@ class MousomiViewModel @Inject constructor(
             isLiveVoicePaused = false,
             isLiveVoiceMuted = false,
             isVoiceDialogOpen = false,
+            isInlineDictationSessionActive = false,
+            isInlineDictationPaused = false,
+            inlineDictationError = null,
             isUsingGeminiLiveSocket = false,
             liveAssistantTranscript = "",
+            liveSessionPhase = LiveSessionPhase.IDLE,
+            liveConnectionState = LiveConnectionState.Disconnected,
+            liveElapsedSeconds = 0L,
+            orbReactiveFrame = OrbReactiveFrame.IDLE,
             responseState = AiResponseState.Cancelled,
             statusToastMessage = "Emergency Stop executed: all active sessions stopped.",
           )
@@ -508,6 +535,39 @@ class MousomiViewModel @Inject constructor(
         }
       }
     }
+    liveVoiceSessionManager?.let { liveMgr ->
+      viewModelScope.launch {
+        liveMgr.phase.collectLatest { livePhase ->
+          _uiState.update { it.copy(liveSessionPhase = livePhase) }
+        }
+      }
+      viewModelScope.launch {
+        liveMgr.connectionState.collectLatest { conn ->
+          _uiState.update { it.copy(liveConnectionState = conn) }
+        }
+      }
+      viewModelScope.launch {
+        liveMgr.elapsedSeconds.collectLatest { secs ->
+          _uiState.update { it.copy(liveElapsedSeconds = secs) }
+        }
+      }
+      viewModelScope.launch {
+        liveMgr.orbFrame.collectLatest { frame ->
+          _uiState.update { state ->
+            val syncRms =
+              if (frame.sessionPhase != LiveSessionPhase.IDLE &&
+                frame.sessionPhase != LiveSessionPhase.ENDED &&
+                frame.sessionPhase != LiveSessionPhase.PAUSED
+              ) {
+                maxOf(state.voiceRmsNormalized, frame.reactiveAmplitude)
+              } else {
+                state.voiceRmsNormalized
+              }
+            state.copy(orbReactiveFrame = frame, voiceRmsNormalized = syncRms)
+          }
+        }
+      }
+    }
     geminiLiveVoiceEngine?.let { engine ->
       viewModelScope.launch {
         engine.status.collectLatest { liveStatus ->
@@ -685,64 +745,123 @@ class MousomiViewModel @Inject constructor(
     viewModelScope.launch {
       voiceController.voiceState.collectLatest { vState ->
         if (_uiState.value.isUsingGeminiLiveSocket) return@collectLatest
-        _uiState.update { state ->
-          val updatedInput =
-            if (vState is VoiceState.TranscriptReady) vState.transcript else state.inputText
-          val closeVoice = vState is VoiceState.TranscriptReady
-          state.copy(
-            voiceState = vState,
-            inputText = updatedInput,
-            isVoiceDialogOpen = if (closeVoice) false else state.isVoiceDialogOpen,
-          )
-        }
-        val currentState = _uiState.value
-        if (vState is VoiceState.TranscriptReady) {
-          silentRetryCount = 0
-          val transcript = vState.transcript.trim()
-          voiceController.resetState()
-          if (transcript.isNotBlank() && (currentState.isGeminiLiveOpen || currentState.privacyPerformanceConfig.continuousVoiceMode)) {
-            if (currentState.isGeminiLiveOpen) {
-              liveSessionTurnsCount += 1
-            }
-            onSendMessage()
-          } else if (transcript.isBlank() &&
-            currentState.isGeminiLiveOpen &&
-            currentState.hasAudioPermission &&
-            !currentState.isLiveVoicePaused &&
-            !currentState.isLiveVoiceMuted
-          ) {
-            delay(480L)
-            voiceController.startListening(currentState.voicePreferences.preferredLanguage)
-          }
-        } else if (vState is VoiceState.Error &&
-          currentState.isGeminiLiveOpen &&
-          currentState.hasAudioPermission &&
-          !currentState.isLiveVoicePaused &&
-          !currentState.isLiveVoiceMuted &&
-          !currentState.isGenerating
-        ) {
-          if (vState.isRecoverableSilence && silentRetryCount < 2) {
-            silentRetryCount += 1
-            delay(520L)
-            val latest = _uiState.value
-            if (latest.isGeminiLiveOpen &&
-              !latest.isUsingGeminiLiveSocket &&
-              !latest.isLiveVoicePaused &&
-              !latest.isLiveVoiceMuted &&
-              !latest.isGenerating
-            ) {
-              voiceController.startListening(latest.voicePreferences.preferredLanguage)
-            }
-          } else {
-            silentRetryCount = 0
-            _uiState.update {
-              it.copy(
-                isLiveVoicePaused = true,
-                statusToastMessage =
-                  if (vState.isRecoverableSilence) "Live mic resting after silence — tap Resume when ready."
-                  else "Live mic paused: ${vState.message}",
+        val snapshotBefore = _uiState.value
+        val inLiveOverlay = snapshotBefore.isGeminiLiveOpen
+
+        when (vState) {
+          is VoiceState.Listening -> {
+            _uiState.update { state ->
+              val updatedInput =
+                if (!state.isGeminiLiveOpen &&
+                  state.isInlineDictationSessionActive &&
+                  !state.isInlineDictationPaused &&
+                  vState.partialTranscript.isNotBlank()
+                ) {
+                  DictationTranscriptMerger.mergePartial(dictationCommittedPrefix, vState.partialTranscript)
+                } else {
+                  state.inputText
+                }
+              state.copy(
+                voiceState = vState,
+                inputText = updatedInput,
+                inlineDictationError = null,
+                isVoiceDialogOpen = false,
               )
             }
+          }
+          is VoiceState.TranscriptReady -> {
+            silentRetryCount = 0
+            val transcript = vState.transcript.trim()
+            if (inLiveOverlay) {
+              _uiState.update { state ->
+                state.copy(
+                  voiceState = vState,
+                  inputText = if (transcript.isNotBlank()) transcript else state.inputText,
+                  isVoiceDialogOpen = false,
+                )
+              }
+              voiceController.resetState()
+              if (transcript.isNotBlank()) {
+                liveSessionTurnsCount += 1
+                onSendMessage()
+              } else if (snapshotBefore.hasAudioPermission &&
+                !snapshotBefore.isLiveVoicePaused &&
+                !snapshotBefore.isLiveVoiceMuted
+              ) {
+                delay(480L)
+                voiceController.startListening(snapshotBefore.voicePreferences.preferredLanguage)
+              }
+            } else {
+              // Standard Chat Bar multi-turn dictation: insert/append into inputText for review & editing (never auto-send)
+              val merged =
+                if (transcript.isNotBlank()) {
+                  DictationTranscriptMerger.appendFinalTurn(dictationCommittedPrefix, transcript)
+                } else {
+                  dictationCommittedPrefix
+                }
+              dictationCommittedPrefix = merged
+              _uiState.update { state ->
+                state.copy(
+                  voiceState = VoiceState.Idle,
+                  inputText = merged,
+                  isVoiceDialogOpen = false,
+                  isInlineDictationSessionActive = true,
+                  isInlineDictationPaused = true,
+                  inlineDictationError = null,
+                )
+              }
+              voiceController.resetState()
+            }
+          }
+          is VoiceState.Error -> {
+            if (inLiveOverlay) {
+              _uiState.update { it.copy(voiceState = vState, isVoiceDialogOpen = false) }
+              val currentState = _uiState.value
+              if (currentState.hasAudioPermission &&
+                !currentState.isLiveVoicePaused &&
+                !currentState.isLiveVoiceMuted &&
+                !currentState.isGenerating
+              ) {
+                if (vState.isRecoverableSilence && silentRetryCount < 2) {
+                  silentRetryCount += 1
+                  delay(520L)
+                  val latest = _uiState.value
+                  if (latest.isGeminiLiveOpen &&
+                    !latest.isUsingGeminiLiveSocket &&
+                    !latest.isLiveVoicePaused &&
+                    !latest.isLiveVoiceMuted &&
+                    !latest.isGenerating
+                  ) {
+                    voiceController.startListening(latest.voicePreferences.preferredLanguage)
+                  }
+                } else {
+                  silentRetryCount = 0
+                  _uiState.update {
+                    it.copy(
+                      isLiveVoicePaused = true,
+                      statusToastMessage =
+                        if (vState.isRecoverableSilence) "Live mic resting after silence — tap Resume when ready."
+                        else "Live mic paused: ${vState.message}",
+                    )
+                  }
+                }
+              }
+            } else {
+              // Inline Chat Bar error: stop showing active Listening, surface concise inline Retry
+              _uiState.update { state ->
+                state.copy(
+                  voiceState = vState,
+                  isVoiceDialogOpen = false,
+                  isInlineDictationPaused = true,
+                  inlineDictationError =
+                    if (state.isInlineDictationSessionActive) vState.message
+                    else state.inlineDictationError,
+                )
+              }
+            }
+          }
+          else -> {
+            _uiState.update { it.copy(voiceState = vState, isVoiceDialogOpen = false) }
           }
         }
       }
@@ -857,6 +976,10 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onInputChanged(newText: String) {
+    val snap = _uiState.value
+    if (snap.isInlineDictationPaused || snap.voiceState !is VoiceState.Listening) {
+      dictationCommittedPrefix = newText
+    }
     _uiState.update { it.copy(inputText = newText) }
   }
 
@@ -1349,6 +1472,9 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onSendMessage() {
+    if (_uiState.value.isInlineDictationSessionActive && !_uiState.value.isGeminiLiveOpen) {
+      onStopInlineDictation()
+    }
     val state = _uiState.value
     val trimmed = state.inputText.trim()
     val attachments = state.pendingAttachments
@@ -1381,6 +1507,29 @@ class MousomiViewModel @Inject constructor(
         )
       }
       return
+    }
+
+    if (editTargetId == null && attachments.isEmpty() && editTarget == null) {
+      val phoneCmd = PhoneActionController.tryParseConfirmationCommand(trimmed)
+      if (phoneCmd != null) {
+        _uiState.update {
+          it.copy(
+            inputText = "",
+            pendingPhoneAction = phoneCmd,
+          )
+        }
+        return
+      }
+      val socialCmd = SocialIntegrationManager.tryParseSocialCommand(trimmed)
+      if (socialCmd != null) {
+        _uiState.update {
+          it.copy(
+            inputText = "",
+            pendingSocialAction = socialCmd,
+          )
+        }
+        return
+      }
     }
 
     if (editTargetId != null) {
@@ -1853,7 +2002,7 @@ class MousomiViewModel @Inject constructor(
   ) {
     when (action) {
       OrbQuickAction.ASK_MOUSOMI -> _uiState.update { it.copy(inputMode = InputMode.CHAT) }
-      OrbQuickAction.START_VOICE -> onToggleVoiceDialog(true)
+      OrbQuickAction.START_VOICE -> onStartInlineDictation()
       OrbQuickAction.ANALYZE_SCREEN -> analyzeLatestScreenFrameOrPrompt(onRequestScreenShare)
       OrbQuickAction.START_SCREEN_SHARE -> onRequestScreenShare()
       OrbQuickAction.DRAW_ON_SCREEN -> _uiState.update { it.copy(drawingTargetImage = null, isDrawingOverlayOpen = true) }
@@ -1870,7 +2019,7 @@ class MousomiViewModel @Inject constructor(
     onNavigateToAssistantHub: (Int) -> Unit = {},
   ) {
     when (action) {
-      OrbPopupAction.VOICE_ASSISTANT -> onToggleVoiceDialog(true)
+      OrbPopupAction.VOICE_ASSISTANT -> onStartInlineDictation()
       OrbPopupAction.OPEN_CHAT -> _uiState.update { it.copy(inputMode = InputMode.CHAT) }
       OrbPopupAction.QUICK_ASK -> _uiState.update { it.copy(inputMode = InputMode.CHAT, inputText = "") }
       OrbPopupAction.OPEN_CAMERA -> {
@@ -1916,11 +2065,62 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onExecuteDeviceCommand(command: String) {
+    val phoneCmd = PhoneActionController.tryParseConfirmationCommand(command)
+    if (phoneCmd != null) {
+      _uiState.update { it.copy(pendingPhoneAction = phoneCmd) }
+      return
+    }
+    val socialCmd = SocialIntegrationManager.tryParseSocialCommand(command)
+    if (socialCmd != null) {
+      _uiState.update { it.copy(pendingSocialAction = socialCmd) }
+      return
+    }
     viewModelScope.launch {
-      val res = deviceActionExecutor?.executeNaturalCommand(command)
+      val lower = command.trim().lowercase()
+      val pac = phoneActionController
+      val res =
+        when {
+          pac != null && (lower.startsWith("navigate to ") || lower.startsWith("directions to ")) ->
+            pac.openMapsOrNavigation(
+              query = command.trim().substringAfter("to ").trim(),
+              turnByTurnNavigation = true,
+            )
+          pac != null && (lower.startsWith("maps ") || lower.startsWith("find on maps ")) ->
+            pac.openMapsOrNavigation(
+              query = command.trim().substringAfter(" ").trim(),
+              turnByTurnNavigation = false,
+            )
+          pac != null && lower.contains("alarm") && lower.contains("open") ->
+            pac.openAlarms()
+          else -> deviceActionExecutor?.executeNaturalCommand(command)
+        }
       val toast = res?.let { "${it.statusLabel}: ${it.verifiedDetail}" } ?: "Device assistant unavailable."
       _uiState.update { it.copy(statusToastMessage = toast) }
     }
+  }
+
+  fun onConfirmPendingPhoneAction() {
+    val action = _uiState.value.pendingPhoneAction ?: return
+    _uiState.update { it.copy(pendingPhoneAction = null) }
+    viewModelScope.launch {
+      val res = phoneActionController?.executeConfirmedAction(action)
+      val toast = res?.let { "${it.statusLabel}: ${it.verifiedDetail}" } ?: "Phone action controller unavailable."
+      _uiState.update { it.copy(statusToastMessage = toast) }
+    }
+  }
+
+  fun onConfirmPendingSocialAction() {
+    val action = _uiState.value.pendingSocialAction ?: return
+    _uiState.update { it.copy(pendingSocialAction = null) }
+    viewModelScope.launch {
+      val res = socialIntegrationManager?.executeConfirmedSocialAction(action)
+      val toast = res?.let { "${it.statusLabel}: ${it.verifiedDetail}" } ?: "Social integration manager unavailable."
+      _uiState.update { it.copy(statusToastMessage = toast) }
+    }
+  }
+
+  fun onDismissPendingActions() {
+    _uiState.update { it.copy(pendingPhoneAction = null, pendingSocialAction = null) }
   }
 
   fun onLaunchInstalledApp(appName: String) {
@@ -2583,18 +2783,43 @@ class MousomiViewModel @Inject constructor(
     onStartScreenSelectionFlow(onRequestConsent)
   }
 
+  fun onRequestPendingLiveAfterPermission() {
+    pendingOpenLiveAfterPermission = true
+  }
+
+  fun onShareScreenWithLive(onRequestStartScreenShare: () -> Unit) {
+    if (!_uiState.value.isGeminiLiveOpen) {
+      onToggleGeminiLive(true)
+    }
+    if (_uiState.value.screenShareStatus == ScreenShareStatus.STOPPED) {
+      onRequestStartScreenShare()
+    }
+  }
+
   fun onToggleGeminiLive(open: Boolean) {
     if (open) {
       liveSessionStartedAtMs = System.currentTimeMillis()
       liveSessionTurnsCount = 0
       silentRetryCount = 0
+      pendingOpenLiveAfterPermission = false
+      val prefs = _uiState.value.voicePreferences
+      val allowInterrupt = _uiState.value.privacyPerformanceConfig.allowVoiceInterruption
+      if (!_uiState.value.hasAudioPermission) {
+        liveVoiceSessionManager?.onFailed("Microphone permission is required for Live Voice.")
+        _uiState.update {
+          it.copy(
+            isGeminiLiveOpen = false,
+            isUsingGeminiLiveSocket = false,
+            statusToastMessage = "Microphone permission is required to start Live Voice.",
+          )
+        }
+        return
+      }
       assistantSessionStateManager?.activateFromTrigger(
         edge = EdgeActivationEdge.BOTTOM,
         expandPanel = false,
       )
-      voiceController.playActivationChime(_uiState.value.voicePreferences)
-      val prefs = _uiState.value.voicePreferences
-      val allowInterrupt = _uiState.value.privacyPerformanceConfig.allowVoiceInterruption
+      voiceController.playActivationChime(prefs)
       val canUseLiveSocket =
         geminiLiveVoiceEngine != null &&
           geminiLiveVoiceEngine.isFirebaseAvailable() &&
@@ -2628,7 +2853,8 @@ class MousomiViewModel @Inject constructor(
           },
         )
         return
-      } else if (_uiState.value.hasAudioPermission) {
+      } else {
+        liveVoiceSessionManager?.onBeginSession(prefs, allowInterrupt)
         voiceController.interruptSpeakingAndListen(prefs.preferredLanguage)
       }
       _uiState.update {
@@ -2643,6 +2869,7 @@ class MousomiViewModel @Inject constructor(
       }
     } else {
       silentRetryCount = 0
+      pendingOpenLiveAfterPermission = false
       val startedAt = liveSessionStartedAtMs
       if (startedAt != null) {
         val convId = _uiState.value.activeConversationId
@@ -2661,7 +2888,12 @@ class MousomiViewModel @Inject constructor(
           )
         }
       }
-      geminiLiveVoiceEngine?.stopAndClose()
+      geminiLiveVoiceEngine?.stopAndClose(
+        keepScreenShare = _uiState.value.screenShareStatus != ScreenShareStatus.STOPPED
+      )
+      liveVoiceSessionManager?.onEnded(
+        keepScreenShare = _uiState.value.screenShareStatus != ScreenShareStatus.STOPPED
+      )
       voiceController.stopListening()
       voiceController.stopSpeaking()
       assistantSessionStateManager?.onEndLiveAssistant(
@@ -2744,19 +2976,97 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onToggleVoiceDialog(open: Boolean) {
+    // Large VoiceInputDialog removed: keep state false and route requests to inline Chat Bar dictation
     if (!open) {
-      voiceController.stopListening()
+      onStopInlineDictation()
     }
-    _uiState.update { it.copy(isVoiceDialogOpen = open) }
+    _uiState.update { it.copy(isVoiceDialogOpen = false) }
   }
 
   fun onAudioPermissionResult(granted: Boolean) {
-    _uiState.update { it.copy(hasAudioPermission = granted, isVoiceDialogOpen = true) }
+    val shouldOpenLive = pendingOpenLiveAfterPermission
+    pendingOpenLiveAfterPermission = false
+    _uiState.update {
+      it.copy(
+        hasAudioPermission = granted,
+        isVoiceDialogOpen = false,
+        inlineDictationError =
+          if (!granted && !shouldOpenLive) "Microphone permission denied. Grant mic permission to dictate."
+          else null,
+        statusToastMessage =
+          if (!granted) "Microphone permission denied. Voice input cannot start without mic access."
+          else it.statusToastMessage,
+      )
+    }
     if (granted) {
-      voiceController.playActivationChime(_uiState.value.voicePreferences)
-      voiceController.interruptSpeakingAndListen(_uiState.value.voicePreferences.preferredLanguage)
+      if (shouldOpenLive) {
+        onToggleGeminiLive(true)
+      } else {
+        onStartInlineDictation()
+      }
     }
     onRefreshPermissions()
+  }
+
+  fun onStartInlineDictation() {
+    val state = _uiState.value
+    if (state.isInlineDictationSessionActive &&
+      state.voiceState is VoiceState.Listening &&
+      !state.isInlineDictationPaused
+    ) {
+      onPauseInlineDictation()
+      return
+    }
+    dictationCommittedPrefix = state.inputText
+    _uiState.update {
+      it.copy(
+        isVoiceDialogOpen = false,
+        isInlineDictationSessionActive = true,
+        isInlineDictationPaused = false,
+        inlineDictationError = null,
+      )
+    }
+    silentRetryCount = 0
+    voiceController.playActivationChime(state.voicePreferences)
+    voiceController.interruptSpeakingAndListen(state.voicePreferences.preferredLanguage)
+  }
+
+  fun onPauseInlineDictation() {
+    voiceController.stopListening()
+    dictationCommittedPrefix = _uiState.value.inputText
+    _uiState.update {
+      it.copy(
+        isInlineDictationSessionActive = true,
+        isInlineDictationPaused = true,
+      )
+    }
+  }
+
+  fun onStopInlineDictation() {
+    voiceController.stopListening()
+    dictationCommittedPrefix = _uiState.value.inputText
+    _uiState.update {
+      it.copy(
+        isVoiceDialogOpen = false,
+        isInlineDictationSessionActive = false,
+        isInlineDictationPaused = false,
+        inlineDictationError = null,
+      )
+    }
+  }
+
+  fun onRetryInlineDictation() {
+    val state = _uiState.value
+    dictationCommittedPrefix = state.inputText
+    _uiState.update {
+      it.copy(
+        isInlineDictationSessionActive = true,
+        isInlineDictationPaused = false,
+        inlineDictationError = null,
+      )
+    }
+    silentRetryCount = 0
+    voiceController.interruptSpeakingAndListen(state.voicePreferences.preferredLanguage)
   }
 
   fun onStartVoiceListening() {

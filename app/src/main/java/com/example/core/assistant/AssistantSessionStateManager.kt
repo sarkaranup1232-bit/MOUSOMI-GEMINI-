@@ -6,6 +6,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+enum class AssistantVisualState {
+  HIDDEN,
+  STANDARD_ASSISTANT,
+  LIVE_ASSISTANT,
+}
+
 enum class AssistantSessionPhase {
   INACTIVE,
   ACTIVATING,
@@ -46,13 +52,17 @@ data class EdgeActivationSignal(
 )
 
 /**
- * Central @Singleton coordinator for Assistant lifecycle across Voice, Edge Light,
- * Floating Bubble, Floating Panel, IME Keyboard, Screen Share, and Drawing.
+ * Central @Singleton coordinator for Assistant lifecycle across:
+ * - Two visual Assistant states: [AssistantVisualState.STANDARD_ASSISTANT] & [AssistantVisualState.LIVE_ASSISTANT]
+ * - Voice, Edge Light, Floating Bubble/Orb, Floating Panel, IME Keyboard, Screen Share, and Drawing.
  * Subsystems are held as independent StateFlows so closing keyboard or collapsing the panel
  * never kills active voice or screen capture unexpectedly.
  */
 @Singleton
 class AssistantSessionStateManager @Inject constructor() {
+
+  private val _visualState = MutableStateFlow(AssistantVisualState.HIDDEN)
+  val visualState: StateFlow<AssistantVisualState> = _visualState.asStateFlow()
 
   private val _isSessionActive = MutableStateFlow(false)
   val isSessionActive: StateFlow<Boolean> = _isSessionActive.asStateFlow()
@@ -97,6 +107,80 @@ class AssistantSessionStateManager @Inject constructor() {
   private var activationTokenCounter: Long = 0L
 
   @Synchronized
+  fun openStandardAssistant(
+    edge: EdgeActivationEdge = EdgeActivationEdge.BOTTOM_CORNER,
+    nowMs: Long = System.currentTimeMillis(),
+  ) {
+    activationTokenCounter += 1L
+    _isStopping.value = false
+    _isPaused.value = false
+    _lastError.value = null
+    _isActivating.value = true
+    _isSessionActive.value = true
+    _isPanelExpanded.value = true
+    _visualState.value = AssistantVisualState.STANDARD_ASSISTANT
+    _edgeActivation.value =
+      EdgeActivationSignal(
+        edge = if (edge == EdgeActivationEdge.NONE) EdgeActivationEdge.BOTTOM_CORNER else edge,
+        token = activationTokenCounter,
+        triggeredAtMs = nowMs,
+      )
+    recomputePhase()
+  }
+
+  @Synchronized
+  fun enterLiveAssistant(
+    edge: EdgeActivationEdge = EdgeActivationEdge.BOTTOM,
+    nowMs: Long = System.currentTimeMillis(),
+  ) {
+    activationTokenCounter += 1L
+    _isStopping.value = false
+    _isPaused.value = false
+    _lastError.value = null
+    _isSessionActive.value = true
+    _isBubbleVisible.value = true
+    _visualState.value = AssistantVisualState.LIVE_ASSISTANT
+    _edgeActivation.value =
+      EdgeActivationSignal(
+        edge = if (edge == EdgeActivationEdge.NONE) EdgeActivationEdge.BOTTOM else edge,
+        token = activationTokenCounter,
+        triggeredAtMs = nowMs,
+      )
+    recomputePhase()
+  }
+
+  @Synchronized
+  fun dismissLiveToStandard() {
+    _isPaused.value = false
+    _voicePhase.value = VoiceSubsystemPhase.IDLE
+    _isBubbleVisible.value = false
+    _isActivating.value = false
+    _isSessionActive.value = true
+    _isPanelExpanded.value = true
+    _visualState.value = AssistantVisualState.STANDARD_ASSISTANT
+    recomputePhase()
+  }
+
+  @Synchronized
+  fun dismissAssistantSession(keepScreenShare: Boolean = false) {
+    _isStopping.value = false
+    _isActivating.value = false
+    _isPaused.value = false
+    _isPanelExpanded.value = false
+    _isKeyboardVisible.value = false
+    _isBubbleVisible.value = false
+    _isDrawingActive.value = false
+    _voicePhase.value = VoiceSubsystemPhase.IDLE
+    _lastError.value = null
+    if (!keepScreenShare) {
+      _isScreenSharing.value = false
+    }
+    _isSessionActive.value = _isScreenSharing.value
+    _visualState.value = AssistantVisualState.HIDDEN
+    recomputePhase()
+  }
+
+  @Synchronized
   fun activateFromTrigger(
     edge: EdgeActivationEdge,
     expandPanel: Boolean = true,
@@ -116,6 +200,11 @@ class AssistantSessionStateManager @Inject constructor() {
     _isBubbleVisible.value = true
     if (expandPanel) {
       _isPanelExpanded.value = true
+    }
+    if (_visualState.value == AssistantVisualState.HIDDEN) {
+      _visualState.value =
+        if (expandPanel) AssistantVisualState.STANDARD_ASSISTANT
+        else AssistantVisualState.LIVE_ASSISTANT
     }
     _edgeActivation.value =
       EdgeActivationSignal(
@@ -146,6 +235,9 @@ class AssistantSessionStateManager @Inject constructor() {
       _isStopping.value = false
       _isSessionActive.value = true
       _isBubbleVisible.value = true
+      if (_visualState.value == AssistantVisualState.HIDDEN) {
+        _visualState.value = AssistantVisualState.STANDARD_ASSISTANT
+      }
     } else {
       // Closing panel collapses only UI panel & IME; leaves Voice & Screen Share untouched
       _isKeyboardVisible.value = false
@@ -213,6 +305,7 @@ class AssistantSessionStateManager @Inject constructor() {
     if (!hasRemainingWork) {
       _isSessionActive.value = false
       _isStopping.value = false
+      _visualState.value = AssistantVisualState.HIDDEN
     }
     recomputePhase()
   }
@@ -222,6 +315,7 @@ class AssistantSessionStateManager @Inject constructor() {
     _isActivating.value = false
     _isKeyboardVisible.value = false
     _isPanelExpanded.value = false
+    _visualState.value = AssistantVisualState.HIDDEN
     recomputePhase()
   }
 
@@ -239,6 +333,7 @@ class AssistantSessionStateManager @Inject constructor() {
       _isScreenSharing.value = false
     }
     _isSessionActive.value = _isScreenSharing.value
+    _visualState.value = AssistantVisualState.HIDDEN
     recomputePhase()
   }
 

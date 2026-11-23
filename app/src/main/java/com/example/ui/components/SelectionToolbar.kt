@@ -134,32 +134,69 @@ fun SelectionToolbar(
           )
         }
 
-        IconButton(
+        Surface(
           onClick = onClear,
           enabled = hasSnappedSelection && !isBusyCropping,
+          shape = CircleShape,
+          color =
+            if (hasSnappedSelection) Color.White.copy(alpha = 0.12f)
+            else Color.White.copy(alpha = 0.04f),
+          border =
+            BorderStroke(
+              1.dp,
+              if (hasSnappedSelection) Color.White.copy(alpha = 0.28f)
+              else Color.White.copy(alpha = 0.08f),
+            ),
           modifier = Modifier.minimumInteractiveComponentSize().testTag("selection_clear_button"),
         ) {
-          Icon(
-            imageVector = Icons.Outlined.DeleteOutline,
-            contentDescription = "Clear selection",
-            tint = if (hasSnappedSelection) Color.White else Color.White.copy(alpha = 0.32f),
-            modifier = Modifier.size(20.dp),
-          )
+          Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            Icon(
+              imageVector = Icons.Outlined.DeleteOutline,
+              contentDescription = "Redraw selection",
+              tint = if (hasSnappedSelection) Color.White else Color.White.copy(alpha = 0.35f),
+              modifier = Modifier.size(16.dp),
+            )
+            Text(
+              text = "Redraw",
+              color = if (hasSnappedSelection) Color.White else Color.White.copy(alpha = 0.35f),
+              fontSize = 12.sp,
+              fontWeight = FontWeight.Medium,
+            )
+          }
         }
 
-        IconButton(
+        Surface(
           onClick = onCancel,
+          shape = CircleShape,
+          color = Color.White.copy(alpha = 0.09f),
+          border = BorderStroke(1.dp, Color.White.copy(alpha = 0.22f)),
           modifier = Modifier.minimumInteractiveComponentSize().testTag("selection_cancel_button"),
         ) {
-          Icon(
-            imageVector = Icons.Rounded.Close,
-            contentDescription = "Cancel screen selection",
-            tint = Color.White.copy(alpha = 0.9f),
-            modifier = Modifier.size(20.dp),
-          )
+          Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            Icon(
+              imageVector = Icons.Rounded.Close,
+              contentDescription = "Cancel screen selection",
+              tint = Color.White.copy(alpha = 0.9f),
+              modifier = Modifier.size(16.dp),
+            )
+            Text(
+              text = "Cancel",
+              color = Color.White.copy(alpha = 0.9f),
+              fontSize = 12.sp,
+              fontWeight = FontWeight.Medium,
+            )
+          }
         }
 
-        Spacer(modifier = Modifier.width(4.dp))
+        Spacer(modifier = Modifier.width(2.dp))
 
         Surface(
           onClick = onConfirm,
@@ -170,9 +207,9 @@ fun SelectionToolbar(
             else Color.White.copy(alpha = 0.1f),
           border =
             if (hasSnappedSelection)
-              BorderStroke(1.dp, Brush.linearGradient(listOf(NeonCyan, NeonMagenta)))
+              BorderStroke(1.dp, Brush.linearGradient(listOf(NeonCyan, NeonMagenta, Color(0xFFFDE68A))))
             else null,
-          modifier = Modifier.testTag("selection_confirm_button"),
+          modifier = Modifier.minimumInteractiveComponentSize().testTag("selection_confirm_button"),
         ) {
           Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
@@ -186,7 +223,7 @@ fun SelectionToolbar(
               modifier = Modifier.size(17.dp),
             )
             Text(
-              text = if (isBusyCropping) "Cropping…" else "Ask Mousomi",
+              text = if (isBusyCropping) "Cropping…" else "Confirm",
               color = if (hasSnappedSelection) Color.White else Color.White.copy(alpha = 0.45f),
               fontSize = 12.5.sp,
               fontWeight = FontWeight.SemiBold,
