@@ -25,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,12 +42,14 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.core.assistant.EdgeActivationEdge
 import com.example.core.edge.EdgeLightRenderParams
+import kotlin.math.roundToInt
 
 /**
  * Bright, symmetric four-side Gemini-style perimeter edge lighting overlay.
  * - Uses API 31+ hardware RoundedCorner radii when available for exact top & bottom corner alignment.
  * - Supports edge-activation line bloom (e.g. from bottom corner / side) expanding smoothly into
  *   the full perimeter glow, and smooth alpha fade-out when the session stops.
+ * - Caches shaders and BlurMaskFilters across animation frames to prevent flicker and reduce battery drain.
  * - Completely non-touch-blocking and lifecycle-aware.
  */
 @Composable
@@ -112,7 +115,7 @@ fun EdgeLightPerimeterOverlay(
         label = "edge_phase",
       )
     } else {
-      remember { mutableStateOf(32f) }
+      remember { mutableFloatStateOf(32f) }
     }
 
   val pulse by
@@ -128,7 +131,7 @@ fun EdgeLightPerimeterOverlay(
         label = "edge_pulse",
       )
     } else {
-      remember { mutableStateOf(0.96f) }
+      remember { mutableFloatStateOf(0.96f) }
     }
 
   val intColors =
@@ -162,6 +165,20 @@ fun EdgeLightPerimeterOverlay(
   val borderPath = remember { Path() }
   val pathMeasure = remember { android.graphics.PathMeasure() }
   val revealPath = remember { Path() }
+
+  // Cached shaders and blur filters to eliminate per-frame native allocations and flickering
+  val cachedSweepShader = remember(intColors) { SweepGradient(0f, 0f, intColors, null) }
+  var cachedLinearW by remember { mutableFloatStateOf(-1f) }
+  var cachedLinearH by remember { mutableFloatStateOf(-1f) }
+  var cachedLinearColors by remember { mutableStateOf<IntArray?>(null) }
+  var cachedLinearShader by remember { mutableStateOf<LinearGradient?>(null) }
+  val blurCache = remember { HashMap<Int, BlurMaskFilter>() }
+
+  fun getBlurFilter(blurRadiusPx: Float): BlurMaskFilter? {
+    if (blurRadiusPx <= 0.5f) return null
+    val bucket = (blurRadiusPx * 2f).roundToInt().coerceIn(1, 160)
+    return blurCache.getOrPut(bucket) { BlurMaskFilter(bucket / 2f, BlurMaskFilter.Blur.NORMAL) }
+  }
 
   // Query hardware rounded corners once per config change when running inside Android window
   val resolvedCornerRadii4: FloatArray =
@@ -198,15 +215,20 @@ fun EdgeLightPerimeterOverlay(
 
     val shader: Shader =
       if (params.breathingOnly) {
-        LinearGradient(0f, 0f, w, h, intColors, null, Shader.TileMode.CLAMP)
-      } else {
-        SweepGradient(0f, 0f, intColors, null).apply {
-          shaderMatrix.reset()
-          shaderMatrix.setRotate(phase)
-          shaderMatrix.postScale(w / 2f, h / 2f)
-          shaderMatrix.postTranslate(cx, cy)
-          setLocalMatrix(shaderMatrix)
+        if (cachedLinearShader == null || cachedLinearW != w || cachedLinearH != h || cachedLinearColors !== intColors) {
+          cachedLinearW = w
+          cachedLinearH = h
+          cachedLinearColors = intColors
+          cachedLinearShader = LinearGradient(0f, 0f, w, h, intColors, null, Shader.TileMode.CLAMP)
         }
+        cachedLinearShader!!
+      } else {
+        shaderMatrix.reset()
+        shaderMatrix.setRotate(phase)
+        shaderMatrix.postScale(w / 2f, h / 2f)
+        shaderMatrix.postTranslate(cx, cy)
+        cachedSweepShader.setLocalMatrix(shaderMatrix)
+        cachedSweepShader
       }
 
     paint.shader = shader
@@ -223,9 +245,7 @@ fun EdgeLightPerimeterOverlay(
       ) {
         paint.strokeWidth = strokeWidthPx
         paint.alpha = (effectiveAlpha * alphaScale * 255f).toInt().coerceIn(2, 255)
-        paint.maskFilter =
-          if (blurRadiusPx > 0.5f) BlurMaskFilter(blurRadiusPx, BlurMaskFilter.Blur.NORMAL)
-          else null
+        paint.maskFilter = getBlurFilter(blurRadiusPx)
 
         val safeInset = insetPx.coerceIn(2f, minOf(w, h) * 0.16f)
         rectF.set(
@@ -247,7 +267,6 @@ fun EdgeLightPerimeterOverlay(
         if (rev >= 0.995f) {
           nc.drawPath(borderPath, paint)
         } else {
-          // Smooth reveal: bright trigger line expanding symmetrically around full perimeter
           pathMeasure.setPath(borderPath, true)
           val totalLen = pathMeasure.length
           if (totalLen > 1f) {

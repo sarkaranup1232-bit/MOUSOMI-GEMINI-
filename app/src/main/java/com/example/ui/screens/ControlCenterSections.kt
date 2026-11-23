@@ -219,14 +219,14 @@ fun EdgeLightStudioSection(
       valueRange = 0.20f..1.0f,
     )
 
-    Text("Speed (${"%.1f".format(config.animationSpeed)}x)", style = MaterialTheme.typography.labelMedium)
+    Text("Animation Speed (${"%.1f".format(config.animationSpeed)}x)", style = MaterialTheme.typography.labelMedium)
     Slider(
       value = config.animationSpeed,
       onValueChange = { onUpdate(config.copy(animationSpeed = it)) },
       valueRange = 0.3f..2.2f,
     )
 
-    Text("Border Thickness (${config.borderThicknessDp.toInt()} dp)", style = MaterialTheme.typography.labelMedium)
+    Text("Glow Width (${config.borderThicknessDp.toInt()} dp)", style = MaterialTheme.typography.labelMedium)
     Slider(
       value = config.borderThicknessDp,
       onValueChange = { onUpdate(config.copy(borderThicknessDp = it)) },
@@ -283,13 +283,23 @@ fun FloatingOrbAndScreenSection(
   onStopScreenShare: () -> Unit,
   onAnalyzeCurrentScreen: () -> Unit,
   onOpenDrawingStudio: () -> Unit,
+  onLaunchFloatingControlBar: () -> Unit = {},
 ) {
   val colors = LocalMousomiColors.current
   Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
     StudioCard(
-      title = "2. Floating AI Orb",
-      subtitle = "Draggable quick assistant orb with edge snap & synced halo",
+      title = "2. Floating Assistant & Control Bar",
+      subtitle = "Liquid Glass toolbar above apps with Expand, Screen Selection, Profile, Pause & Close",
     ) {
+      Button(
+        onClick = onLaunchFloatingControlBar,
+        colors = ButtonDefaults.buttonColors(containerColor = colors.liveButtonBlue),
+        modifier = Modifier.fillMaxWidth().testTag("launch_floating_control_bar_button"),
+      ) {
+        Icon(Icons.Outlined.AutoAwesome, contentDescription = null)
+        Spacer(modifier = Modifier.width(6.dp))
+        Text("Launch Floating Assistant Bar", color = Color.White)
+      }
       ToggleRow(
         title = "Enable Floating AI Orb",
         subtitle = "Single tap for 7 quick actions, double-tap for Voice",

@@ -1,17 +1,22 @@
 package com.example.service
 
+import android.Manifest
 import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -22,69 +27,49 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.service.quicksettings.Tile
+import android.service.quicksettings.TileService
 import android.service.voice.VoiceInteractionService
 import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
-import android.Manifest
-import android.content.pm.PackageManager
-import android.service.quicksettings.Tile
-import android.service.quicksettings.TileService
+import android.view.inputmethod.InputMethodManager
+import android.widget.FrameLayout
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.Send
-import androidx.compose.material.icons.outlined.CenterFocusWeak
-import androidx.compose.material.icons.outlined.Mic
-import androidx.compose.material.icons.outlined.MicOff
-import androidx.compose.material.icons.outlined.OpenInFull
-import androidx.compose.material.icons.outlined.Pause
-import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -93,19 +78,6 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
-import android.graphics.Rect
-import android.view.HapticFeedbackConstants
-import android.view.KeyEvent
-import android.view.inputmethod.InputMethodManager
-import android.widget.FrameLayout
-import android.window.OnBackInvokedCallback
-import android.window.OnBackInvokedDispatcher
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.ui.draw.scale
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.core.assistant.AssistantSessionPhase
@@ -115,19 +87,23 @@ import com.example.core.display.DisplayGeometry
 import com.example.core.display.DisplayGeometryManager
 import com.example.core.edge.EdgeLightStateMapper
 import com.example.core.notifications.NotificationIntelligenceEngine
+import com.example.core.overlay.FloatingAssistantSessionStore
+import com.example.core.overlay.FloatingControlBarGeometry
 import com.example.core.overlay.OrbPositionHelper
-import androidx.core.content.ContextCompat
 import com.example.core.permissions.EmergencyStopController
 import com.example.core.screen.MediaProjectionManager as AppMediaProjectionManager
 import com.example.core.screen.ScreenSelectionManager
 import com.example.core.screen.ScreenShareSessionManager
 import com.example.core.screen.ScreenshotCaptureManager
+import com.example.core.screen.SelectionStage
+import com.example.core.screen.VisualQueryProcessor
 import com.example.core.voice.AudioSmokeAnalyzer
 import com.example.core.voice.GeminiLiveVoiceEngine
 import com.example.core.voice.LiveVoiceSessionStatus
 import com.example.core.voice.VoiceController
 import com.example.core.voice.VoiceState
 import com.example.domain.model.AiResponseState
+import com.example.domain.model.DomainMessage
 import com.example.domain.model.EdgeLightConfig
 import com.example.domain.model.OrbPopupAction
 import com.example.domain.model.OrbQuickAction
@@ -139,20 +115,21 @@ import com.example.domain.orchestrator.OrchestrationEvent
 import com.example.domain.orchestrator.OrchestrationRequest
 import com.example.domain.repository.SettingsRepository
 import com.example.ui.components.EdgeLightPerimeterOverlay
+import com.example.ui.components.FloatingChatPanelCard
+import com.example.ui.components.FloatingControlBar
 import com.example.ui.components.FloatingOrbitPopup
-import com.example.ui.components.GeminiFourPointSparkle
-import com.example.ui.components.MousomiDesignTokens
+import com.example.ui.components.FloatingProfileQuickMenu
 import com.example.ui.components.OrbitDismissScrim
 import com.example.ui.components.OrbitalSmokeOrb
-import com.example.ui.theme.ElectricBlue
-import com.example.ui.theme.LiquidGlassDark
+import com.example.ui.model.AttachmentPreview
+import com.example.ui.overlay.OverlayMediaPickerActivity
+import com.example.ui.overlay.ScreenCaptureConsentActivity
 import com.example.ui.theme.MousomiTheme
-import com.example.ui.theme.NeonCyan
-import com.example.ui.theme.WarmAmber
 import dagger.hilt.android.AndroidEntryPoint
 import java.util.Calendar
 import javax.inject.Inject
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -405,11 +382,33 @@ class MediaProjectionCaptureService : Service() {
     mediaProjection = null
     appMediaProjectionManager.release(reason)
     if (isSelectionModeSession) {
-      screenSelectionManager.stopAndCleanup()
+      if (screenSelectionManager.state.value.stage != SelectionStage.ATTACHED) {
+        screenSelectionManager.stopAndCleanup()
+      }
+    } else if (sessionManager.status.value != ScreenShareStatus.STOPPED) {
+      sessionManager.stopSession(reason)
     }
-    sessionManager.stopSession(reason)
     stopForeground(STOP_FOREGROUND_REMOVE)
     stopSelf()
+  }
+
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    if (mediaProjection == null) return
+    if (isSelectionModeSession) {
+      val (w, h, _) = appMediaProjectionManager.queryFullDisplayMetrics()
+      appMediaProjectionManager.recreateSurface(w, h)
+    } else if (captureJob?.isActive == true) {
+      val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+      val (width, height) =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+          val b = wm.maximumWindowMetrics.bounds
+          Pair((b.width() / 2).coerceIn(360, 1080), (b.height() / 2).coerceIn(640, 1920))
+        } else {
+          Pair(720, 1280)
+        }
+      recreateSurfaceForSize(width, height)
+    }
   }
 
   private fun ensureChannel() {
@@ -490,9 +489,24 @@ private class OverlayLifecycleOwner : LifecycleOwner, SavedStateRegistryOwner {
 private class BackAwareOverlayContainer(
   context: Context,
   private val onBackAction: () -> Boolean,
+  private val onOutsideTouch: () -> Unit = {},
+  private val onInsideTouchDown: () -> Unit = {},
 ) : FrameLayout(context) {
 
   private var backCallback: Any? = null
+
+  override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+    when (ev.actionMasked) {
+      MotionEvent.ACTION_OUTSIDE -> {
+        onOutsideTouch()
+        return false
+      }
+      MotionEvent.ACTION_DOWN -> {
+        onInsideTouchDown()
+      }
+    }
+    return super.dispatchTouchEvent(ev)
+  }
 
   override fun dispatchKeyEvent(event: KeyEvent): Boolean {
     if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP && !event.isCanceled) {
@@ -526,6 +540,73 @@ private class BackAwareOverlayContainer(
   }
 }
 
+private class DraggableOverlayFrameLayout(
+  context: Context,
+  private val onDragMove: (dxPx: Int, dyPx: Int) -> Unit,
+  private val onDragEnd: () -> Unit,
+) : FrameLayout(context) {
+
+  private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+  private var downRawX = 0f
+  private var downRawY = 0f
+  private var lastRawX = 0f
+  private var lastRawY = 0f
+  private var isDragging = false
+
+  override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+    when (ev.actionMasked) {
+      MotionEvent.ACTION_DOWN -> {
+        downRawX = ev.rawX
+        downRawY = ev.rawY
+        lastRawX = ev.rawX
+        lastRawY = ev.rawY
+        isDragging = false
+        return false
+      }
+      MotionEvent.ACTION_MOVE -> {
+        val dist = hypot(ev.rawX - downRawX, ev.rawY - downRawY)
+        if (dist > touchSlop) {
+          isDragging = true
+          return true
+        }
+        return false
+      }
+      MotionEvent.ACTION_UP,
+      MotionEvent.ACTION_CANCEL -> {
+        isDragging = false
+        return false
+      }
+    }
+    return false
+  }
+
+  override fun onTouchEvent(event: MotionEvent): Boolean {
+    when (event.actionMasked) {
+      MotionEvent.ACTION_MOVE -> {
+        if (isDragging) {
+          val dx = (event.rawX - lastRawX).roundToInt()
+          val dy = (event.rawY - lastRawY).roundToInt()
+          if (dx != 0 || dy != 0) {
+            lastRawX = event.rawX
+            lastRawY = event.rawY
+            onDragMove(dx, dy)
+          }
+          return true
+        }
+      }
+      MotionEvent.ACTION_UP,
+      MotionEvent.ACTION_CANCEL -> {
+        if (isDragging) {
+          isDragging = false
+          onDragEnd()
+          return true
+        }
+      }
+    }
+    return super.onTouchEvent(event)
+  }
+}
+
 @AndroidEntryPoint
 class MousomiOverlayService : Service() {
 
@@ -538,11 +619,19 @@ class MousomiOverlayService : Service() {
   @Inject lateinit var sessionStateManager: AssistantSessionStateManager
   @Inject lateinit var displayGeometryManager: DisplayGeometryManager
   @Inject lateinit var screenShareSessionManager: ScreenShareSessionManager
+  @Inject lateinit var floatingSessionStore: FloatingAssistantSessionStore
+  @Inject lateinit var visualQueryProcessor: VisualQueryProcessor
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private var windowManager: WindowManager? = null
   private var edgeLightView: ComposeView? = null
   private var edgeLightLifecycle: OverlayLifecycleOwner? = null
+  private var controlBarContainer: DraggableOverlayFrameLayout? = null
+  private var controlBarParams: WindowManager.LayoutParams? = null
+  private var controlBarLifecycle: OverlayLifecycleOwner? = null
+  private var profileMenuView: ComposeView? = null
+  private var profileMenuParams: WindowManager.LayoutParams? = null
+  private var profileMenuLifecycle: OverlayLifecycleOwner? = null
   private var orbView: ComposeView? = null
   private var dismissTargetView: ComposeView? = null
   private var dismissTargetLifecycle: OverlayLifecycleOwner? = null
@@ -558,16 +647,52 @@ class MousomiOverlayService : Service() {
   private val isOverlayPaused = MutableStateFlow(false)
   private val isHoveringDismissTarget = MutableStateFlow(false)
   private val overlayResponseState = MutableStateFlow<AiResponseState>(AiResponseState.Idle)
-  private val overlayAnswerText = MutableStateFlow("")
-  private val overlayModelLabel = MutableStateFlow("")
-  private val overlayPromptText = MutableStateFlow("")
-  private val panelMaxHeightDpState = mutableIntStateOf(320)
+  private val panelMaxHeightDpState = mutableIntStateOf(360)
   private val currentGeometryState = MutableStateFlow<DisplayGeometry?>(null)
+  private val isScreenOn = MutableStateFlow(true)
+  private val isSystemPowerSave = MutableStateFlow(false)
   private var overlayQueryJob: Job? = null
   private var overlayVoiceCollectorJob: Job? = null
   private var edgeRevealSettlerJob: Job? = null
+  private var edgeStopFadeJob: Job? = null
   private var imeHidePendingJob: Job? = null
   private var overlayChannelCreated = false
+  private var isPowerReceiverRegistered = false
+
+  private val powerStateReceiver =
+    object : BroadcastReceiver() {
+      override fun onReceive(context: Context?, intent: Intent?) {
+        when (intent?.action) {
+          Intent.ACTION_SCREEN_OFF -> isScreenOn.value = false
+          Intent.ACTION_SCREEN_ON -> isScreenOn.value = true
+          PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> refreshPowerState()
+        }
+      }
+    }
+
+  override fun onCreate() {
+    super.onCreate()
+    refreshPowerState()
+    val filter =
+      IntentFilter().apply {
+        addAction(Intent.ACTION_SCREEN_OFF)
+        addAction(Intent.ACTION_SCREEN_ON)
+        addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+      }
+    ContextCompat.registerReceiver(
+      this,
+      powerStateReceiver,
+      filter,
+      ContextCompat.RECEIVER_NOT_EXPORTED,
+    )
+    isPowerReceiverRegistered = true
+  }
+
+  private fun refreshPowerState() {
+    val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+    isScreenOn.value = pm.isInteractive
+    isSystemPowerSave.value = pm.isPowerSaveMode
+  }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -577,13 +702,24 @@ class MousomiOverlayService : Service() {
       return START_NOT_STICKY
     }
 
+    edgeStopFadeJob?.cancel()
+
     when (intent?.action) {
+      ACTION_HIDE_FOR_SELECTION -> {
+        detachControlBar()
+        detachProfileQuickMenu()
+        collapsePanelToBubble()
+        dismissPopupWindow()
+        startForegroundOverlayNotification()
+        return START_STICKY
+      }
       ACTION_PAUSE -> {
         isOverlayPaused.value = true
         sessionStateManager.onPausedChanged(true)
         geminiLiveVoiceEngine.pauseSession()
         voiceController.stopListening()
         dismissPopupWindow()
+        detachProfileQuickMenu()
         collapsePanelToBubble()
         startForegroundOverlayNotification()
         return START_STICKY
@@ -593,7 +729,18 @@ class MousomiOverlayService : Service() {
         sessionStateManager.onPausedChanged(false)
         startForegroundOverlayNotification()
         attachEdgeLightWindow()
-        attachSystemOrb()
+        attachControlBar()
+        maybeAttachSystemOrbFromSettings()
+        return START_STICKY
+      }
+      ACTION_SHOW_CONTROL_BAR -> {
+        isOverlayPaused.value = false
+        sessionStateManager.onPausedChanged(false)
+        floatingSessionStore.setControlBarVisible(true)
+        startForegroundOverlayNotification()
+        attachEdgeLightWindow()
+        attachControlBar()
+        maybeAttachSystemOrbFromSettings()
         return START_STICKY
       }
       ACTION_ACTIVATE_ASSISTANT -> {
@@ -603,9 +750,11 @@ class MousomiOverlayService : Service() {
         val autoVoice = intent.getBooleanExtra(EXTRA_PANEL_VOICE_AUTO, true)
         val accepted = sessionStateManager.activateFromTrigger(edge = edge, expandPanel = expandPanel)
         isOverlayPaused.value = false
+        floatingSessionStore.setControlBarVisible(true)
         startForegroundOverlayNotification()
         attachEdgeLightWindow()
-        attachSystemOrb()
+        attachControlBar()
+        maybeAttachSystemOrbFromSettings()
         if (accepted) {
           scheduleRevealSettled()
           if (expandPanel) {
@@ -618,21 +767,34 @@ class MousomiOverlayService : Service() {
       }
       ACTION_SHOW_ASSISTANT_PANEL -> {
         isOverlayPaused.value = false
+        floatingSessionStore.setControlBarVisible(true)
         sessionStateManager.activateFromTrigger(edge = EdgeActivationEdge.BOTTOM, expandPanel = true)
         scheduleRevealSettled()
         startForegroundOverlayNotification()
         attachEdgeLightWindow()
-        attachSystemOrb()
+        attachControlBar()
+        maybeAttachSystemOrbFromSettings()
         val autoVoice = intent.getBooleanExtra(EXTRA_PANEL_VOICE_AUTO, false)
         showAssistantPanel(autoStartVoice = autoVoice)
         return START_STICKY
       }
     }
 
+    floatingSessionStore.setControlBarVisible(true)
     startForegroundOverlayNotification()
     attachEdgeLightWindow()
-    attachSystemOrb()
+    attachControlBar()
+    maybeAttachSystemOrbFromSettings()
     return START_STICKY
+  }
+
+  private fun maybeAttachSystemOrbFromSettings() {
+    scope.launch {
+      val settings = settingsRepository.getSettingsSnapshot()
+      if (settings.floatingOrbConfig.enabled) {
+        attachSystemOrb()
+      }
+    }
   }
 
   private fun scheduleRevealSettled() {
@@ -695,7 +857,7 @@ class MousomiOverlayService : Service() {
         .setContentTitle(if (paused) "Mousomi Overlay Paused" else "Mousomi Floating Assistant Ready")
         .setContentText(
           if (paused) "Tap Resume to re-enable floating assistant & edge glow."
-          else "Tap Quick Ask, drag bubble to X to dismiss, or tap Stop anytime."
+          else "Use the floating bar to ask, select screen, or tap Stop anytime."
         )
         .setSmallIcon(R.drawable.ic_launcher_foreground)
         .setOngoing(true)
@@ -740,6 +902,10 @@ class MousomiOverlayService : Service() {
         PixelFormat.TRANSLUCENT,
       ).apply {
         gravity = Gravity.TOP or Gravity.START
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+          layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
       }
 
     val owner = OverlayLifecycleOwner().also { it.onCreate() }
@@ -761,18 +927,26 @@ class MousomiOverlayService : Service() {
           val screenShareStatus by screenShareSessionManager.status.collectAsState()
           val liveStatus by geminiLiveVoiceEngine.status.collectAsState()
           val latestGeo by currentGeometryState.collectAsState()
+          val screenOn by isScreenOn.collectAsState()
+          val sysPowerSave by isSystemPowerSave.collectAsState()
+          val floatingState by floatingSessionStore.state.collectAsState()
 
           val effectivePhase =
             when {
+              !screenOn -> AssistantSessionPhase.PAUSED
               paused -> AssistantSessionPhase.PAUSED
               liveStatus == LiveVoiceSessionStatus.Active &&
                 sessionPhase == AssistantSessionPhase.INACTIVE -> AssistantSessionPhase.LISTENING
+              floatingState.isPanelOpen &&
+                sessionPhase == AssistantSessionPhase.INACTIVE -> AssistantSessionPhase.PANEL_EXPANDED
               else -> sessionPhase
             }
 
+          val baseCfg = settings?.edgeLightConfig ?: EdgeLightConfig()
           val effectiveConfig =
-            (settings?.edgeLightConfig ?: EdgeLightConfig()).copy(
-              enabled = !paused && (settings?.edgeLightConfig?.enabled ?: true),
+            baseCfg.copy(
+              enabled = screenOn && !paused && baseCfg.enabled,
+              reducedMotion = baseCfg.reducedMotion || !screenOn,
               scheduleEnabled = false,
             )
           val edgeParams =
@@ -783,7 +957,7 @@ class MousomiOverlayService : Service() {
               voiceRmsNormalized = voiceRms,
               screenShareStatus = screenShareStatus,
               notificationAlertActive = false,
-              isSystemPowerSave = false,
+              isSystemPowerSave = sysPowerSave,
               currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY),
               forcePreview = false,
               assistantSessionPhase = effectivePhase,
@@ -814,6 +988,343 @@ class MousomiOverlayService : Service() {
     edgeLightView = null
     edgeLightLifecycle?.onDestroy()
     edgeLightLifecycle = null
+  }
+
+  private fun attachControlBar() {
+    if (controlBarContainer != null) {
+      floatingSessionStore.setControlBarVisible(true)
+      return
+    }
+    val wm = (windowManager ?: getSystemService(Context.WINDOW_SERVICE) as? WindowManager) ?: return
+    windowManager = wm
+
+    val geometry = displayGeometryManager.measure(this)
+    currentGeometryState.value = geometry
+    val estBarW = (288f * geometry.density).roundToInt().coerceAtMost(geometry.usableWidthPx)
+    val estBarH = (56f * geometry.density).roundToInt()
+    val overlayState = floatingSessionStore.state.value
+    val (initX, initY) =
+      FloatingControlBarGeometry.coordinatesFromFraction(
+        xFraction = overlayState.controlBarXFraction,
+        yFraction = overlayState.controlBarYFraction,
+        barWidthPx = estBarW,
+        barHeightPx = estBarH,
+        geometry = geometry,
+      )
+
+    val params =
+      WindowManager.LayoutParams(
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        overlayLayoutType(),
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.TRANSLUCENT,
+      ).apply {
+        gravity = Gravity.TOP or Gravity.START
+        x = initX
+        y = initY
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+          layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+      }
+    controlBarParams = params
+
+    val owner = OverlayLifecycleOwner().also { it.onCreate() }
+    controlBarLifecycle = owner
+
+    lateinit var containerRef: DraggableOverlayFrameLayout
+    val container =
+      DraggableOverlayFrameLayout(
+        context = this,
+        onDragMove = { dx, dy ->
+          val geo = displayGeometryManager.measure(this@MousomiOverlayService)
+          val w = containerRef.width.takeIf { it > 16 } ?: estBarW
+          val h = containerRef.height.takeIf { it > 16 } ?: estBarH
+          val (cx, cy) =
+            FloatingControlBarGeometry.clampControlBarCoordinates(
+              xPx = params.x + dx,
+              yPx = params.y + dy,
+              barWidthPx = w,
+              barHeightPx = h,
+              geometry = geo,
+            )
+          if (params.x != cx || params.y != cy) {
+            params.x = cx
+            params.y = cy
+            runCatching { wm.updateViewLayout(containerRef, params) }
+          }
+        },
+        onDragEnd = {
+          val geo = displayGeometryManager.measure(this@MousomiOverlayService)
+          val w = containerRef.width.takeIf { it > 16 } ?: estBarW
+          val h = containerRef.height.takeIf { it > 16 } ?: estBarH
+          val (xf, yf) =
+            FloatingControlBarGeometry.fractionFromCoordinates(
+              xPx = params.x,
+              yPx = params.y,
+              barWidthPx = w,
+              barHeightPx = h,
+              geometry = geo,
+            )
+          floatingSessionStore.updateControlBarFraction(xf, yf)
+          repositionProfileMenuIfOpen(geo)
+        },
+      )
+    containerRef = container
+
+    val composeView =
+      ComposeView(this).apply {
+        setViewTreeLifecycleOwner(owner)
+        setViewTreeSavedStateRegistryOwner(owner)
+        setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+        setContent {
+          val overlayUi by floatingSessionStore.state.collectAsState()
+          val paused by isOverlayPaused.collectAsState()
+          val responseState by overlayResponseState.collectAsState()
+          val voiceState by voiceController.voiceState.collectAsState()
+          val liveStatus by geminiLiveVoiceEngine.status.collectAsState()
+          val isBusyOrListening =
+            responseState is AiResponseState.Loading ||
+              responseState is AiResponseState.Thinking ||
+              responseState is AiResponseState.Streaming ||
+              voiceState is VoiceState.Listening ||
+              liveStatus == LiveVoiceSessionStatus.Active
+
+          MousomiTheme {
+            FloatingControlBar(
+              isPanelOpen = overlayUi.isPanelOpen,
+              isProfileMenuOpen = overlayUi.isProfileQuickMenuOpen,
+              isPaused = paused,
+              isBusyOrListening = isBusyOrListening,
+              onExpandClick = {
+                if (floatingSessionStore.state.value.isPanelOpen) {
+                  collapsePanelToBubble()
+                  floatingSessionStore.minimizePanel()
+                } else {
+                  floatingSessionStore.setProfileQuickMenuOpen(false)
+                  detachProfileQuickMenu()
+                  showAssistantPanel(autoStartVoice = false)
+                }
+              },
+              onScreenSelectionClick = {
+                launchScreenSelectionFromOverlay()
+              },
+              onProfileClick = {
+                val nextOpen = !floatingSessionStore.state.value.isProfileQuickMenuOpen
+                floatingSessionStore.setProfileQuickMenuOpen(nextOpen)
+                if (nextOpen) {
+                  attachProfileQuickMenu()
+                } else {
+                  detachProfileQuickMenu()
+                }
+              },
+              onPauseToggleClick = {
+                toggleOverlayPause()
+              },
+              onCloseClick = {
+                endLiveAssistantSession(stopServiceCompletely = true)
+              },
+            )
+          }
+        }
+      }
+
+    container.setViewTreeLifecycleOwner(owner)
+    container.setViewTreeSavedStateRegistryOwner(owner)
+    container.addView(
+      composeView,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    container.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+      if (controlBarContainer === v && v.width > 16 && v.height > 16) {
+        val geo = displayGeometryManager.measure(this@MousomiOverlayService)
+        val (cx, cy) =
+          FloatingControlBarGeometry.clampControlBarCoordinates(
+            xPx = params.x,
+            yPx = params.y,
+            barWidthPx = v.width,
+            barHeightPx = v.height,
+            geometry = geo,
+          )
+        if (params.x != cx || params.y != cy) {
+          params.x = cx
+          params.y = cy
+          runCatching { wm.updateViewLayout(v, params) }
+        }
+      }
+    }
+
+    runCatching {
+      wm.addView(container, params)
+      controlBarContainer = container
+      floatingSessionStore.setControlBarVisible(true)
+    }
+  }
+
+  private fun detachControlBar() {
+    controlBarContainer?.let { v -> runCatching { windowManager?.removeView(v) } }
+    controlBarContainer = null
+    controlBarParams = null
+    controlBarLifecycle?.onDestroy()
+    controlBarLifecycle = null
+    floatingSessionStore.setControlBarVisible(false)
+  }
+
+  private fun attachProfileQuickMenu() {
+    if (profileMenuView != null) return
+    val wm = (windowManager ?: getSystemService(Context.WINDOW_SERVICE) as? WindowManager) ?: return
+    val geo = displayGeometryManager.measure(this)
+    val barParams = controlBarParams
+    val barHeight = controlBarContainer?.height?.takeIf { it > 16 } ?: (56 * geo.density).roundToInt()
+    val widthPx = (360f * geo.density).roundToInt().coerceAtMost(geo.usableWidthPx)
+    val menuY =
+      if (barParams != null) {
+        val belowBar = barParams.y + barHeight + (8f * geo.density).roundToInt()
+        val maxMenuTop = (geo.screenHeightPx - geo.safeBottomWithoutImePx - (260f * geo.density).roundToInt()).coerceAtLeast(geo.safeTopPx)
+        belowBar.coerceIn(geo.safeTopPx, maxMenuTop)
+      } else {
+        geo.safeTopPx + (72f * geo.density).roundToInt()
+      }
+
+    val params =
+      WindowManager.LayoutParams(
+        widthPx,
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        overlayLayoutType(),
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+          WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.TRANSLUCENT,
+      ).apply {
+        gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        y = menuY
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+          layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+      }
+    profileMenuParams = params
+
+    val owner = OverlayLifecycleOwner().also { it.onCreate() }
+    profileMenuLifecycle = owner
+
+    val view =
+      ComposeView(this).apply {
+        setViewTreeLifecycleOwner(owner)
+        setViewTreeSavedStateRegistryOwner(owner)
+        setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+        setOnTouchListener { _, event ->
+          if (event.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+            floatingSessionStore.setProfileQuickMenuOpen(false)
+            detachProfileQuickMenu()
+          }
+          false
+        }
+        setContent {
+          val settings by settingsRepository.observeSettings().collectAsState(initial = null)
+          val overlayUi by floatingSessionStore.state.collectAsState()
+          MousomiTheme {
+            FloatingProfileQuickMenu(
+              activeModelLabel = overlayUi.activeModelLabel,
+              edgeLightConfig = settings?.edgeLightConfig ?: EdgeLightConfig(),
+              onUpdateEdgeLight = { nextCfg ->
+                scope.launch {
+                  val cur = settingsRepository.getSettingsSnapshot()
+                  settingsRepository.saveSettings(cur.copy(edgeLightConfig = nextCfg))
+                }
+              },
+              onOpenControlCenter = {
+                floatingSessionStore.setProfileQuickMenuOpen(false)
+                detachProfileQuickMenu()
+                openMainAppRoute(MainActivity.ACTION_OPEN_CONTROL_CENTER)
+              },
+              onOpenSettings = {
+                floatingSessionStore.setProfileQuickMenuOpen(false)
+                detachProfileQuickMenu()
+                openMainAppRoute(MainActivity.ACTION_OPEN_SETTINGS)
+              },
+              onClearHistory = {
+                floatingSessionStore.clearConversationHistory()
+                floatingSessionStore.setStatusBanner("Floating chat history cleared.")
+              },
+              onDismiss = {
+                floatingSessionStore.setProfileQuickMenuOpen(false)
+                detachProfileQuickMenu()
+              },
+            )
+          }
+        }
+      }
+
+    runCatching {
+      wm.addView(view, params)
+      profileMenuView = view
+    }
+  }
+
+  private fun detachProfileQuickMenu() {
+    profileMenuView?.let { v -> runCatching { windowManager?.removeView(v) } }
+    profileMenuView = null
+    profileMenuParams = null
+    profileMenuLifecycle?.onDestroy()
+    profileMenuLifecycle = null
+  }
+
+  private fun repositionProfileMenuIfOpen(geo: DisplayGeometry) {
+    val menu = profileMenuView ?: return
+    val params = profileMenuParams ?: return
+    val wm = windowManager ?: return
+    val barParams = controlBarParams ?: return
+    val barH = controlBarContainer?.height?.takeIf { it > 16 } ?: (56 * geo.density).roundToInt()
+    val maxMenuTop = (geo.screenHeightPx - geo.safeBottomWithoutImePx - (260f * geo.density).roundToInt()).coerceAtLeast(geo.safeTopPx)
+    params.y = (barParams.y + barH + (8f * geo.density).roundToInt()).coerceIn(geo.safeTopPx, maxMenuTop)
+    params.width = (360f * geo.density).roundToInt().coerceAtMost(geo.usableWidthPx)
+    runCatching { wm.updateViewLayout(menu, params) }
+  }
+
+  private fun toggleOverlayPause() {
+    val nextPaused = !isOverlayPaused.value
+    isOverlayPaused.value = nextPaused
+    sessionStateManager.onPausedChanged(nextPaused)
+    if (nextPaused) {
+      geminiLiveVoiceEngine.pauseSession()
+      voiceController.stopListening()
+      voiceController.stopSpeaking()
+    } else {
+      attachEdgeLightWindow()
+      if (geminiLiveVoiceEngine.status.value == LiveVoiceSessionStatus.Paused) {
+        geminiLiveVoiceEngine.resumeSession { startOverlayFallbackStt() }
+      }
+    }
+    startForegroundOverlayNotification()
+  }
+
+  private fun launchScreenSelectionFromOverlay() {
+    detachControlBar()
+    detachProfileQuickMenu()
+    collapsePanelToBubble()
+    dismissPopupWindow()
+    floatingSessionStore.setSelectionTriggeredFromOverlay(true)
+    startActivity(ScreenCaptureConsentActivity.buildIntent(this, fromOverlay = true))
+  }
+
+  private fun openMainAppRoute(customAction: String? = null) {
+    collapsePanelToBubble()
+    floatingSessionStore.minimizePanel()
+    val launch =
+      Intent(this@MousomiOverlayService, MainActivity::class.java).apply {
+        if (!customAction.isNullOrBlank()) {
+          action = customAction
+        }
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+      }
+    startActivity(launch)
   }
 
   private fun attachSystemOrb() {
@@ -940,6 +1451,7 @@ class MousomiOverlayService : Service() {
           if (!isDragging && event.action == MotionEvent.ACTION_UP) {
             if (assistantPanelContainer != null) {
               collapsePanelToBubble()
+              floatingSessionStore.minimizePanel()
             } else {
               showAssistantPanel(autoStartVoice = false)
             }
@@ -1063,7 +1575,6 @@ class MousomiOverlayService : Service() {
     hideDismissTargetOverlay()
     collapsePanelToBubble()
     dismissPopupWindow()
-    // Stop bubble-bound mic cleanly; keep independent active screen share intact unless End Live is pressed
     geminiLiveVoiceEngine.stopAndClose()
     voiceController.stopListening()
     voiceController.stopSpeaking()
@@ -1072,7 +1583,7 @@ class MousomiOverlayService : Service() {
     orbLifecycle?.onDestroy()
     orbLifecycle = null
     sessionStateManager.onBubbleDismissed(stopAssistantVoice = true)
-    if (!sessionStateManager.isSessionActive.value) {
+    if (!sessionStateManager.isSessionActive.value && controlBarContainer == null) {
       scope.launch {
         val sysEnabled = settingsRepository.getSettingsSnapshot().edgeLightConfig.systemOverlayEnabled
         if (!sysEnabled) {
@@ -1097,16 +1608,30 @@ class MousomiOverlayService : Service() {
       screenShareSessionManager.stopSession("Ended via Live Assistant stop.")
     }
     dismissPopupWindow()
+    detachProfileQuickMenu()
     collapsePanelToBubble()
     sessionStateManager.onEndLiveAssistant(keepScreenShare = false)
     if (stopServiceCompletely) {
-      detachEdgeLightWindow()
+      detachControlBar()
+      floatingSessionStore.resetTransientOverlayVisibilityOnly()
       orbView?.let { v -> runCatching { windowManager?.removeView(v) } }
       orbView = null
       orbLifecycle?.onDestroy()
       orbLifecycle = null
-      stopForeground(STOP_FOREGROUND_REMOVE)
-      stopSelf()
+      edgeStopFadeJob?.cancel()
+      if (edgeLightView != null) {
+        // Allow EdgeLightPerimeterOverlay's 360ms visibilityAlpha fade-out tween to finish smoothly
+        edgeStopFadeJob =
+          scope.launch {
+            delay(380L)
+            detachEdgeLightWindow()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+          }
+      } else {
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+      }
     } else {
       startForegroundOverlayNotification()
     }
@@ -1130,6 +1655,10 @@ class MousomiOverlayService : Service() {
         PixelFormat.TRANSLUCENT,
       ).apply {
         gravity = Gravity.CENTER
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+          layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
       }
 
     val view =
@@ -1179,17 +1708,27 @@ class MousomiOverlayService : Service() {
 
   private fun showAssistantPanel(autoStartVoice: Boolean) {
     if (assistantPanelContainer != null) {
+      floatingSessionStore.setPanelState(open = true)
       sessionStateManager.onPanelExpandedChanged(true)
+      assistantPanelParams?.let { params ->
+        val wm = windowManager
+        if (wm != null && (params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) != 0) {
+          params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+          runCatching { wm.updateViewLayout(assistantPanelContainer, params) }
+        }
+      }
       if (autoStartVoice) startOverlayVoiceListening()
       return
     }
     val wm = (windowManager ?: getSystemService(Context.WINDOW_SERVICE) as? WindowManager) ?: return
     windowManager = wm
     dismissPopupWindow()
+    detachProfileQuickMenu()
+    floatingSessionStore.setProfileQuickMenuOpen(false)
     if (edgeLightView == null && !isOverlayPaused.value) {
       attachEdgeLightWindow()
     }
-    attachSystemOrb()
+    attachControlBar()
 
     val initialGeo = displayGeometryManager.measure(this)
     currentGeometryState.value = initialGeo
@@ -1212,23 +1751,46 @@ class MousomiOverlayService : Service() {
         gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
         y = placement.bottomMarginPx
         softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+          layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
       }
     assistantPanelParams = params
 
     lateinit var containerRef: BackAwareOverlayContainer
     val container =
-      BackAwareOverlayContainer(this) {
-        if (sessionStateManager.isKeyboardVisible.value) {
+      BackAwareOverlayContainer(
+        context = this,
+        onBackAction = {
+          if (sessionStateManager.isKeyboardVisible.value) {
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.hideSoftInputFromWindow(containerRef.windowToken, 0)
+            sessionStateManager.onKeyboardVisibilityChanged(false)
+            updatePanelLayoutForInsets(containerRef, params, wm)
+            true
+          } else {
+            collapsePanelToBubble()
+            floatingSessionStore.minimizePanel()
+            true
+          }
+        },
+        onOutsideTouch = {
           val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
           imm?.hideSoftInputFromWindow(containerRef.windowToken, 0)
           sessionStateManager.onKeyboardVisibilityChanged(false)
-          updatePanelLayoutForInsets(containerRef, params, wm)
-          true
-        } else {
-          collapsePanelToBubble()
-          true
-        }
-      }
+          if ((params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) == 0) {
+            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            runCatching { wm.updateViewLayout(containerRef, params) }
+          }
+        },
+        onInsideTouchDown = {
+          if ((params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) != 0) {
+            params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+            runCatching { wm.updateViewLayout(containerRef, params) }
+          }
+        },
+      )
     containerRef = container
 
     val composeView =
@@ -1237,10 +1799,8 @@ class MousomiOverlayService : Service() {
         setViewTreeSavedStateRegistryOwner(owner)
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
         setContent {
-          val prompt by overlayPromptText.collectAsState()
+          val overlayUi by floatingSessionStore.state.collectAsState()
           val responseState by overlayResponseState.collectAsState()
-          val answer by overlayAnswerText.collectAsState()
-          val modelLabel by overlayModelLabel.collectAsState()
           val voiceState by voiceController.voiceState.collectAsState()
           val liveStatus by geminiLiveVoiceEngine.status.collectAsState()
           val userLiveTranscript by geminiLiveVoiceEngine.userTranscript.collectAsState()
@@ -1248,27 +1808,53 @@ class MousomiOverlayService : Service() {
           val paused by isOverlayPaused.collectAsState()
           val maxCardDp by panelMaxHeightDpState
 
-          val effectiveAnswer =
-            when {
-              aiLiveTranscript.isNotBlank() &&
-                (liveStatus == LiveVoiceSessionStatus.Active || liveStatus == LiveVoiceSessionStatus.Paused) ->
-                aiLiveTranscript
-              else -> answer
+          LaunchedEffect(aiLiveTranscript, liveStatus) {
+            if (aiLiveTranscript.isNotBlank() &&
+              (liveStatus == LiveVoiceSessionStatus.Active || liveStatus == LiveVoiceSessionStatus.Paused)
+            ) {
+              floatingSessionStore.appendLiveTranscriptTurn(
+                isUser = false,
+                text = aiLiveTranscript,
+              )
             }
+          }
+          LaunchedEffect(userLiveTranscript, liveStatus) {
+            if (userLiveTranscript.isNotBlank() && liveStatus == LiveVoiceSessionStatus.Active) {
+              floatingSessionStore.appendLiveTranscriptTurn(
+                isUser = true,
+                text = userLiveTranscript,
+              )
+            }
+          }
 
           MousomiTheme {
-            FloatingAssistantOverlayCard(
-              promptText = prompt,
-              answerText = effectiveAnswer,
+            FloatingChatPanelCard(
+              promptText = overlayUi.promptText,
+              turns = overlayUi.turns,
+              pendingAttachments = overlayUi.pendingAttachments,
+              previewingAttachment = overlayUi.previewingAttachment,
               liveUserTranscript = userLiveTranscript,
-              modelLabel = modelLabel,
+              activeModelLabel = overlayUi.activeModelLabel,
+              statusBanner = overlayUi.statusBanner,
               responseState = responseState,
               voiceState = voiceState,
               liveStatus = liveStatus,
               isPaused = paused,
               maxCardHeightDp = maxCardDp,
-              onPromptChanged = { overlayPromptText.value = it },
+              onPromptChanged = { floatingSessionStore.updatePromptText(it) },
               onSendPrompt = { submitOverlayPrompt(it) },
+              onAttachImage = {
+                startActivity(OverlayMediaPickerActivity.buildIntent(this@MousomiOverlayService))
+              },
+              onStartScreenSelection = {
+                launchScreenSelectionFromOverlay()
+              },
+              onRemoveAttachment = { uriStr ->
+                floatingSessionStore.removePendingAttachment(uriStr)
+              },
+              onOpenAttachmentPreview = { item ->
+                floatingSessionStore.openAttachmentPreview(item)
+              },
               onToggleVoice = {
                 if (liveStatus == LiveVoiceSessionStatus.Active || liveStatus == LiveVoiceSessionStatus.Connecting) {
                   geminiLiveVoiceEngine.pauseSession()
@@ -1281,32 +1867,14 @@ class MousomiOverlayService : Service() {
                   startOverlayVoiceListening()
                 }
               },
-              onTogglePause = {
-                val nextPaused = !isOverlayPaused.value
-                isOverlayPaused.value = nextPaused
-                sessionStateManager.onPausedChanged(nextPaused)
-                if (nextPaused) {
-                  geminiLiveVoiceEngine.pauseSession()
-                  voiceController.stopListening()
-                  voiceController.stopSpeaking()
-                } else {
-                  attachEdgeLightWindow()
-                  if (liveStatus == LiveVoiceSessionStatus.Paused) {
-                    geminiLiveVoiceEngine.resumeSession { startOverlayFallbackStt() }
-                  }
-                }
-                startForegroundOverlayNotification()
-              },
+              onTogglePause = { toggleOverlayPause() },
               onEndLive = { endLiveAssistantSession(stopServiceCompletely = false) },
-              onExpandApp = {
+              onClearHistory = { floatingSessionStore.clearConversationHistory() },
+              onExpandApp = { openMainAppRoute() },
+              onMinimizePanel = {
                 collapsePanelToBubble()
-                val launch =
-                  Intent(this@MousomiOverlayService, MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                  }
-                startActivity(launch)
+                floatingSessionStore.minimizePanel()
               },
-              onCollapseToBubble = { collapsePanelToBubble() },
             )
           }
         }
@@ -1335,6 +1903,7 @@ class MousomiOverlayService : Service() {
     runCatching {
       wm.addView(container, params)
       assistantPanelContainer = container
+      floatingSessionStore.setPanelState(open = true)
       sessionStateManager.onPanelExpandedChanged(true)
       if (autoStartVoice) {
         startOverlayVoiceListening()
@@ -1366,16 +1935,33 @@ class MousomiOverlayService : Service() {
         }
     }
 
-    // Detect if WM already positioned overlay window above IME or if we need explicit bottom offset
     val visibleRect = Rect()
     container.getWindowVisibleDisplayFrame(visibleRect)
-    val alreadyShifted =
-      imeVisibleNow && visibleRect.bottom in 100 until (geo.screenHeightPx - geo.imeBottomPx + (32 * geo.density).roundToInt())
+    val tolerancePx = (24f * geo.density).roundToInt()
+    val imeTopY = geo.screenHeightPx - geo.imeBottomPx
+    val alreadyShiftedByWm =
+      imeVisibleNow && visibleRect.bottom in 100..(imeTopY + tolerancePx)
 
-    val placement = DisplayGeometryManager.computePanelPlacement(geo, windowAlreadyShiftedByIme = alreadyShifted)
+    val placement =
+      DisplayGeometryManager.computePanelPlacement(
+        geometry = geo,
+        windowAlreadyShiftedByIme = alreadyShiftedByWm,
+      )
     panelMaxHeightDpState.intValue = placement.maxHeightDp
 
-    val targetY = placement.bottomMarginPx
+    var targetY = placement.bottomMarginPx
+    if (imeVisibleNow && container.height > 0) {
+      val loc = IntArray(2)
+      container.getLocationOnScreen(loc)
+      val actualBottom = loc[1] + container.height
+      val clearancePx = (10f * geo.density).roundToInt()
+      val desiredMaxBottom = imeTopY - clearancePx
+      if (actualBottom > desiredMaxBottom + (6f * geo.density).roundToInt()) {
+        val shortfall = actualBottom - desiredMaxBottom
+        targetY = (params.y + shortfall).coerceAtLeast(placement.bottomMarginPx)
+      }
+    }
+
     if (params.y != targetY || params.width != placement.widthPx) {
       params.y = targetY
       params.width = placement.widthPx
@@ -1388,7 +1974,9 @@ class MousomiOverlayService : Service() {
       ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
         PackageManager.PERMISSION_GRANTED
     if (!hasMic) {
-      overlayAnswerText.value = "Microphone permission is needed for voice input. Open Permissions in Mousomi AI."
+      floatingSessionStore.setStatusBanner(
+        "Microphone permission is needed for voice input. Open Permissions in Mousomi AI."
+      )
       return
     }
     scope.launch {
@@ -1416,7 +2004,7 @@ class MousomiOverlayService : Service() {
             val clean = vState.transcript.trim()
             voiceController.resetState()
             if (clean.isNotBlank()) {
-              overlayPromptText.value = clean
+              floatingSessionStore.updatePromptText(clean)
               submitOverlayPrompt(clean)
             }
           }
@@ -1430,43 +2018,103 @@ class MousomiOverlayService : Service() {
 
   private fun submitOverlayPrompt(rawPrompt: String) {
     val clean = rawPrompt.trim()
-    if (clean.isBlank()) return
-    overlayPromptText.value = ""
-    if (geminiLiveVoiceEngine.status.value == LiveVoiceSessionStatus.Active) {
+    val pendingAttachments = floatingSessionStore.state.value.pendingAttachments
+    if (clean.isBlank() && pendingAttachments.isEmpty()) return
+
+    if (pendingAttachments.isEmpty() && geminiLiveVoiceEngine.status.value == LiveVoiceSessionStatus.Active) {
+      floatingSessionStore.appendLiveTranscriptTurn(isUser = true, text = clean)
+      floatingSessionStore.updatePromptText("")
       geminiLiveVoiceEngine.sendFollowUpText(clean)
       return
     }
+
+    val snapshotTurns = floatingSessionStore.state.value.turns
+    val attachmentPreviews =
+      pendingAttachments.map { AttachmentPreview.PickedPhotoUri(it.uriString) }
+    val attachmentUris = pendingAttachments.map { it.uriString }
+
     overlayQueryJob?.cancel()
     overlayQueryJob =
       scope.launch {
-        overlayAnswerText.value = ""
         overlayResponseState.value = AiResponseState.Loading
+        val prepared =
+          if (attachmentPreviews.isNotEmpty()) {
+            visualQueryProcessor.prepareQuery(clean, attachmentPreviews)
+          } else {
+            VisualQueryProcessor.PreparedVisualQuery(
+              userDisplayPrompt = clean,
+              modelPrompt = clean,
+              payloads = emptyList(),
+            )
+          }
+
+        val assistantTurnId =
+          floatingSessionStore.appendUserTurnAndPrepareAssistantPlaceholder(
+            userDisplayText = prepared.userDisplayPrompt,
+            attachmentUris = attachmentUris,
+          )
+
+        val historyMessages =
+          snapshotTurns
+            .filter { it.text.isNotBlank() }
+            .takeLast(12)
+            .map { turn ->
+              DomainMessage(
+                id = turn.id,
+                conversationId = "overlay_quick",
+                isUser = turn.isUser,
+                text = turn.text,
+                timestampMs = turn.timestampMs,
+                imageUris = turn.attachmentUris,
+                modelUsed = turn.modelLabel.takeIf { it.isNotBlank() },
+              )
+            }
+
+        var latestModelLabel = floatingSessionStore.state.value.activeModelLabel
         aiOrchestrator
           .processMessage(
             OrchestrationRequest(
               conversationId = "overlay_quick",
-              userPrompt = clean,
-              historyMessages = emptyList(),
+              userPrompt = prepared.modelPrompt,
+              historyMessages = historyMessages,
+              currentTurnImages = prepared.payloads,
               requestedModelId = VerifiedModelCatalog.MOUSOMI_AUTO_SLOT_ID,
             )
           )
           .collect { event ->
             when (event) {
               is OrchestrationEvent.Routed -> {
-                overlayModelLabel.value = event.decision.selectedModel.displayName
+                latestModelLabel = event.decision.selectedModel.displayName
+                floatingSessionStore.setActiveModelLabel(latestModelLabel)
               }
               is OrchestrationEvent.StateChanged -> {
                 overlayResponseState.value = event.state
                 when (val s = event.state) {
-                  is AiResponseState.Streaming -> overlayAnswerText.value = s.partialText
+                  is AiResponseState.Streaming -> {
+                    floatingSessionStore.updateAssistantTurn(
+                      assistantTurnId = assistantTurnId,
+                      text = s.partialText,
+                      modelLabel = latestModelLabel,
+                    )
+                  }
                   is AiResponseState.Completed -> {
-                    overlayAnswerText.value = s.fullText
+                    floatingSessionStore.updateAssistantTurn(
+                      assistantTurnId = assistantTurnId,
+                      text = s.fullText,
+                      modelLabel = latestModelLabel,
+                    )
                     val settings = settingsRepository.getSettingsSnapshot()
                     if (settings.voicePreferences.autoSpeakResponses) {
                       voiceController.speakResponse("overlay_ans", s.fullText, settings.voicePreferences)
                     }
                   }
-                  is AiResponseState.Error -> overlayAnswerText.value = s.message
+                  is AiResponseState.Error -> {
+                    floatingSessionStore.updateAssistantTurn(
+                      assistantTurnId = assistantTurnId,
+                      text = s.message,
+                      modelLabel = latestModelLabel,
+                    )
+                  }
                   else -> Unit
                 }
               }
@@ -1490,7 +2138,6 @@ class MousomiOverlayService : Service() {
     assistantPanelLifecycle?.onDestroy()
     assistantPanelLifecycle = null
     sessionStateManager.onPanelExpandedChanged(false)
-    // If voice/screen share aren't running, transition edge glow smoothly off while keeping bubble ready
     if (geminiLiveVoiceEngine.status.value != LiveVoiceSessionStatus.Active &&
       screenShareSessionManager.status.value == ScreenShareStatus.STOPPED
     ) {
@@ -1510,6 +2157,27 @@ class MousomiOverlayService : Service() {
     val wm = windowManager ?: return
     val geo = displayGeometryManager.measure(this, assistantPanelContainer)
     currentGeometryState.value = geo
+
+    controlBarContainer?.let { bar ->
+      controlBarParams?.let { params ->
+        val overlayUi = floatingSessionStore.state.value
+        val w = bar.width.takeIf { it > 16 } ?: (288f * geo.density).roundToInt()
+        val h = bar.height.takeIf { it > 16 } ?: (56f * geo.density).roundToInt()
+        val (rx, ry) =
+          FloatingControlBarGeometry.coordinatesFromFraction(
+            xFraction = overlayUi.controlBarXFraction,
+            yFraction = overlayUi.controlBarYFraction,
+            barWidthPx = w,
+            barHeightPx = h,
+            geometry = geo,
+          )
+        params.x = rx
+        params.y = ry
+        runCatching { wm.updateViewLayout(bar, params) }
+      }
+    }
+
+    repositionProfileMenuIfOpen(geo)
 
     orbView?.let { view ->
       orbParams?.let { params ->
@@ -1531,13 +2199,20 @@ class MousomiOverlayService : Service() {
 
   override fun onDestroy() {
     super.onDestroy()
+    if (isPowerReceiverRegistered) {
+      runCatching { unregisterReceiver(powerStateReceiver) }
+      isPowerReceiverRegistered = false
+    }
     edgeRevealSettlerJob?.cancel()
+    edgeStopFadeJob?.cancel()
     imeHidePendingJob?.cancel()
     overlayQueryJob?.cancel()
     overlayVoiceCollectorJob?.cancel()
     hideDismissTargetOverlay()
     dismissPopupWindow()
+    detachProfileQuickMenu()
     collapsePanelToBubble()
+    detachControlBar()
     detachEdgeLightWindow()
     orbView?.let { v -> runCatching { windowManager?.removeView(v) } }
     orbView = null
@@ -1550,6 +2225,8 @@ class MousomiOverlayService : Service() {
     const val CHANNEL_ID = "mousomi_floating_orb"
     const val NOTIFICATION_ID = 4402
     const val ACTION_START = "com.example.action.START_OVERLAY_ORB"
+    const val ACTION_SHOW_CONTROL_BAR = "com.example.action.SHOW_FLOATING_CONTROL_BAR"
+    const val ACTION_HIDE_FOR_SELECTION = "com.example.action.HIDE_FOR_SCREEN_SELECTION"
     const val ACTION_PAUSE = "com.example.action.PAUSE_OVERLAY_ORB"
     const val ACTION_RESUME = "com.example.action.RESUME_OVERLAY_ORB"
     const val ACTION_STOP = "com.example.action.STOP_OVERLAY_ORB"
@@ -1558,6 +2235,9 @@ class MousomiOverlayService : Service() {
     const val EXTRA_PANEL_VOICE_AUTO = "extra_panel_voice_auto"
     const val EXTRA_EXPAND_PANEL = "extra_expand_panel"
     const val EXTRA_ACTIVATION_EDGE = "extra_activation_edge"
+
+    fun buildShowControlBarIntent(context: Context): Intent =
+      Intent(context, MousomiOverlayService::class.java).apply { action = ACTION_SHOW_CONTROL_BAR }
 
     fun buildActivateAssistantIntent(
       context: Context,
@@ -1571,213 +2251,6 @@ class MousomiOverlayService : Service() {
         putExtra(EXTRA_EXPAND_PANEL, expandPanel)
         putExtra(EXTRA_PANEL_VOICE_AUTO, autoVoice)
       }
-  }
-}
-
-@Composable
-private fun FloatingAssistantOverlayCard(
-  promptText: String,
-  answerText: String,
-  liveUserTranscript: String,
-  modelLabel: String,
-  responseState: AiResponseState,
-  voiceState: VoiceState,
-  liveStatus: LiveVoiceSessionStatus,
-  isPaused: Boolean,
-  maxCardHeightDp: Int,
-  onPromptChanged: (String) -> Unit,
-  onSendPrompt: (String) -> Unit,
-  onToggleVoice: () -> Unit,
-  onTogglePause: () -> Unit,
-  onEndLive: () -> Unit,
-  onExpandApp: () -> Unit,
-  onCollapseToBubble: () -> Unit,
-) {
-  val isBusy =
-    responseState is AiResponseState.Loading ||
-      responseState is AiResponseState.Thinking ||
-      responseState is AiResponseState.Generating ||
-      responseState is AiResponseState.Streaming
-  val isMicActive =
-    liveStatus == LiveVoiceSessionStatus.Active ||
-      liveStatus == LiveVoiceSessionStatus.Connecting ||
-      voiceState is VoiceState.Listening
-
-  Surface(
-    shape = RoundedCornerShape(26.dp),
-    color = LiquidGlassDark.copy(alpha = 0.96f),
-    border =
-      BorderStroke(
-        width = 2.dp,
-        brush = Brush.linearGradient(MousomiDesignTokens.GoogleNeonSpectrum),
-      ),
-    shadowElevation = 20.dp,
-    modifier = Modifier.fillMaxWidth().widthIn(max = 420.dp).heightIn(max = maxCardHeightDp.dp),
-  ) {
-    Column(
-      modifier = Modifier.padding(14.dp),
-      verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-      ) {
-        Row(
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-          modifier = Modifier.weight(1f),
-        ) {
-          GeminiFourPointSparkle(size = 20.dp, animated = !isPaused)
-          Column {
-            Text(
-              text = "Mousomi Assistant",
-              color = Color.White,
-              style = MaterialTheme.typography.titleSmall,
-              fontWeight = FontWeight.SemiBold,
-            )
-            val statusSub =
-              when {
-                isPaused || liveStatus == LiveVoiceSessionStatus.Paused -> "Paused"
-                liveStatus == LiveVoiceSessionStatus.Connecting -> "Connecting Gemini Live…"
-                liveStatus == LiveVoiceSessionStatus.Active -> "Live Audio Active (Speak anytime)"
-                liveStatus is LiveVoiceSessionStatus.Reconnecting -> "Reconnecting Live…"
-                voiceState is VoiceState.Listening -> "Listening…"
-                isBusy -> modelLabel.ifBlank { "Thinking…" }
-                modelLabel.isNotBlank() -> modelLabel
-                else -> "Ready over current app"
-              }
-            Text(
-              text = statusSub,
-              color = if (isPaused) WarmAmber else NeonCyan,
-              fontSize = 11.sp,
-              maxLines = 1,
-              overflow = TextOverflow.Ellipsis,
-            )
-          }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          IconButton(onClick = onTogglePause, modifier = Modifier.size(36.dp)) {
-            Icon(
-              imageVector = if (isPaused) Icons.Outlined.PlayArrow else Icons.Outlined.Pause,
-              contentDescription = if (isPaused) "Resume Assistant" else "Pause Assistant",
-              tint = if (isPaused) NeonCyan else WarmAmber,
-              modifier = Modifier.size(18.dp),
-            )
-          }
-          IconButton(onClick = onExpandApp, modifier = Modifier.size(36.dp)) {
-            Icon(
-              imageVector = Icons.Outlined.OpenInFull,
-              contentDescription = "Open Full Mousomi App",
-              tint = Color.White,
-              modifier = Modifier.size(18.dp),
-            )
-          }
-          IconButton(onClick = onCollapseToBubble, modifier = Modifier.size(36.dp)) {
-            Icon(
-              imageVector = Icons.Rounded.Close,
-              contentDescription = "Collapse to Floating Bubble",
-              tint = Color.White.copy(alpha = 0.85f),
-              modifier = Modifier.size(18.dp),
-            )
-          }
-        }
-      }
-
-      if (liveUserTranscript.isNotBlank() && isMicActive) {
-        Text(
-          text = "You: $liveUserTranscript",
-          color = NeonCyan.copy(alpha = 0.9f),
-          fontSize = 11.sp,
-          maxLines = 2,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
-
-      if (answerText.isNotBlank()) {
-        Surface(
-          shape = RoundedCornerShape(16.dp),
-          color = Color.White.copy(alpha = 0.08f),
-          modifier = Modifier.fillMaxWidth().weight(1f, fill = false).heightIn(max = 150.dp),
-        ) {
-          Text(
-            text = answerText,
-            color = Color.White.copy(alpha = 0.94f),
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(12.dp).verticalScroll(rememberScrollState()),
-          )
-        }
-      }
-
-      if (isMicActive || liveStatus == LiveVoiceSessionStatus.Paused) {
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.End,
-        ) {
-          Surface(
-            onClick = onEndLive,
-            shape = CircleShape,
-            color = Color(0xFF991B1B).copy(alpha = 0.9f),
-            border = BorderStroke(1.dp, Color(0xFFEF4444)),
-          ) {
-            Text(
-              text = "End Live",
-              color = Color.White,
-              fontSize = 11.sp,
-              fontWeight = FontWeight.Medium,
-              modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
-            )
-          }
-        }
-      }
-
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-      ) {
-        OutlinedTextField(
-          value = promptText,
-          onValueChange = onPromptChanged,
-          placeholder = {
-            Text("Ask Mousomi…", color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp)
-          },
-          singleLine = true,
-          shape = RoundedCornerShape(22.dp),
-          modifier = Modifier.weight(1f),
-        )
-        Surface(
-          onClick = onToggleVoice,
-          shape = CircleShape,
-          color = if (isMicActive) NeonCyan else Color.White.copy(alpha = 0.14f),
-          modifier = Modifier.size(48.dp),
-        ) {
-          Box(contentAlignment = Alignment.Center) {
-            Icon(
-              imageVector = if (isMicActive) Icons.Outlined.MicOff else Icons.Outlined.Mic,
-              contentDescription = if (isMicActive) "Pause Voice Input" else "Start Live Voice",
-              tint = if (isMicActive) Color.Black else Color.White,
-              modifier = Modifier.size(20.dp),
-            )
-          }
-        }
-        Surface(
-          onClick = { if (!isBusy && promptText.isNotBlank()) onSendPrompt(promptText) },
-          shape = CircleShape,
-          color = ElectricBlue,
-          modifier = Modifier.size(48.dp),
-        ) {
-          Box(contentAlignment = Alignment.Center) {
-            Icon(
-              imageVector = Icons.AutoMirrored.Rounded.Send,
-              contentDescription = "Send",
-              tint = Color.White,
-              modifier = Modifier.size(19.dp),
-            )
-          }
-        }
-      }
-    }
   }
 }
 

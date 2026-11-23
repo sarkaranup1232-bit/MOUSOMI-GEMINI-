@@ -8,7 +8,6 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
-import com.example.R
 import com.example.domain.auth.AuthUserSession
 import com.example.domain.auth.EntitlementTier
 import com.example.domain.auth.GoogleSignInOutcome
@@ -18,6 +17,7 @@ import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
@@ -39,7 +39,16 @@ class FirebaseAuthGateway @Inject constructor(
   @ApplicationContext private val context: Context,
 ) : OptionalAuthGateway {
 
-  private val auth: FirebaseAuth by lazy { Firebase.auth }
+  private val auth: FirebaseAuth? by lazy {
+    runCatching {
+      val appContext = context.applicationContext
+      if (FirebaseApp.getApps(appContext).isEmpty()) {
+        FirebaseApp.initializeApp(appContext)
+      }
+      Firebase.auth
+    }.getOrNull()
+  }
+
   private val credentialManager: CredentialManager by lazy { CredentialManager.create(context) }
   private val beforeSignOutHooks = CopyOnWriteArrayList<() -> Unit>()
 
@@ -58,11 +67,12 @@ class FirebaseAuthGateway @Inject constructor(
       synchronized(this) {
         if (!listenerRegistered) {
           runCatching {
-            val user = auth.currentUser
+            val firebaseAuth = auth ?: return@runCatching
+            val user = firebaseAuth.currentUser
             if (user != null || !sessionFlow.value.isGuest) {
               sessionFlow.value = user.toSession()
             }
-            auth.addAuthStateListener(authListener)
+            firebaseAuth.addAuthStateListener(authListener)
             listenerRegistered = true
           }.onFailure { e ->
             Log.w("Auth", "FirebaseAuth listener init deferred: ${e.message}")
@@ -99,8 +109,9 @@ class FirebaseAuthGateway @Inject constructor(
   override suspend fun attemptSilentSignIn(): Boolean {
     ensureListener()
     if (sessionFlow.value.isGuest) return false
-    if (auth.currentUser != null) {
-      sessionFlow.value = auth.currentUser.toSession()
+    val firebaseAuth = auth ?: return false
+    if (firebaseAuth.currentUser != null) {
+      sessionFlow.value = firebaseAuth.currentUser.toSession()
       return true
     }
     val clientId = resolveWebClientId() ?: return false
@@ -117,8 +128,8 @@ class FirebaseAuthGateway @Inject constructor(
       val cred = credentialManager.getCredential(context, request).credential
       if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
         val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
-        auth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
-        sessionFlow.value = auth.currentUser.toSession()
+        firebaseAuth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
+        sessionFlow.value = firebaseAuth.currentUser.toSession()
         true
       } else {
         false
@@ -133,6 +144,8 @@ class FirebaseAuthGateway @Inject constructor(
 
   override suspend fun signInWithGoogle(activity: Activity): GoogleSignInOutcome {
     ensureListener()
+    val firebaseAuth = auth
+      ?: return GoogleSignInOutcome.Error("Firebase Auth is not initialized (google-services.json missing).")
     val clientId = resolveWebClientId()
       ?: return GoogleSignInOutcome.Error(
         "Google Sign-In configuration missing: default_web_client_id not found."
@@ -152,8 +165,8 @@ class FirebaseAuthGateway @Inject constructor(
       val cred = credentialManager.getCredential(activity, request).credential
       if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
         val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
-        auth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
-        val updated = auth.currentUser.toSession()
+        firebaseAuth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
+        val updated = firebaseAuth.currentUser.toSession()
         sessionFlow.value = updated
         GoogleSignInOutcome.Success(updated)
       } else {
@@ -185,7 +198,7 @@ class FirebaseAuthGateway @Inject constructor(
       } catch (e: Exception) {
         Log.w("Auth", "Failed to clear credential state: ${e.message}")
       } finally {
-        runCatching { auth.signOut() }
+        runCatching { auth?.signOut() }
         sessionFlow.value = AuthUserSession()
       }
     }
@@ -193,7 +206,8 @@ class FirebaseAuthGateway @Inject constructor(
 
   private fun resolveWebClientId(): String? =
     try {
-      context.getString(R.string.default_web_client_id).takeIf { it.isNotBlank() }
+      val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+      if (resId != 0) context.getString(resId).takeIf { it.isNotBlank() } else null
     } catch (_: Exception) {
       null
     }

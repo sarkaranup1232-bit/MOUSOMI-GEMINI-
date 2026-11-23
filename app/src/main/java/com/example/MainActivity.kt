@@ -82,6 +82,7 @@ class MainActivity : ComponentActivity() {
   private var pendingQuickActionState = mutableStateOf<OrbQuickAction?>(null)
   private var pendingPopupActionState = mutableStateOf<OrbPopupAction?>(null)
   private var pendingAttachScreenSelectionState = mutableStateOf(false)
+  private var pendingRouteActionState = mutableStateOf<String?>(null)
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
@@ -90,6 +91,9 @@ class MainActivity : ComponentActivity() {
     extractPopupAction(intent)?.let { pendingPopupActionState.value = it }
     if (intent.action == ACTION_ATTACH_SCREEN_SELECTION) {
       pendingAttachScreenSelectionState.value = true
+    }
+    if (intent.action == ACTION_OPEN_CONTROL_CENTER || intent.action == ACTION_OPEN_SETTINGS) {
+      pendingRouteActionState.value = intent.action
     }
   }
 
@@ -102,6 +106,9 @@ class MainActivity : ComponentActivity() {
     pendingQuickActionState.value = extractQuickAction(intent)
     pendingPopupActionState.value = extractPopupAction(intent)
     pendingAttachScreenSelectionState.value = intent?.action == ACTION_ATTACH_SCREEN_SELECTION
+    if (intent?.action == ACTION_OPEN_CONTROL_CENTER || intent?.action == ACTION_OPEN_SETTINGS) {
+      pendingRouteActionState.value = intent.action
+    }
 
     setContent {
       val authSession by
@@ -203,6 +210,18 @@ class MainActivity : ComponentActivity() {
       val activeQuickAction by pendingQuickActionState
       val activePopupAction by pendingPopupActionState
       val activeAttachScreenSelection by pendingAttachScreenSelectionState
+      val activeRouteAction by pendingRouteActionState
+
+      LaunchedEffect(activeRouteAction) {
+        val routeAction = activeRouteAction ?: return@LaunchedEffect
+        pendingRouteActionState.value = null
+        when (routeAction) {
+          ACTION_OPEN_CONTROL_CENTER ->
+            navController.navigate(MousomiRoutes.CONTROL_CENTER) { launchSingleTop = true }
+          ACTION_OPEN_SETTINGS ->
+            navController.navigate(MousomiRoutes.SETTINGS) { launchSingleTop = true }
+        }
+      }
 
       LaunchedEffect(activeAttachScreenSelection) {
         if (activeAttachScreenSelection) {
@@ -390,6 +409,19 @@ class MainActivity : ComponentActivity() {
                     startActivity(PermissionCenterHelper.createOverlaySettingsIntent(this@MainActivity))
                   }
                 },
+                onLaunchFloatingControlBar = {
+                  if (!Settings.canDrawOverlays(this@MainActivity)) {
+                    startActivity(PermissionCenterHelper.createOverlaySettingsIntent(this@MainActivity))
+                  } else {
+                    viewModel.onUpdateEdgeLightConfig(
+                      uiState.edgeLightConfig.copy(systemOverlayEnabled = true)
+                    )
+                    ContextCompat.startForegroundService(
+                      this@MainActivity,
+                      MousomiOverlayService.buildShowControlBarIntent(this@MainActivity),
+                    )
+                  }
+                },
                 onOpenOverlaySettings = {
                   startActivity(PermissionCenterHelper.createOverlaySettingsIntent(this@MainActivity))
                 },
@@ -528,5 +560,7 @@ class MainActivity : ComponentActivity() {
     const val EXTRA_QUICK_ACTION = "extra_orb_quick_action"
     const val EXTRA_ORB_POPUP_ACTION = "extra_orb_popup_action"
     const val ACTION_ATTACH_SCREEN_SELECTION = "com.example.action.ATTACH_SCREEN_SELECTION"
+    const val ACTION_OPEN_CONTROL_CENTER = "com.example.action.OPEN_CONTROL_CENTER"
+    const val ACTION_OPEN_SETTINGS = "com.example.action.OPEN_SETTINGS"
   }
 }

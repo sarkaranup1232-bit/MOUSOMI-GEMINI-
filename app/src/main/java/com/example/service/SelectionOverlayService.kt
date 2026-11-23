@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
@@ -20,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -30,8 +32,11 @@ import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.example.MainActivity
 import com.example.R
+import com.example.core.overlay.FloatingAssistantSessionStore
 import com.example.core.screen.ScreenSelectionManager
+import com.example.core.screen.ScreenShareSessionManager
 import com.example.core.screen.SelectionGeometryEngine
+import com.example.domain.model.ScreenShareStatus
 import com.example.domain.repository.SettingsRepository
 import com.example.ui.components.ScreenSelectionOverlay
 import com.example.ui.theme.MousomiTheme
@@ -76,6 +81,8 @@ class SelectionOverlayService : Service() {
   @Inject lateinit var selectionManager: ScreenSelectionManager
   @Inject lateinit var geometryEngine: SelectionGeometryEngine
   @Inject lateinit var settingsRepository: SettingsRepository
+  @Inject lateinit var floatingSessionStore: FloatingAssistantSessionStore
+  @Inject lateinit var screenShareSessionManager: ScreenShareSessionManager
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private var windowManager: WindowManager? = null
@@ -86,7 +93,13 @@ class SelectionOverlayService : Service() {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (intent?.action == ACTION_STOP || !Settings.canDrawOverlays(this)) {
+      val triggeredFromOverlay = floatingSessionStore.state.value.selectionTriggeredFromOverlay
       selectionManager.cancelSelection()
+      floatingSessionStore.setSelectionTriggeredFromOverlay(false)
+      releaseOneShotCaptureIfIdle()
+      if (triggeredFromOverlay) {
+        restoreFloatingAssistantAfterSelection(openPanel = false)
+      }
       detachAndStop()
       return START_NOT_STICKY
     }
@@ -164,6 +177,10 @@ class SelectionOverlayService : Service() {
         PixelFormat.TRANSLUCENT,
       ).apply {
         gravity = Gravity.TOP or Gravity.START
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+          layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
       }
 
     val view =
@@ -186,7 +203,13 @@ class SelectionOverlayService : Service() {
               onUndo = selectionManager::undo,
               onClear = selectionManager::clearSelection,
               onCancel = {
+                val triggeredFromOverlay = floatingSessionStore.state.value.selectionTriggeredFromOverlay
                 selectionManager.cancelSelection()
+                floatingSessionStore.setSelectionTriggeredFromOverlay(false)
+                releaseOneShotCaptureIfIdle()
+                if (triggeredFromOverlay) {
+                  restoreFloatingAssistantAfterSelection(openPanel = false)
+                }
                 detachAndStop()
               },
               onConfirmSelection = { ovW, ovH ->
@@ -194,7 +217,7 @@ class SelectionOverlayService : Service() {
                   // Briefly hide overlay window before fresh live frame capture so neon UI isn't baked into crop
                   if (selectionState.sourceFrameFilePath == null) {
                     visibility = View.INVISIBLE
-                    delay(85L)
+                    delay(95L)
                   }
                   val outcome =
                     selectionManager.confirmAndAutoCrop(
@@ -203,12 +226,22 @@ class SelectionOverlayService : Service() {
                     )
                   visibility = View.VISIBLE
                   if (outcome.isSuccess) {
-                    val launchChat =
-                      Intent(this@SelectionOverlayService, MainActivity::class.java).apply {
-                        action = MainActivity.ACTION_ATTACH_SCREEN_SELECTION
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                      }
-                    startActivity(launchChat)
+                    val visual = outcome.getOrThrow()
+                    val triggeredFromOverlay =
+                      floatingSessionStore.state.value.selectionTriggeredFromOverlay
+                    floatingSessionStore.setSelectionTriggeredFromOverlay(false)
+                    releaseOneShotCaptureIfIdle()
+                    if (triggeredFromOverlay) {
+                      floatingSessionStore.attachVisualFromScreenSelection(visual)
+                      restoreFloatingAssistantAfterSelection(openPanel = true)
+                    } else {
+                      val launchChat =
+                        Intent(this@SelectionOverlayService, MainActivity::class.java).apply {
+                          action = MainActivity.ACTION_ATTACH_SCREEN_SELECTION
+                          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        }
+                      startActivity(launchChat)
+                    }
                     detachAndStop()
                   }
                 }
@@ -223,6 +256,30 @@ class SelectionOverlayService : Service() {
       wm.addView(view, params)
       overlayView = view
     }
+  }
+
+  private fun releaseOneShotCaptureIfIdle() {
+    if (screenShareSessionManager.status.value == ScreenShareStatus.STOPPED) {
+      runCatching { startService(MediaProjectionCaptureService.buildStopIntent(this)) }
+    }
+  }
+
+  private fun restoreFloatingAssistantAfterSelection(openPanel: Boolean) {
+    if (!Settings.canDrawOverlays(this)) return
+    val action =
+      if (openPanel) MousomiOverlayService.ACTION_SHOW_ASSISTANT_PANEL
+      else MousomiOverlayService.ACTION_SHOW_CONTROL_BAR
+    val intent =
+      Intent(this, MousomiOverlayService::class.java).apply {
+        this.action = action
+        putExtra(MousomiOverlayService.EXTRA_PANEL_VOICE_AUTO, false)
+      }
+    runCatching { ContextCompat.startForegroundService(this, intent) }
+  }
+
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    overlayView?.requestLayout()
   }
 
   private fun detachAndStop() {

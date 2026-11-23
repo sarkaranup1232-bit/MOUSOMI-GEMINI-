@@ -77,6 +77,7 @@ fun ControlCenterScreen(
   onBack: () -> Unit,
   onOpenFullPermissionCenter: () -> Unit = {},
   onTriggerEmergencyStop: () -> Unit = {},
+  onLaunchFloatingControlBar: () -> Unit = {},
 ) {
   BackHandler(onBack = onBack)
   val context = LocalContext.current
@@ -169,6 +170,7 @@ fun ControlCenterScreen(
                 onBack()
                 onOpenDrawingStudio()
               },
+              onLaunchFloatingControlBar = onLaunchFloatingControlBar,
             )
           }
           1 -> {
