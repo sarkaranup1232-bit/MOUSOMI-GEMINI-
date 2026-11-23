@@ -52,6 +52,15 @@ class MousomiMaintenanceWorker(
   override suspend fun doWork(): Result {
     val cacheManager = TempMediaCacheManager(applicationContext)
     cacheManager.cleanupExpiredTempFiles(maxAgeMs = 12L * 60L * 60L * 1000L)
+    val studioTemp = java.io.File(applicationContext.cacheDir, "image_studio_temp")
+    if (studioTemp.exists() && studioTemp.isDirectory) {
+      val cutoff = System.currentTimeMillis() - (24L * 60L * 60L * 1000L)
+      studioTemp.listFiles()?.forEach { file ->
+        if (file.isFile && file.lastModified() < cutoff) {
+          runCatching { file.delete() }
+        }
+      }
+    }
     return Result.success()
   }
 

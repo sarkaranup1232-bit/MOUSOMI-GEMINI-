@@ -10,12 +10,30 @@ enum class VoiceGender(val label: String, val preferredPitch: Float) {
 
 @Serializable
 enum class ImageGenerationStatus(val label: String) {
-  PREPARING("Preparing prompt & model…"),
+  PREPARING_PROMPT("Preparing prompt…"),
+  CHECKING_FREE_PROVIDER("Checking free provider…"),
+  UPLOADING_REQUEST("Uploading request…"),
   GENERATING("Generating image…"),
-  PROCESSING("Processing visual details…"),
-  FINALIZING("Finalizing & saving version…"),
+  DOWNLOADING_IMAGE("Downloading image…"),
+  VALIDATING_RESULT("Validating result…"),
   COMPLETED("Completed"),
   FAILED("Failed"),
+  QUOTA_EXHAUSTED("Quota Exhausted"),
+  CANCELLED("Cancelled");
+
+  companion object {
+    val PREPARING: ImageGenerationStatus get() = PREPARING_PROMPT
+    val PROCESSING: ImageGenerationStatus get() = DOWNLOADING_IMAGE
+    val FINALIZING: ImageGenerationStatus get() = VALIDATING_RESULT
+  }
+}
+
+@Serializable
+enum class ImageProcessingSource(val badgeLabel: String) {
+  CLOUD_AI_GENERATION("Cloud AI Generation"),
+  CLOUD_AI_EDITING("Cloud AI Editing"),
+  LOCAL_EDITING("Local Editing"),
+  LOCAL_TEXT_COMPOSITING("Local Text Compositing"),
 }
 
 @Serializable
@@ -53,6 +71,10 @@ data class GeneratedImageResult(
   val status: ImageGenerationStatus = ImageGenerationStatus.COMPLETED,
   val errorMessage: String? = null,
   val createdAtMs: Long = System.currentTimeMillis(),
+  val sourceBadge: String = ImageProcessingSource.CLOUD_AI_GENERATION.badgeLabel,
+  val executionSource: ImageProcessingSource = ImageProcessingSource.CLOUD_AI_GENERATION,
+  val beforeFilePath: String? = null,
+  val hasTransparency: Boolean = false,
 )
 
 @Serializable

@@ -47,7 +47,10 @@ class FirebaseAuthGateway @Inject constructor(
   private var listenerRegistered = false
 
   private val authListener = FirebaseAuth.AuthStateListener { firebaseAuth ->
-    sessionFlow.value = firebaseAuth.currentUser.toSession()
+    val user = firebaseAuth.currentUser
+    if (user != null || !sessionFlow.value.isGuest) {
+      sessionFlow.value = user.toSession()
+    }
   }
 
   private fun ensureListener() {
@@ -55,7 +58,10 @@ class FirebaseAuthGateway @Inject constructor(
       synchronized(this) {
         if (!listenerRegistered) {
           runCatching {
-            sessionFlow.value = auth.currentUser.toSession()
+            val user = auth.currentUser
+            if (user != null || !sessionFlow.value.isGuest) {
+              sessionFlow.value = user.toSession()
+            }
             auth.addAuthStateListener(authListener)
             listenerRegistered = true
           }.onFailure { e ->
@@ -76,8 +82,23 @@ class FirebaseAuthGateway @Inject constructor(
     return sessionFlow.value
   }
 
+  override suspend fun enterGuestMode() {
+    ensureListener()
+    sessionFlow.value =
+      AuthUserSession(
+        uid = "guest_local",
+        isSignedIn = false,
+        isGuest = true,
+        displayName = "Guest User",
+        email = null,
+        photoUrl = null,
+        entitlementTier = EntitlementTier.LOCAL_BYOK,
+      )
+  }
+
   override suspend fun attemptSilentSignIn(): Boolean {
     ensureListener()
+    if (sessionFlow.value.isGuest) return false
     if (auth.currentUser != null) {
       sessionFlow.value = auth.currentUser.toSession()
       return true
@@ -182,6 +203,7 @@ class FirebaseAuthGateway @Inject constructor(
     return AuthUserSession(
       uid = uid,
       isSignedIn = true,
+      isGuest = false,
       displayName = displayName?.takeIf { it.isNotBlank() } ?: email ?: "Mousomi User",
       email = email,
       photoUrl = photoUrl?.toString(),

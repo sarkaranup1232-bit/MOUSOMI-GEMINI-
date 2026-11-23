@@ -24,8 +24,18 @@
 
     <string name="mode_chat">Chat</string>
     <string name="mode_task">Task</string>
+    <string name="mode_task_mode">Task Mode</string>
+    <string name="mode_normal">Normal</string>
+    <string name="mode_analysis">Analysis</string>
+    <string name="mode_ai_search">AI Search</string>
+    <string name="mode_deep_research">Deep Research</string>
+    <string name="create_image_chip">Create Image</string>
+    <string name="image_studio_title">Image Studio</string>
     <string name="input_placeholder_chat">Ask Mousomi...</string>
     <string name="input_placeholder_task">Assign a task to Mousomi...</string>
+    <string name="input_placeholder_analysis">Ask Mousomi to analyze deeply...</string>
+    <string name="input_placeholder_search">Search live web with Google AI Search...</string>
+    <string name="input_placeholder_research">Run 7-stage live Deep Research...</string>
 
     <string name="settings_title">Settings</string>
     <string name="settings_subtitle">Configure API credentials, models, voice &amp; appearance for Mousomi AI</string>

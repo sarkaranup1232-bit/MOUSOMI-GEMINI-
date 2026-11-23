@@ -73,6 +73,7 @@ fun FloatingOrbitPopup(
   onSelectAction: (OrbPopupAction) -> Unit,
   onDismiss: () -> Unit,
   onDrawScreen: (() -> Unit)? = null,
+  onSelectScreenRegion: (() -> Unit)? = null,
   modifier: Modifier = Modifier,
 ) {
   Surface(
@@ -134,6 +135,25 @@ fun FloatingOrbitPopup(
           repeat(3 - rowActions.size) {
             Spacer(modifier = Modifier.weight(1f))
           }
+        }
+      }
+
+      if (onSelectScreenRegion != null) {
+        Surface(
+          onClick = onSelectScreenRegion,
+          shape = RoundedCornerShape(14.dp),
+          color = ElectricBlue.copy(alpha = 0.22f),
+          border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.65f)),
+          modifier = Modifier.fillMaxWidth().testTag("orb_action_SCREEN_SELECTION"),
+        ) {
+          Text(
+            text = "Circle / Select Screen & Ask",
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(vertical = 8.dp, horizontal = 12.dp),
+          )
         }
       }
 

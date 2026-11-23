@@ -4,6 +4,7 @@ import android.media.MediaPlayer
 import android.net.Uri
 import android.widget.VideoView
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -673,82 +674,139 @@ private fun SourceCitationsBlockCard(
       style = MaterialTheme.typography.labelMedium,
       fontWeight = FontWeight.SemiBold,
     )
-    sources.take(8).forEach { src ->
+    sources.take(8).forEachIndexed { idx, src ->
       val isMapLink =
         src.url.contains("maps.google", ignoreCase = true) ||
           src.url.contains("google.com/maps", ignoreCase = true)
+      val publisherLabel = src.publisher.ifBlank { src.sourceDomain }
+      val initialChar = publisherLabel.firstOrNull()?.uppercaseChar()?.toString() ?: "W"
+      val faviconModel =
+        src.faviconUrl?.takeIf { it.startsWith("https://", ignoreCase = true) }
+          ?: "https://www.google.com/s2/favicons?domain=${src.sourceDomain}&sz=64"
+      val canOpen = src.url.startsWith("https://", ignoreCase = true)
+
       Surface(
-        onClick = { runCatching { uriHandler.openUri(src.url) } },
+        onClick = { if (canOpen) runCatching { uriHandler.openUri(src.url) } },
         shape = RoundedCornerShape(14.dp),
         color = colors.activeChipContainer.copy(alpha = 0.72f),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().testTag("source_citation_card_$idx"),
       ) {
-        Row(
+        Column(
           modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(10.dp),
+          verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-          Box(contentAlignment = Alignment.Center, modifier = Modifier.size(26.dp)) {
-            if (isMapLink) {
-              Icon(
-                imageVector = Icons.Outlined.Place,
-                contentDescription = "Google Maps location",
-                tint = NeonGreen,
-                modifier = Modifier.size(20.dp),
-              )
-            } else {
-              val faviconUrl = "https://www.google.com/s2/favicons?domain=${src.sourceDomain}&sz=64"
-              AsyncImage(
-                model = faviconUrl,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.size(20.dp).clip(CircleShape),
-              )
-            }
-          }
-          Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-              text = src.title.ifBlank { src.sourceDomain },
-              style = MaterialTheme.typography.labelLarge,
-              fontWeight = FontWeight.Medium,
-              maxLines = 1,
-              overflow = TextOverflow.Ellipsis,
-            )
-            Row(
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(6.dp),
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+          ) {
+            Box(
+              contentAlignment = Alignment.Center,
+              modifier =
+                Modifier
+                  .size(30.dp)
+                  .clip(CircleShape)
+                  .background(
+                    if (isMapLink) NeonGreen.copy(alpha = 0.16f)
+                    else NeonCyan.copy(alpha = 0.14f)
+                  ),
             ) {
-              Icon(
-                imageVector = if (isMapLink) Icons.Outlined.Place else Icons.Outlined.Public,
-                contentDescription = null,
-                tint = NeonCyan,
-                modifier = Modifier.size(12.dp),
-              )
+              if (isMapLink) {
+                Icon(
+                  imageVector = Icons.Outlined.Place,
+                  contentDescription = "Google Maps location",
+                  tint = NeonGreen,
+                  modifier = Modifier.size(18.dp),
+                )
+              } else {
+                Text(
+                  text = initialChar,
+                  color = NeonCyan,
+                  style = MaterialTheme.typography.labelMedium,
+                  fontWeight = FontWeight.Bold,
+                )
+                AsyncImage(
+                  model = faviconModel,
+                  contentDescription = "$publisherLabel logo",
+                  contentScale = ContentScale.Crop,
+                  modifier = Modifier.size(22.dp).clip(CircleShape),
+                )
+              }
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
               Text(
-                text = "${src.sourceDomain} • ${src.verificationStatus.label}",
-                color = colors.mutedText,
-                style = MaterialTheme.typography.labelSmall,
+                text = publisherLabel,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
               )
-            }
-            if (src.snippet.isNotBlank()) {
-              Text(
-                text = src.snippet.take(110),
-                color = colors.mutedText.copy(alpha = 0.9f),
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-              )
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+              ) {
+                Icon(
+                  imageVector = if (isMapLink) Icons.Outlined.Place else Icons.Outlined.Public,
+                  contentDescription = null,
+                  tint = NeonCyan,
+                  modifier = Modifier.size(12.dp),
+                )
+                Text(
+                  text =
+                    buildString {
+                      append(src.sourceDomain)
+                      if (!src.publishedTimestamp.isNullOrBlank()) {
+                        append(" • ")
+                        append(src.publishedTimestamp)
+                      }
+                      append(" • ")
+                      append(src.verificationStatus.label)
+                    },
+                  color = colors.mutedText,
+                  style = MaterialTheme.typography.labelSmall,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
             }
           }
-          Icon(
-            imageVector = Icons.Outlined.OpenInNew,
-            contentDescription = "Open source ${src.url}",
-            modifier = Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.primary,
+
+          Text(
+            text = src.title.ifBlank { src.sourceDomain },
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
           )
+
+          if (src.snippet.isNotBlank()) {
+            Text(
+              text = src.snippet.take(150),
+              color = colors.mutedText.copy(alpha = 0.92f),
+              style = MaterialTheme.typography.bodySmall,
+              maxLines = 2,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
+
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Text(
+              text = if (canOpen) "Open Original Source" else "Unverified Source URL",
+              color = if (canOpen) MaterialTheme.colorScheme.primary else colors.mutedText,
+              style = MaterialTheme.typography.labelMedium,
+              fontWeight = FontWeight.SemiBold,
+            )
+            Icon(
+              imageVector = Icons.Outlined.OpenInNew,
+              contentDescription = "Open source ${src.url}",
+              modifier = Modifier.size(15.dp),
+              tint = if (canOpen) MaterialTheme.colorScheme.primary else colors.mutedText,
+            )
+          }
         }
       }
     }

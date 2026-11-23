@@ -15,6 +15,7 @@ import com.example.domain.model.ConnectionMode
 import com.example.domain.model.EdgeLightConfig
 import com.example.domain.model.FloatingOrbConfig
 import com.example.domain.model.NotificationIntelligenceConfig
+import com.example.domain.model.OperatingMode
 import com.example.domain.model.PrivacyAndPerformanceConfig
 import com.example.domain.model.ResponseLanguage
 import com.example.domain.model.ScreenIntelligenceConfig
@@ -51,6 +52,11 @@ class SettingsDataStore @Inject constructor(
     val PROXY_BASE_URL = stringPreferencesKey("proxy_base_url")
     val GEMINI_API_KEY = stringPreferencesKey("gemini_api_key")
     val GROQ_API_KEY = stringPreferencesKey("groq_api_key")
+    val CLOUDFLARE_ACCOUNT_ID = stringPreferencesKey("cloudflare_account_id")
+    val CLOUDFLARE_API_TOKEN = stringPreferencesKey("cloudflare_api_token")
+    val STRICT_FREE_IMAGE_ONLY = booleanPreferencesKey("strict_free_image_only")
+    val ALLOW_PAID_IMAGE_FALLBACK = booleanPreferencesKey("allow_paid_image_fallback")
+    val OPERATING_MODE = stringPreferencesKey("operating_mode")
     val THEME_MODE = stringPreferencesKey("theme_mode")
     val PREFERRED_LANGUAGE = stringPreferencesKey("preferred_language")
     val AUTO_SPEAK = booleanPreferencesKey("auto_speak")
@@ -59,6 +65,7 @@ class SettingsDataStore @Inject constructor(
     val SELECTED_MODEL_OPTION = stringPreferencesKey("selected_model_option")
     val HYDROGEN_BACKING_MODEL_ID = stringPreferencesKey("hydrogen_backing_model_id")
     val GROQ_REASONING_MODEL_ID = stringPreferencesKey("groq_reasoning_model_id")
+    val GROQ_HELPER_GUARD_MODEL_ID = stringPreferencesKey("groq_helper_guard_model_id")
     val IMAGE_MODEL_ID = stringPreferencesKey("image_model_id")
     val EXTERNAL_SEARCH_URL = stringPreferencesKey("external_search_url")
     val EXTERNAL_SEARCH_API_KEY = stringPreferencesKey("external_search_api_key")
@@ -85,6 +92,11 @@ class SettingsDataStore @Inject constructor(
       prefs[Keys.PROXY_BASE_URL] = settings.proxyBaseUrl.trim()
       prefs[Keys.GEMINI_API_KEY] = cryptoManager.encryptIfSupported(settings.geminiApiKey.trim())
       prefs[Keys.GROQ_API_KEY] = cryptoManager.encryptIfSupported(settings.groqApiKey.trim())
+      prefs[Keys.CLOUDFLARE_ACCOUNT_ID] = cryptoManager.encryptIfSupported(settings.cloudflareAccountId.trim())
+      prefs[Keys.CLOUDFLARE_API_TOKEN] = cryptoManager.encryptIfSupported(settings.cloudflareApiToken.trim())
+      prefs[Keys.STRICT_FREE_IMAGE_ONLY] = settings.strictFreeImageOnly
+      prefs[Keys.ALLOW_PAID_IMAGE_FALLBACK] = settings.allowPaidImageFallbackApproved
+      prefs[Keys.OPERATING_MODE] = settings.operatingModeName
       prefs[Keys.THEME_MODE] = settings.themeModeName
       prefs[Keys.PREFERRED_LANGUAGE] = settings.voicePreferences.preferredLanguage.name
       prefs[Keys.AUTO_SPEAK] = settings.voicePreferences.autoSpeakResponses
@@ -93,6 +105,7 @@ class SettingsDataStore @Inject constructor(
       prefs[Keys.SELECTED_MODEL_OPTION] = settings.selectedModelOptionName
       prefs[Keys.HYDROGEN_BACKING_MODEL_ID] = settings.hydrogenBackingModelId.trim()
       prefs[Keys.GROQ_REASONING_MODEL_ID] = settings.groqReasoningModelId.trim()
+      prefs[Keys.GROQ_HELPER_GUARD_MODEL_ID] = settings.groqHelperGuardModelId.trim()
       prefs[Keys.IMAGE_MODEL_ID] = settings.imageModelId.trim()
       prefs[Keys.EXTERNAL_SEARCH_URL] = settings.externalSearchUrl.trim()
       prefs[Keys.EXTERNAL_SEARCH_API_KEY] =
@@ -130,6 +143,11 @@ class SettingsDataStore @Inject constructor(
       proxyBaseUrl = prefs[Keys.PROXY_BASE_URL].orEmpty(),
       geminiApiKey = cryptoManager.decryptIfEncrypted(prefs[Keys.GEMINI_API_KEY].orEmpty()),
       groqApiKey = cryptoManager.decryptIfEncrypted(prefs[Keys.GROQ_API_KEY].orEmpty()),
+      cloudflareAccountId = cryptoManager.decryptIfEncrypted(prefs[Keys.CLOUDFLARE_ACCOUNT_ID].orEmpty()),
+      cloudflareApiToken = cryptoManager.decryptIfEncrypted(prefs[Keys.CLOUDFLARE_API_TOKEN].orEmpty()),
+      strictFreeImageOnly = prefs[Keys.STRICT_FREE_IMAGE_ONLY] ?: true,
+      allowPaidImageFallbackApproved = prefs[Keys.ALLOW_PAID_IMAGE_FALLBACK] ?: false,
+      operatingModeName = prefs[Keys.OPERATING_MODE] ?: OperatingMode.NORMAL_CHAT.name,
       themeModeName = prefs[Keys.THEME_MODE] ?: "DARK",
       voicePreferences =
         VoicePreferences(
@@ -140,13 +158,16 @@ class SettingsDataStore @Inject constructor(
           voiceGender = voiceGender,
           activationSoundEnabled = prefs[Keys.ACTIVATION_SOUND_ENABLED] ?: true,
         ),
-      selectedModelOptionName = prefs[Keys.SELECTED_MODEL_OPTION] ?: "GEMINI_4_HYDROGEN",
+      selectedModelOptionName = prefs[Keys.SELECTED_MODEL_OPTION] ?: "MOUSOMI_AUTO",
       hydrogenBackingModelId =
         prefs[Keys.HYDROGEN_BACKING_MODEL_ID]?.ifBlank { VerifiedModelCatalog.DEFAULT_HYDROGEN_BACKING_MODEL_ID }
           ?: VerifiedModelCatalog.DEFAULT_HYDROGEN_BACKING_MODEL_ID,
       groqReasoningModelId =
         prefs[Keys.GROQ_REASONING_MODEL_ID]?.ifBlank { VerifiedModelCatalog.DEFAULT_GROQ_REASONING_MODEL_ID }
           ?: VerifiedModelCatalog.DEFAULT_GROQ_REASONING_MODEL_ID,
+      groqHelperGuardModelId =
+        prefs[Keys.GROQ_HELPER_GUARD_MODEL_ID]?.ifBlank { VerifiedModelCatalog.DEFAULT_GROQ_HELPER_MODEL_ID }
+          ?: VerifiedModelCatalog.DEFAULT_GROQ_HELPER_MODEL_ID,
       imageModelId =
         prefs[Keys.IMAGE_MODEL_ID]?.ifBlank { VerifiedModelCatalog.DEFAULT_IMAGE_MODEL_ID }
           ?: VerifiedModelCatalog.DEFAULT_IMAGE_MODEL_ID,

@@ -39,6 +39,7 @@ data class GeminiInlineData(
 data class GeminiGenerationConfig(
   val temperature: Double = 0.7,
   val responseModalities: List<String>? = null,
+  val responseMimeType: String? = null,
 )
 
 @Serializable
@@ -71,6 +72,7 @@ data class GeminiGroundingChunk(
 data class GeminiGroundingWeb(
   val uri: String? = null,
   val title: String? = null,
+  val domain: String? = null,
 )
 
 @Serializable

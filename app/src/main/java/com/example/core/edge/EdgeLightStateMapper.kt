@@ -1,8 +1,11 @@
 package com.example.core.edge
 
+import com.example.core.assistant.AssistantSessionPhase
+import com.example.core.assistant.EdgeActivationSignal
 import com.example.core.voice.VoiceState
 import com.example.domain.model.AiResponseState
 import com.example.domain.model.EdgeLightConfig
+import com.example.domain.model.EdgeLightIntensity
 import com.example.domain.model.EdgeLightPreset
 import com.example.domain.model.EdgeLightVisualState
 import com.example.domain.model.ScreenShareStatus
@@ -19,6 +22,8 @@ data class EdgeLightRenderParams(
   val glowLayerCount: Int,
   val voiceReactiveBoost: Float,
   val breathingOnly: Boolean,
+  val glowScale: Float = 1.0f,
+  val activationSignal: EdgeActivationSignal = EdgeActivationSignal(),
 )
 
 object EdgeLightStateMapper {
@@ -48,11 +53,19 @@ object EdgeLightStateMapper {
     isSystemPowerSave: Boolean,
     currentHour: Int,
     forcePreview: Boolean = false,
+    assistantSessionPhase: AssistantSessionPhase = AssistantSessionPhase.INACTIVE,
+    edgeActivationSignal: EdgeActivationSignal = EdgeActivationSignal(),
+    isOverlayHost: Boolean = false,
   ): EdgeLightRenderParams {
     val visualState =
       when {
-        voiceState is VoiceState.Listening -> EdgeLightVisualState.LISTENING
-        voiceState is VoiceState.Speaking -> EdgeLightVisualState.SPEAKING
+        assistantSessionPhase == AssistantSessionPhase.ERROR || responseState is AiResponseState.Error ->
+          EdgeLightVisualState.ERROR
+        assistantSessionPhase == AssistantSessionPhase.USER_SPEAKING ||
+          assistantSessionPhase == AssistantSessionPhase.LISTENING ||
+          voiceState is VoiceState.Listening -> EdgeLightVisualState.LISTENING
+        assistantSessionPhase == AssistantSessionPhase.AI_RESPONDING ||
+          voiceState is VoiceState.Speaking -> EdgeLightVisualState.SPEAKING
         responseState is AiResponseState.Searching -> {
           if (responseState.detail.contains("Research", ignoreCase = true)) {
             EdgeLightVisualState.RESEARCHING
@@ -62,22 +75,32 @@ object EdgeLightStateMapper {
         }
         responseState is AiResponseState.Thinking || responseState is AiResponseState.Loading ->
           EdgeLightVisualState.THINKING
-        responseState is AiResponseState.Generating || responseState is AiResponseState.Streaming ->
-          EdgeLightVisualState.GENERATING
-        responseState is AiResponseState.Completed -> EdgeLightVisualState.COMPLETED
-        responseState is AiResponseState.Error -> EdgeLightVisualState.ERROR
-        screenShareStatus == ScreenShareStatus.ACTIVE ||
+        responseState is AiResponseState.Generating ||
+          responseState is AiResponseState.Streaming ||
+          assistantSessionPhase == AssistantSessionPhase.DRAWING ||
+          assistantSessionPhase == AssistantSessionPhase.SCREEN_SHARING ||
+          screenShareStatus == ScreenShareStatus.ACTIVE ||
           screenShareStatus == ScreenShareStatus.ANALYZING -> EdgeLightVisualState.GENERATING
+        responseState is AiResponseState.Completed -> EdgeLightVisualState.COMPLETED
         else -> EdgeLightVisualState.IDLE
       }
 
     val scheduled = isWithinSchedule(config, currentHour)
+    val sessionActiveForGlow =
+      assistantSessionPhase != AssistantSessionPhase.INACTIVE &&
+        assistantSessionPhase != AssistantSessionPhase.PAUSED &&
+        assistantSessionPhase != AssistantSessionPhase.STOPPING
+
     val shouldShow =
-      forcePreview ||
-        notificationAlertActive ||
-        (config.enabled &&
-          scheduled &&
-          (visualState != EdgeLightVisualState.IDLE || config.preset != EdgeLightPreset.GEMINI_FLOW || config.brightness > 0.1f))
+      when {
+        forcePreview -> config.enabled || config.assistantEdgeGlowEnabled
+        notificationAlertActive -> true
+        isOverlayHost -> {
+          // System overlay never stays permanently stuck bright when assistant is idle/inactive/stopped
+          config.assistantEdgeGlowEnabled && (config.enabled || sessionActiveForGlow) && sessionActiveForGlow
+        }
+        else -> config.enabled && scheduled
+      }
 
     val effectivePreset =
       when {
@@ -94,31 +117,48 @@ object EdgeLightStateMapper {
 
     val colors = colorsForPreset(effectivePreset, visualState, config)
     val lowPower = config.batterySaverMode || isSystemPowerSave
-    val rawBrightness = config.brightness.coerceIn(0.1f, 1.0f)
+    val intensity = config.intensity
+    val rawBrightness = (config.brightness.coerceIn(0.20f, 1.0f) * intensity.brightnessMultiplier).coerceIn(0.20f, 1.0f)
+    val isIdleAmbient =
+      visualState == EdgeLightVisualState.IDLE &&
+        !forcePreview &&
+        !notificationAlertActive &&
+        !sessionActiveForGlow
+
     val effectiveBrightness =
       when {
-        lowPower -> (rawBrightness * 0.55f).coerceAtMost(0.45f)
-        visualState == EdgeLightVisualState.IDLE && !forcePreview -> (rawBrightness * 0.68f).coerceIn(0.32f, 0.68f)
-        else -> rawBrightness
+        !shouldShow -> 0f
+        lowPower -> (rawBrightness * 0.45f).coerceIn(0.22f, 0.45f)
+        isIdleAmbient -> (rawBrightness * 0.78f).coerceIn(0.42f, 0.86f)
+        else -> rawBrightness.coerceIn(0.62f, 1.0f)
       }
 
     val effectiveSpeed =
       when {
         config.reducedMotion -> 0f
-        lowPower -> (config.animationSpeed * 0.35f).coerceIn(0.1f, 0.5f)
-        visualState == EdgeLightVisualState.LISTENING -> config.animationSpeed * (1f + voiceRmsNormalized * 0.6f)
-        else -> config.animationSpeed.coerceIn(0.25f, 2.5f)
+        lowPower -> (config.animationSpeed * 0.30f).coerceIn(0.15f, 0.48f)
+        visualState == EdgeLightVisualState.LISTENING || visualState == EdgeLightVisualState.SPEAKING ->
+          (config.animationSpeed * (1f + voiceRmsNormalized * 0.5f)).coerceIn(0.4f, 2.4f)
+        isIdleAmbient -> (config.animationSpeed * 0.85f).coerceIn(0.3f, 1.8f)
+        else -> config.animationSpeed.coerceIn(0.3f, 2.5f)
       }
 
+    val baseThickness = config.borderThicknessDp * intensity.thicknessMultiplier
     val effectiveThickness =
       when {
-        lowPower -> (config.borderThicknessDp * 0.7f).coerceAtLeast(2.5f)
-        visualState == EdgeLightVisualState.LISTENING ->
-          config.borderThicknessDp + (voiceRmsNormalized * 3.5f)
-        else -> config.borderThicknessDp.coerceIn(2f, 14f)
+        lowPower -> (baseThickness * 0.78f).coerceIn(3f, 9f)
+        visualState == EdgeLightVisualState.LISTENING || visualState == EdgeLightVisualState.SPEAKING ->
+          (baseThickness + voiceRmsNormalized * 2.8f).coerceIn(3.5f, 15f)
+        isIdleAmbient -> (baseThickness * 0.92f).coerceIn(3.2f, 10f)
+        else -> baseThickness.coerceIn(3.5f, 14f)
       }
 
-    val glowLayers = if (lowPower || config.reducedMotion) 1 else 3
+    val glowLayers =
+      when {
+        lowPower || config.reducedMotion -> 1
+        intensity == EdgeLightIntensity.SUBTLE && isIdleAmbient -> 2
+        else -> 3
+      }
 
     return EdgeLightRenderParams(
       isVisible = shouldShow,
@@ -135,6 +175,12 @@ object EdgeLightStateMapper {
         effectivePreset == EdgeLightPreset.BLUE_PURPLE_BREATHING ||
           effectivePreset == EdgeLightPreset.NOTIFICATION_ALERT ||
           config.reducedMotion,
+      glowScale =
+        when {
+          lowPower -> 0.72f
+          else -> intensity.glowMultiplier
+        },
+      activationSignal = edgeActivationSignal,
     )
   }
 
@@ -147,47 +193,47 @@ object EdgeLightStateMapper {
       return listOf(0xFFEF4444L, 0xFFF97316L, 0xFFDC2626L, 0xFFEF4444L)
     }
     if (visualState == EdgeLightVisualState.COMPLETED) {
-      return listOf(0xFF10B981L, 0xFF06B6D4L, 0xFF3B82F6L, 0xFF10B981L)
+      return listOf(0xFF10B981L, 0xFF22D3EEL, 0xFF3B82F6L, 0xFF10B981L)
     }
     return when (preset) {
       EdgeLightPreset.GEMINI_FLOW ->
         listOf(
+          0xFF06B6D4L, // Crisp Neon Cyan
+          0xFF22D3EEL, // Luminous Bright Cyan
           0xFF3B82F6L, // Electric Blue
-          0xFF6366F1L, // Indigo Bridge
-          0xFFA855F7L, // Vibrant Violet / Purple
-          0xFFEC4899L, // Magenta / Pink
-          0xFFFB7185L, // Soft Coral
-          0xFFF59E0BL, // Warm Amber / Gold
-          0xFF60A5FAL, // Soft Sky Blue Bridge
-          0xFF3B82F6L, // Seamless Loop Closure
+          0xFF6366F1L, // Crisp Indigo
+          0xFF8B5CF6L, // Vibrant Violet
+          0xFFA855F7L, // Deep Neon Purple
+          0xFF3B82F6L, // Blue Return Bridge
+          0xFF06B6D4L, // Seamless Closure
         )
       EdgeLightPreset.RAINBOW_SWEEP ->
-        listOf(0xFFEF4444L, 0xFFF59E0BL, 0xFF10B981L, 0xFF3B82F6L, 0xFFA855F7L, 0xFFEF4444L)
+        listOf(0xFFEF4444L, 0xFFF59E0BL, 0xFF10B981L, 0xFF22D3EEL, 0xFF3B82F6L, 0xFFA855F7L, 0xFFEF4444L)
       EdgeLightPreset.BLUE_PURPLE_BREATHING ->
-        listOf(0xFF3B82F6L, 0xFF8B5CF6L, 0xFFEC4899L, 0xFF3B82F6L)
+        listOf(0xFF22D3EEL, 0xFF3B82F6L, 0xFF8B5CF6L, 0xFFA855F7L, 0xFF22D3EEL)
       EdgeLightPreset.ROTATING_GRADIENT ->
-        listOf(0xFF3B82F6L, 0xFF6366F1L, 0xFFA855F7L, 0xFFEC4899L, 0xFFF59E0BL, 0xFF3B82F6L)
+        listOf(0xFF22D3EEL, 0xFF3B82F6L, 0xFF6366F1L, 0xFFA855F7L, 0xFFEC4899L, 0xFF22D3EEL)
       EdgeLightPreset.AI_THINKING ->
-        listOf(0xFF2563EBL, 0xFF7C3AEDL, 0xFFEC4899L, 0xFF3B82F6L)
+        listOf(0xFF2563EBL, 0xFF6366F1L, 0xFF8B5CF6L, 0xFFA855F7L, 0xFF2563EBL)
       EdgeLightPreset.VOICE_LISTENING ->
-        listOf(0xFF0EA5E9L, 0xFF3B82F6L, 0xFFA855F7L, 0xFF0EA5E9L)
+        listOf(0xFF22D3EEL, 0xFF06B6D4L, 0xFF3B82F6L, 0xFF8B5CF6L, 0xFFA855F7L, 0xFF22D3EEL)
       EdgeLightPreset.LIVE_SEARCH ->
-        listOf(0xFF0284C7L, 0xFF38BDF8L, 0xFF8B5CF6L, 0xFF0284C7L)
+        listOf(0xFF0EA5E9L, 0xFF38BDF8L, 0xFF6366F1L, 0xFF8B5CF6L, 0xFF0EA5E9L)
       EdgeLightPreset.DEEP_RESEARCH ->
-        listOf(0xFF0D9488L, 0xFF3B82F6L, 0xFFA855F7L, 0xFF0D9488L)
+        listOf(0xFF14B8A6L, 0xFF22D3EEL, 0xFF3B82F6L, 0xFFA855F7L, 0xFF14B8A6L)
       EdgeLightPreset.AI_GENERATING ->
         listOf(
+          0xFF22D3EEL,
           0xFF3B82F6L,
           0xFF6366F1L,
+          0xFF8B5CF6L,
           0xFFA855F7L,
           0xFFEC4899L,
-          0xFFFB7185L,
-          0xFFF59E0BL,
-          0xFF60A5FAL,
-          0xFF3B82F6L,
+          0xFF38BDF8L,
+          0xFF22D3EEL,
         )
       EdgeLightPreset.NOTIFICATION_ALERT ->
-        listOf(0xFFF59E0BL, 0xFFEC4899L, 0xFF8B5CF6L, 0xFFF59E0BL)
+        listOf(0xFF22D3EEL, 0xFF3B82F6L, 0xFFA855F7L, 0xFF22D3EEL)
       EdgeLightPreset.CUSTOM_GRADIENT ->
         listOf(
           config.primaryColorArgb,

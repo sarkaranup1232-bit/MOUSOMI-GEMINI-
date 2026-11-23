@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -91,6 +93,7 @@ import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonPurple
 import kotlin.math.roundToInt
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun LensVisualResponsePanel(
   capturedFilePath: String?,
@@ -270,9 +273,10 @@ fun LensVisualResponsePanel(
           }
 
           // Action Strip: Continue in Chat | Compare 2nd Object | Scan Another
-          Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+          FlowRow(
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
           ) {
             Button(
               onClick = { onContinueInChat(analysisResult) },

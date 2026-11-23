@@ -29,12 +29,22 @@ import kotlinx.serialization.json.JsonObject
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
+data class RetrievedPageMetadata(
+  val excerpt: String? = null,
+  val publishedDate: String? = null,
+  val publisherName: String? = null,
+  val faviconUrl: String? = null,
+)
+
 @Singleton
 class HttpPageRetriever @Inject constructor(
   private val okHttpClient: OkHttpClient,
   private val securityValidator: SecurityValidator,
 ) {
   suspend fun fetchPageExcerpt(url: String, maxChars: Int = 1800): String? =
+    fetchPageMetadata(url, maxChars)?.excerpt
+
+  suspend fun fetchPageMetadata(url: String, maxChars: Int = 1800): RetrievedPageMetadata? =
     withContext(Dispatchers.IO) {
       if (!securityValidator.validateHttpsResourceUrl(url)) return@withContext null
       runCatching {
@@ -46,11 +56,87 @@ class HttpPageRetriever @Inject constructor(
             .build()
         okHttpClient.newCall(req).execute().use { resp ->
           if (!resp.isSuccessful) return@use null
-          val bodyText = resp.body?.string()?.take(60_000).orEmpty()
-          stripHtml(bodyText).take(maxChars).ifBlank { null }
+          val html = resp.body?.string()?.take(80_000).orEmpty()
+          if (html.isBlank()) return@use null
+          val excerpt = stripHtml(html).take(maxChars).ifBlank { null }
+          val publishedDate = extractPublishedDate(html)
+          val publisherName = extractMetaContent(html, "og:site_name")
+          val rawFavicon = extractIconHref(html)
+          val resolvedFavicon =
+            rawFavicon
+              ?.let { href -> runCatching { URI(url).resolve(href).toString() }.getOrNull() }
+              ?.takeIf { securityValidator.validateHttpsResourceUrl(it) }
+          RetrievedPageMetadata(
+            excerpt = excerpt,
+            publishedDate = publishedDate,
+            publisherName = publisherName,
+            faviconUrl = resolvedFavicon,
+          )
         }
       }.getOrNull()
     }
+
+  private fun extractPublishedDate(html: String): String? {
+    val keys =
+      listOf(
+        "article:published_time",
+        "datePublished",
+        "publish-date",
+        "pubdate",
+        "dc.date",
+        "og:updated_time",
+      )
+    for (key in keys) {
+      val value = extractMetaContent(html, key)
+      if (!value.isNullOrBlank()) {
+        return value.take(24)
+      }
+    }
+    val timeRegex =
+      Regex("<time[^>]*datetime\\s*=\\s*[\"']([^\"']{8,32})[\"']", RegexOption.IGNORE_CASE)
+    return timeRegex.find(html)?.groupValues?.getOrNull(1)?.trim()?.take(24)
+  }
+
+  private fun extractMetaContent(html: String, key: String): String? {
+    val escaped = Regex.escape(key)
+    val patterns =
+      listOf(
+        Regex(
+          "<meta[^>]+(?:property|name)\\s*=\\s*[\"']$escaped[\"'][^>]+content\\s*=\\s*[\"']([^\"']+)[\"']",
+          RegexOption.IGNORE_CASE,
+        ),
+        Regex(
+          "<meta[^>]+content\\s*=\\s*[\"']([^\"']+)[\"'][^>]+(?:property|name)\\s*=\\s*[\"']$escaped[\"']",
+          RegexOption.IGNORE_CASE,
+        ),
+      )
+    for (pattern in patterns) {
+      val match = pattern.find(html)?.groupValues?.getOrNull(1)?.trim()
+      if (!match.isNullOrBlank()) return match
+    }
+    return null
+  }
+
+  private fun extractIconHref(html: String): String? {
+    val patterns =
+      listOf(
+        Regex(
+          "<link[^>]+rel\\s*=\\s*[\"'][^\"']*\\b(?:shortcut\\s+icon|icon|apple-touch-icon)\\b[^\"']*[\"'][^>]+href\\s*=\\s*[\"']([^\"']+)[\"']",
+          RegexOption.IGNORE_CASE,
+        ),
+        Regex(
+          "<link[^>]+href\\s*=\\s*[\"']([^\"']+)[\"'][^>]+rel\\s*=\\s*[\"'][^\"']*\\b(?:shortcut\\s+icon|icon|apple-touch-icon)\\b[^\"']*[\"']",
+          RegexOption.IGNORE_CASE,
+        ),
+      )
+    for (pattern in patterns) {
+      val match = pattern.find(html)?.groupValues?.getOrNull(1)?.trim()
+      if (!match.isNullOrBlank() && !match.startsWith("data:", ignoreCase = true)) {
+        return match
+      }
+    }
+    return null
+  }
 
   private fun stripHtml(html: String): String {
     return html
@@ -244,9 +330,10 @@ class GeminiGroundingSearchProvider @Inject constructor(
           val uri = web.uri?.trim().orEmpty()
           if (uri.isBlank()) return@mapIndexedNotNull null
           val domain =
-            runCatching { URI(uri).host?.removePrefix("www.") }.getOrNull().orEmpty().ifBlank {
-              web.title ?: "Google Search"
-            }
+            web.domain?.takeIf { it.isNotBlank() }
+              ?: runCatching { URI(uri).host?.removePrefix("www.") }.getOrNull().orEmpty().ifBlank {
+                web.title ?: "Google Search"
+              }
           val matchingSnippets =
             supports
               .filter { idx in it.groundingChunkIndices }
@@ -423,10 +510,19 @@ class CompositeSearchService @Inject constructor(
         val deduped = deduplicateAndRank(raw.results)
         val enriched =
           if (request.includePageContent) {
-            deduped.take(4).map { item ->
-              val excerpt = pageRetriever.fetchPageExcerpt(item.url)
-              if (excerpt != null) item.copy(pageExcerpt = excerpt) else item
-            } + deduped.drop(4)
+            deduped.take(5).map { item ->
+              val meta = pageRetriever.fetchPageMetadata(item.url)
+              if (meta != null) {
+                item.copy(
+                  pageExcerpt = meta.excerpt ?: item.pageExcerpt,
+                  publishedTimestamp = item.publishedTimestamp ?: meta.publishedDate,
+                  publisher = meta.publisherName?.takeIf { it.isNotBlank() } ?: item.publisher,
+                  faviconUrl = item.faviconUrl ?: meta.faviconUrl,
+                )
+              } else {
+                item
+              }
+            } + deduped.drop(5)
           } else {
             deduped
           }

@@ -130,13 +130,23 @@ fun ImageResultCard(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp))
-          Text(
-            text = if (image.editInstruction != null) "Edited Image" else "Generated Image",
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-          )
+        Column(modifier = Modifier.weight(1f)) {
+          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp))
+            Text(
+              text = if (image.editInstruction != null) "Edited Image" else "Generated Image",
+              style = MaterialTheme.typography.titleSmall,
+              fontWeight = FontWeight.SemiBold,
+            )
+          }
+          if (image.sourceBadge.isNotBlank()) {
+            Text(
+              text = image.sourceBadge,
+              style = MaterialTheme.typography.labelSmall,
+              color = NeonCyan,
+              modifier = Modifier.padding(start = 26.dp).testTag("image_source_badge"),
+            )
+          }
         }
         Surface(
           shape = CircleShape,
@@ -144,7 +154,7 @@ fun ImageResultCard(
           border = BorderStroke(1.dp, ElectricBlue.copy(alpha = 0.5f)),
         ) {
           Text(
-            text = "v$selectedVersionNumber • ${image.providerModel.take(22)}",
+            text = "v$selectedVersionNumber • ${image.providerModel.take(20)}",
             color = NeonCyan,
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -153,10 +163,12 @@ fun ImageResultCard(
       }
 
       when (image.status) {
-        ImageGenerationStatus.PREPARING,
+        ImageGenerationStatus.PREPARING_PROMPT,
+        ImageGenerationStatus.CHECKING_FREE_PROVIDER,
+        ImageGenerationStatus.UPLOADING_REQUEST,
         ImageGenerationStatus.GENERATING,
-        ImageGenerationStatus.PROCESSING,
-        ImageGenerationStatus.FINALIZING -> {
+        ImageGenerationStatus.DOWNLOADING_IMAGE,
+        ImageGenerationStatus.VALIDATING_RESULT -> {
           val shimmerTransition = rememberInfiniteTransition(label = "img_gen_shimmer")
           val offset by
             shimmerTransition.animateFloat(
@@ -201,18 +213,21 @@ fun ImageResultCard(
           }
         }
 
-        ImageGenerationStatus.FAILED -> {
+        ImageGenerationStatus.FAILED,
+        ImageGenerationStatus.QUOTA_EXHAUSTED,
+        ImageGenerationStatus.CANCELLED -> {
+          val isCancelled = image.status == ImageGenerationStatus.CANCELLED
           Surface(
             shape = RoundedCornerShape(14.dp),
-            color = Color(0xFF7F1D1D).copy(alpha = 0.35f),
-            border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.5f)),
+            color = Color(if (isCancelled) 0xFF334155 else 0xFF7F1D1D).copy(alpha = 0.35f),
+            border = BorderStroke(1.dp, Color(if (isCancelled) 0xFF94A3B8 else 0xFFEF4444).copy(alpha = 0.5f)),
             modifier = Modifier.fillMaxWidth(),
           ) {
             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
               Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Icon(Icons.Outlined.ErrorOutline, contentDescription = null, tint = Color(0xFFFCA5A5))
                 Text(
-                  text = image.errorMessage ?: "Image generation failed.",
+                  text = image.errorMessage ?: image.status.label,
                   color = Color(0xFFFCA5A5),
                   style = MaterialTheme.typography.bodyMedium,
                 )
@@ -238,7 +253,13 @@ fun ImageResultCard(
         }
 
         ImageGenerationStatus.COMPLETED -> {
-          if (displayedPath.isNotBlank()) {
+          if (!image.beforeFilePath.isNullOrBlank() && displayedPath.isNotBlank()) {
+            BeforeAfterImageSlider(
+              beforePath = image.beforeFilePath,
+              afterPath = displayedPath,
+              modifier = Modifier.fillMaxWidth(),
+            )
+          } else if (displayedPath.isNotBlank()) {
             Box(
               modifier =
                 Modifier

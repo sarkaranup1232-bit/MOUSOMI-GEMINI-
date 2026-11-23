@@ -16,6 +16,8 @@ import com.example.ai.media.VideoAndMusicGenerationService
 import com.example.ai.provider.OneTapApiActivationService
 import com.example.core.alarms.ReminderManager
 import com.example.core.alarms.TimerManager
+import com.example.core.assistant.AssistantSessionStateManager
+import com.example.core.assistant.EdgeActivationEdge
 import com.example.core.automation.ControlledAutomationEngine
 import com.example.core.device.DeviceActionExecutor
 import com.example.core.device.InstalledAppRepository
@@ -24,10 +26,26 @@ import com.example.core.notifications.NotificationIntelligenceEngine
 import com.example.core.performance.SmartPerformanceMonitor
 import com.example.core.permissions.EmergencyStopController
 import com.example.core.permissions.PermissionManager
+import com.example.core.screen.AttachedVisualItem
+import com.example.core.screen.CircleSelectionProcessor
+import com.example.core.screen.CropAspectPreset
+import com.example.core.screen.CropHandle
+import com.example.core.screen.DetectedRegionShape
+import com.example.core.screen.FreehandPathProcessor
+import com.example.core.screen.ImageAttachmentManager
+import com.example.core.screen.ImageEditingController
+import com.example.core.screen.RectangleSelectionProcessor
 import com.example.core.screen.RegionCropper
+import com.example.core.screen.ScreenSelectionManager
 import com.example.core.screen.ScreenShareSessionManager
+import com.example.core.screen.SelectionGeometryEngine
+import com.example.core.screen.SelectionToolMode
+import com.example.core.screen.VisualQueryProcessor
 import com.example.core.security.SecurityValidator
 import com.example.core.storage.TempMediaCacheManager
+import com.example.core.voice.GeminiLiveVoiceEngine
+import com.example.core.voice.LiveVoiceControlCommand
+import com.example.core.voice.LiveVoiceSessionStatus
 import com.example.core.voice.VoiceController
 import com.example.core.voice.VoiceState
 import com.example.data.remote.firestore.FirestoreCloudSyncRepository
@@ -64,8 +82,10 @@ import com.example.domain.model.ManagedTaskItem
 import com.example.domain.model.MediaAttachmentKind
 import com.example.domain.model.MemoryCategory
 import com.example.domain.model.NormBoundingBox
+import com.example.domain.model.NormPoint
 import com.example.domain.model.NotificationIntelligenceConfig
 import com.example.domain.model.OneTapActivationResult
+import com.example.domain.model.OperatingMode
 import com.example.domain.model.OrbPopupAction
 import com.example.domain.model.OrbQuickAction
 import com.example.domain.model.PendingMediaItem
@@ -75,7 +95,9 @@ import com.example.domain.model.ReminderItemType
 import com.example.domain.model.ResponseBlock
 import com.example.domain.model.ResponseLanguage
 import com.example.domain.model.ScreenIntelligenceConfig
+import com.example.domain.model.ScreenShareStatus
 import com.example.domain.model.TokenUsage
+import com.example.domain.model.VerifiedModelCatalog
 import com.example.domain.model.VoiceGender
 import com.example.domain.model.VoicePreferences
 import com.example.domain.orchestrator.AiOrchestrator
@@ -145,6 +167,13 @@ class MousomiViewModel @Inject constructor(
   private val firestoreSync: FirestoreCloudSyncRepository? = null,
   private val videoAndMusicService: VideoAndMusicGenerationService? = null,
   private val firebaseAiLogicService: FirebaseAiLogicService? = null,
+  private val screenSelectionManager: ScreenSelectionManager? = null,
+  private val selectionGeometryEngine: SelectionGeometryEngine? = null,
+  private val imageAttachmentManager: ImageAttachmentManager? = null,
+  private val imageEditingController: ImageEditingController? = null,
+  private val visualQueryProcessor: VisualQueryProcessor? = null,
+  private val geminiLiveVoiceEngine: GeminiLiveVoiceEngine? = null,
+  private val assistantSessionStateManager: AssistantSessionStateManager? = null,
 ) : ViewModel() {
 
   constructor(
@@ -185,7 +214,22 @@ class MousomiViewModel @Inject constructor(
     firestoreSync = null,
     videoAndMusicService = null,
     firebaseAiLogicService = null,
+    screenSelectionManager = null,
+    selectionGeometryEngine = null,
+    imageAttachmentManager = null,
+    imageEditingController = null,
+    visualQueryProcessor = null,
+    geminiLiveVoiceEngine = null,
+    assistantSessionStateManager = null,
   )
+
+  val geometryEngineForUi: SelectionGeometryEngine by lazy {
+    selectionGeometryEngine ?: SelectionGeometryEngine(
+      freehandProcessor = FreehandPathProcessor(),
+      circleProcessor = CircleSelectionProcessor(),
+      rectangleProcessor = RectangleSelectionProcessor(),
+    )
+  }
 
   val defaultSuggestions: List<SuggestionItem> =
     listOf(
@@ -218,6 +262,7 @@ class MousomiViewModel @Inject constructor(
   private var activeAssistantMessageId: String? = null
   private var liveSessionStartedAtMs: Long? = null
   private var liveSessionTurnsCount: Int = 0
+  private var silentRetryCount: Int = 0
   private var nextRequestImageGenFlag: Boolean = false
   private var nextRequestDeepResearchFlag: Boolean = false
 
@@ -229,6 +274,7 @@ class MousomiViewModel @Inject constructor(
     observePart4Streams()
     observePart5Streams()
     observeAddOnStreams()
+    observeScreenSelectionStreams()
     observeActiveConversationMessages(_uiState.value.activeConversationId)
     refreshPowerState()
     onRefreshPermissions()
@@ -238,14 +284,75 @@ class MousomiViewModel @Inject constructor(
       activeGenerationJob?.cancel()
       activeGenerationJob = null
       activeAssistantMessageId = null
-      _uiState.update {
-        it.copy(
-          isGeminiLiveOpen = false,
-          isGeminiLiveMinimized = false,
-          isVoiceDialogOpen = false,
-          responseState = AiResponseState.Cancelled,
-          statusToastMessage = "Emergency Stop executed: all active sessions stopped.",
-        )
+      silentRetryCount = 0
+      screenSelectionManager?.stopAndCleanup()
+      imageEditingController?.cancelEdit()
+        _uiState.update {
+          it.copy(
+            isGeminiLiveOpen = false,
+            isGeminiLiveMinimized = false,
+            isLiveVoicePaused = false,
+            isLiveVoiceMuted = false,
+            isVoiceDialogOpen = false,
+            isUsingGeminiLiveSocket = false,
+            liveAssistantTranscript = "",
+            responseState = AiResponseState.Cancelled,
+            statusToastMessage = "Emergency Stop executed: all active sessions stopped.",
+          )
+        }
+      }
+    }
+
+  private fun observeScreenSelectionStreams() {
+    screenSelectionManager?.let { mgr ->
+      viewModelScope.launch {
+        mgr.state.collectLatest { selState ->
+          _uiState.update { it.copy(screenSelectionState = selState) }
+        }
+      }
+    }
+    var knownSelectionUris = emptySet<String>()
+    imageAttachmentManager?.let { attachMgr ->
+      viewModelScope.launch {
+        attachMgr.attachedVisuals.collectLatest { visuals ->
+          val currentUris = visuals.map { it.croppedUriString }.toSet()
+          val removedUris = knownSelectionUris - currentUris
+          val addedVisuals = visuals.filter { it.croppedUriString !in knownSelectionUris }
+          knownSelectionUris = currentUris
+
+          _uiState.update { state ->
+            var updatedPending =
+              state.pendingAttachments.filterNot { att ->
+                att is AttachmentPreview.PickedPhotoUri && att.uri in removedUris
+              }
+            addedVisuals.forEach { vis ->
+              val preview = AttachmentPreview.PickedPhotoUri(vis.croppedUriString)
+              if (preview !in updatedPending) {
+                updatedPending = (updatedPending + preview).takeLast(4)
+              }
+            }
+            state.copy(
+              attachedVisualsByUri = visuals.associateBy { it.croppedUriString },
+              pendingAttachments = updatedPending,
+              isAttachmentSheetOpen = if (addedVisuals.isNotEmpty()) false else state.isAttachmentSheetOpen,
+              shouldRequestComposerFocus = state.shouldRequestComposerFocus || addedVisuals.isNotEmpty(),
+            )
+          }
+
+          visuals.filter { it.isSettling }.forEach { settlingItem ->
+            viewModelScope.launch {
+              delay(420L)
+              attachMgr.markSettled(settlingItem.id)
+            }
+          }
+        }
+      }
+    }
+    imageEditingController?.let { editCtrl ->
+      viewModelScope.launch {
+        editCtrl.editState.collectLatest { editState ->
+          _uiState.update { it.copy(activeImageEditState = editState) }
+        }
       }
     }
   }
@@ -256,7 +363,7 @@ class MousomiViewModel @Inject constructor(
     viewModelScope.launch {
       gateway.observeSession().collectLatest { session ->
         _uiState.update { it.copy(authSession = session) }
-        if (session.isSignedIn && session.uid.isNotBlank() && firestoreSync != null) {
+        if (session.isSignedIn && !session.isGuest && session.uid.isNotBlank() && firestoreSync != null) {
           firestoreSync.syncUserProfileAndPreferences(
             displayName = session.displayName,
             email = session.email,
@@ -334,6 +441,9 @@ class MousomiViewModel @Inject constructor(
         val savedModel =
           runCatching { AiModelOption.valueOf(settings.selectedModelOptionName) }
             .getOrDefault(AiModelOption.GEMINI_4_HYDROGEN)
+        val savedOpMode =
+          runCatching { OperatingMode.valueOf(settings.operatingModeName) }
+            .getOrDefault(OperatingMode.NORMAL_CHAT)
         notificationEngine?.updateConfig(settings.notificationConfig)
         screenShareSessionManager?.updateConfig(settings.screenIntelligenceConfig)
         performanceMonitor?.schedulePeriodicCacheCleanup(settings.privacyPerformanceConfig.autoCleanupTempFiles)
@@ -348,12 +458,19 @@ class MousomiViewModel @Inject constructor(
           current.copy(
             themeMode = mode,
             selectedModel = savedModel,
+            operatingMode = savedOpMode,
+            inputMode = if (savedOpMode == OperatingMode.TASK_MODE) InputMode.TASK else InputMode.CHAT,
             connectionMode = settings.connectionMode,
             proxyBaseUrl = settings.proxyBaseUrl,
             geminiApiKey = settings.geminiApiKey,
             groqApiKey = settings.groqApiKey,
+            cloudflareAccountId = settings.cloudflareAccountId,
+            cloudflareApiToken = settings.cloudflareApiToken,
+            strictFreeImageOnly = settings.strictFreeImageOnly,
+            allowPaidImageFallbackApproved = settings.allowPaidImageFallbackApproved,
             hydrogenBackingModelId = settings.hydrogenBackingModelId,
             groqReasoningModelId = settings.groqReasoningModelId,
+            groqHelperGuardModelId = settings.groqHelperGuardModelId,
             imageModelId = settings.imageModelId,
             externalSearchUrl = settings.externalSearchUrl,
             externalSearchApiKey = settings.externalSearchApiKey,
@@ -379,10 +496,90 @@ class MousomiViewModel @Inject constructor(
         _uiState.update { it.copy(voiceRmsNormalized = rms) }
       }
     }
+    assistantSessionStateManager?.let { mgr ->
+      viewModelScope.launch {
+        mgr.currentPhase.collectLatest { phase ->
+          _uiState.update { it.copy(assistantSessionPhase = phase) }
+        }
+      }
+      viewModelScope.launch {
+        mgr.edgeActivation.collectLatest { signal ->
+          _uiState.update { it.copy(edgeActivationSignal = signal) }
+        }
+      }
+    }
+    geminiLiveVoiceEngine?.let { engine ->
+      viewModelScope.launch {
+        engine.status.collectLatest { liveStatus ->
+          if (!_uiState.value.isUsingGeminiLiveSocket) return@collectLatest
+          when (liveStatus) {
+            LiveVoiceSessionStatus.Connecting -> {
+              _uiState.update {
+                it.copy(voiceState = VoiceState.Listening("Connecting to Gemini Live…"))
+              }
+            }
+            LiveVoiceSessionStatus.Active -> {
+              _uiState.update {
+                it.copy(
+                  voiceState = VoiceState.Listening(engine.userTranscript.value),
+                  isLiveVoicePaused = false,
+                )
+              }
+            }
+            LiveVoiceSessionStatus.Paused -> {
+              _uiState.update { it.copy(voiceState = VoiceState.Idle) }
+            }
+            is LiveVoiceSessionStatus.Reconnecting -> {
+              _uiState.update {
+                it.copy(voiceState = VoiceState.Listening("Reconnecting Gemini Live (${liveStatus.attempt})…"))
+              }
+            }
+            LiveVoiceSessionStatus.Disconnected -> {
+              _uiState.update {
+                it.copy(isUsingGeminiLiveSocket = false, voiceState = VoiceState.Idle)
+              }
+            }
+            is LiveVoiceSessionStatus.Failed -> {
+              _uiState.update {
+                it.copy(
+                  isUsingGeminiLiveSocket = false,
+                  voiceState = VoiceState.Error(liveStatus.message, isRecoverableSilence = false),
+                )
+              }
+            }
+          }
+        }
+      }
+      viewModelScope.launch {
+        engine.userTranscript.collectLatest { userTxt ->
+          val st = _uiState.value
+          if (st.isUsingGeminiLiveSocket && st.isGeminiLiveOpen && !st.isLiveVoicePaused && !st.isLiveVoiceMuted) {
+            if (userTxt.isNotBlank()) {
+              liveSessionTurnsCount += 1
+            }
+            _uiState.update { it.copy(voiceState = VoiceState.Listening(userTxt)) }
+          }
+        }
+      }
+      viewModelScope.launch {
+        engine.assistantTranscript.collectLatest { aiTxt ->
+          val st = _uiState.value
+          if (st.isUsingGeminiLiveSocket && st.isGeminiLiveOpen && aiTxt.isNotBlank()) {
+            _uiState.update {
+              it.copy(
+                liveAssistantTranscript = aiTxt,
+                voiceState = if (st.isLiveVoicePaused) VoiceState.Idle else VoiceState.Speaking("live"),
+              )
+            }
+          }
+        }
+      }
+    }
     screenShareSessionManager?.let { mgr ->
       viewModelScope.launch {
         mgr.status.collectLatest { s ->
           _uiState.update { it.copy(screenShareStatus = s) }
+          assistantSessionStateManager?.onScreenSharingChanged(s != ScreenShareStatus.STOPPED)
           onRefreshPermissions()
         }
       }
@@ -487,6 +684,7 @@ class MousomiViewModel @Inject constructor(
   private fun observeVoiceState() {
     viewModelScope.launch {
       voiceController.voiceState.collectLatest { vState ->
+        if (_uiState.value.isUsingGeminiLiveSocket) return@collectLatest
         _uiState.update { state ->
           val updatedInput =
             if (vState is VoiceState.TranscriptReady) vState.transcript else state.inputText
@@ -497,14 +695,97 @@ class MousomiViewModel @Inject constructor(
             isVoiceDialogOpen = if (closeVoice) false else state.isVoiceDialogOpen,
           )
         }
+        val currentState = _uiState.value
         if (vState is VoiceState.TranscriptReady) {
+          silentRetryCount = 0
           val transcript = vState.transcript.trim()
           voiceController.resetState()
-          if (transcript.isNotBlank() && (_uiState.value.isGeminiLiveOpen || _uiState.value.privacyPerformanceConfig.continuousVoiceMode)) {
-            if (_uiState.value.isGeminiLiveOpen) {
+          if (transcript.isNotBlank() && (currentState.isGeminiLiveOpen || currentState.privacyPerformanceConfig.continuousVoiceMode)) {
+            if (currentState.isGeminiLiveOpen) {
               liveSessionTurnsCount += 1
             }
             onSendMessage()
+          } else if (transcript.isBlank() &&
+            currentState.isGeminiLiveOpen &&
+            currentState.hasAudioPermission &&
+            !currentState.isLiveVoicePaused &&
+            !currentState.isLiveVoiceMuted
+          ) {
+            delay(480L)
+            voiceController.startListening(currentState.voicePreferences.preferredLanguage)
+          }
+        } else if (vState is VoiceState.Error &&
+          currentState.isGeminiLiveOpen &&
+          currentState.hasAudioPermission &&
+          !currentState.isLiveVoicePaused &&
+          !currentState.isLiveVoiceMuted &&
+          !currentState.isGenerating
+        ) {
+          if (vState.isRecoverableSilence && silentRetryCount < 2) {
+            silentRetryCount += 1
+            delay(520L)
+            val latest = _uiState.value
+            if (latest.isGeminiLiveOpen &&
+              !latest.isUsingGeminiLiveSocket &&
+              !latest.isLiveVoicePaused &&
+              !latest.isLiveVoiceMuted &&
+              !latest.isGenerating
+            ) {
+              voiceController.startListening(latest.voicePreferences.preferredLanguage)
+            }
+          } else {
+            silentRetryCount = 0
+            _uiState.update {
+              it.copy(
+                isLiveVoicePaused = true,
+                statusToastMessage =
+                  if (vState.isRecoverableSilence) "Live mic resting after silence — tap Resume when ready."
+                  else "Live mic paused: ${vState.message}",
+              )
+            }
+          }
+        }
+      }
+    }
+
+    // Continuous turn loop for STT fallback mode: resume listening right after AI TTS finishes speaking
+    viewModelScope.launch {
+      voiceController.ttsCompletedTick.collectLatest { tick ->
+        if (tick <= 0L) return@collectLatest
+        delay(360L) // Brief acoustic echo guard before reopening SpeechRecognizer
+        val latest = _uiState.value
+        if (latest.isUsingGeminiLiveSocket) return@collectLatest
+        val keepListening =
+          (latest.isGeminiLiveOpen || latest.privacyPerformanceConfig.continuousVoiceMode) &&
+            latest.hasAudioPermission &&
+            !latest.isLiveVoicePaused &&
+            !latest.isLiveVoiceMuted &&
+            !latest.isGenerating
+        if (keepListening) {
+          silentRetryCount = 0
+          voiceController.startListening(latest.voicePreferences.preferredLanguage)
+        }
+      }
+    }
+
+    // Sync notification actions (Pause / Resume / Stop) back to active Live Voice session
+    viewModelScope.launch {
+      voiceController.liveControlCommands.collect { cmd ->
+        when (cmd) {
+          LiveVoiceControlCommand.PAUSE -> {
+            if (_uiState.value.isGeminiLiveOpen && !_uiState.value.isLiveVoicePaused) {
+              onTogglePauseLiveVoice()
+            }
+          }
+          LiveVoiceControlCommand.RESUME -> {
+            if (_uiState.value.isGeminiLiveOpen && _uiState.value.isLiveVoicePaused) {
+              onTogglePauseLiveVoice()
+            }
+          }
+          LiveVoiceControlCommand.STOP -> {
+            if (_uiState.value.isGeminiLiveOpen) {
+              onToggleGeminiLive(false)
+            }
           }
         }
       }
@@ -550,7 +831,8 @@ class MousomiViewModel @Inject constructor(
     firestoreMessagesJob?.cancel()
     val sync = firestoreSync
     val impl = chatRepository as? ChatRepositoryImpl
-    if (sync != null && impl != null && authGateway?.getCurrentSession()?.isSignedIn == true) {
+    val activeSession = authGateway?.getCurrentSession()
+    if (sync != null && impl != null && activeSession?.isSignedIn == true && !activeSession.isGuest) {
       firestoreMessagesJob =
         viewModelScope.launch {
           sync.observeMessages(conversationId)
@@ -583,7 +865,26 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onSelectMode(mode: InputMode) {
-    _uiState.update { it.copy(inputMode = mode) }
+    _uiState.update { state ->
+      val syncedOpMode =
+        when {
+          mode == InputMode.TASK -> OperatingMode.TASK_MODE
+          state.operatingMode == OperatingMode.TASK_MODE -> OperatingMode.NORMAL_CHAT
+          else -> state.operatingMode
+        }
+      state.copy(inputMode = mode, operatingMode = syncedOpMode)
+    }
+    persistCurrentSettings()
+  }
+
+  fun onSelectOperatingMode(mode: OperatingMode) {
+    _uiState.update { state ->
+      state.copy(
+        operatingMode = mode,
+        inputMode = if (mode == OperatingMode.TASK_MODE) InputMode.TASK else InputMode.CHAT,
+      )
+    }
+    persistCurrentSettings()
   }
 
   fun onToggleModelMenu(open: Boolean) {
@@ -591,7 +892,7 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onSelectModel(model: AiModelOption) {
-    _uiState.update { it.copy(selectedModel = model, isModelMenuOpen = false) }
+    _uiState.update { it.copy(selectedModel = model, resolvedAutoModelName = null, isModelMenuOpen = false) }
     persistCurrentSettings()
   }
 
@@ -683,12 +984,16 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onRemovePendingAttachment(attachment: AttachmentPreview) {
+    if (attachment is AttachmentPreview.PickedPhotoUri) {
+      imageAttachmentManager?.removeByUri(attachment.uri)
+    }
     _uiState.update { state ->
       state.copy(pendingAttachments = state.pendingAttachments - attachment)
     }
   }
 
   fun onClearPendingAttachment() {
+    imageAttachmentManager?.clearAll(deleteSourceFrames = false)
     _uiState.update { it.copy(pendingAttachments = emptyList()) }
   }
 
@@ -715,6 +1020,16 @@ class MousomiViewModel @Inject constructor(
       "open_lens" -> {
         onRequestOpenLens()
       }
+      "screen_selection" -> {
+        _uiState.update {
+          it.copy(
+            isAttachmentSheetOpen = false,
+            isMoreToolsSheetOpen = false,
+            isImageToolsSheetOpen = false,
+            pendingStartScreenSelection = true,
+          )
+        }
+      }
       "generate_image", "create_image" -> {
         nextRequestImageGenFlag = true
         _uiState.update {
@@ -728,6 +1043,8 @@ class MousomiViewModel @Inject constructor(
         nextRequestDeepResearchFlag = true
         _uiState.update {
           it.copy(
+            operatingMode = OperatingMode.DEEP_RESEARCH,
+            inputMode = InputMode.CHAT,
             isMoreToolsSheetOpen = false,
             inputText = it.inputText.ifBlank { "Deep research: " },
           )
@@ -737,6 +1054,8 @@ class MousomiViewModel @Inject constructor(
         nextRequestDeepResearchFlag = true
         _uiState.update {
           it.copy(
+            operatingMode = OperatingMode.GOOGLE_AI_SEARCH,
+            inputMode = InputMode.CHAT,
             isMoreToolsSheetOpen = false,
             inputText = it.inputText.ifBlank { "Search the web for: " },
           )
@@ -759,7 +1078,13 @@ class MousomiViewModel @Inject constructor(
         }
       }
       "task_mode" -> {
-        _uiState.update { it.copy(inputMode = InputMode.TASK, isMoreToolsSheetOpen = false) }
+        _uiState.update {
+          it.copy(
+            operatingMode = OperatingMode.TASK_MODE,
+            inputMode = InputMode.TASK,
+            isMoreToolsSheetOpen = false,
+          )
+        }
       }
       "live_voice" -> {
         onToggleGeminiLive(true)
@@ -1047,6 +1372,17 @@ class MousomiViewModel @Inject constructor(
       return
     }
 
+    if (editTargetId == null && attachments.isEmpty() && editTarget == null && shouldLaunchScreenSelection(trimmed)) {
+      _uiState.update {
+        it.copy(
+          inputText = "",
+          pendingStartScreenSelection = true,
+          statusToastMessage = "Starting Live Screen Selection…",
+        )
+      }
+      return
+    }
+
     if (editTargetId != null) {
       val editMessage = state.messages.firstOrNull { it.id == editTargetId }
       if (editMessage != null) {
@@ -1061,6 +1397,7 @@ class MousomiViewModel @Inject constructor(
             activeEditTarget = editTarget,
           )
         }
+        imageAttachmentManager?.clearStagingKeepFiles()
         _uiState.update {
           it.copy(
             editingMessageId = null,
@@ -1073,6 +1410,7 @@ class MousomiViewModel @Inject constructor(
       }
     }
 
+    imageAttachmentManager?.clearStagingKeepFiles()
     _uiState.update {
       it.copy(
         inputText = "",
@@ -1200,9 +1538,52 @@ class MousomiViewModel @Inject constructor(
 
     val historyBefore = chatRepository.getMessagesSnapshot(conversationId)
     val nowMs = System.currentTimeMillis()
-    val userText = prompt.ifEmpty { "Please analyze the attached file or media." }
     val pendingMedia =
       attachments.mapNotNull { (it as? AttachmentPreview.MediaFile)?.item }
+
+    val preparedQuery = visualQueryProcessor?.prepareQuery(prompt, attachments)
+    val processedImages = mutableListOf<ProcessedImagePayload>()
+    if (preparedQuery != null && preparedQuery.payloads.isNotEmpty()) {
+      processedImages.addAll(preparedQuery.payloads)
+    }
+    for (attachment in attachments) {
+      if (attachment is AttachmentPreview.PickedPhotoUri &&
+        processedImages.any { it.uriString == attachment.uri }
+      ) {
+        continue
+      }
+      val result =
+        when (attachment) {
+          AttachmentPreview.SampleInlineArtwork ->
+            imageProcessor.processDrawableResource(R.drawable.img_inline_preview_art_1795023054486)
+          is AttachmentPreview.PickedPhotoUri -> {
+            val filePath = Uri.parse(attachment.uri).path
+            val directFile = filePath?.let(::decodeFileToProcessedImage)
+            if (directFile != null) Result.success(directFile)
+            else imageProcessor.processUri(attachment.uri)
+          }
+          is AttachmentPreview.MediaFile -> null
+        }
+      result?.getOrNull()?.let { processedImages.add(it) }
+    }
+
+    if (activeEditTarget != null && processedImages.isEmpty()) {
+      val targetPayload =
+        activeEditTarget.filePath?.let(::decodeFileToProcessedImage)
+          ?: activeEditTarget.uriString?.let { imageProcessor.processUri(it).getOrNull() }
+      if (targetPayload != null) {
+        processedImages.add(targetPayload)
+      }
+    }
+
+    val userText =
+      preparedQuery?.userDisplayPrompt?.takeIf { it.isNotBlank() }
+        ?: prompt.ifEmpty {
+          if (processedImages.isNotEmpty()) "Analyze selected region"
+          else "Please analyze the attached file or media."
+        }
+    val modelPromptText =
+      preparedQuery?.modelPrompt?.takeIf { it.isNotBlank() } ?: userText
 
     if (!skipSavingUserTurn) {
       val userDomain =
@@ -1218,28 +1599,6 @@ class MousomiViewModel @Inject constructor(
           attachedMediaSummaries = pendingMedia,
         )
       chatRepository.upsertMessage(userDomain)
-    }
-
-    val processedImages = mutableListOf<ProcessedImagePayload>()
-    for (attachment in attachments) {
-      val result =
-        when (attachment) {
-          AttachmentPreview.SampleInlineArtwork ->
-            imageProcessor.processDrawableResource(R.drawable.img_inline_preview_art_1795023054486)
-          is AttachmentPreview.PickedPhotoUri ->
-            imageProcessor.processUri(attachment.uri)
-          is AttachmentPreview.MediaFile -> null
-        }
-      result?.getOrNull()?.let { processedImages.add(it) }
-    }
-
-    if (activeEditTarget != null && processedImages.isEmpty()) {
-      val targetPayload =
-        activeEditTarget.filePath?.let(::decodeFileToProcessedImage)
-          ?: activeEditTarget.uriString?.let { imageProcessor.processUri(it).getOrNull() }
-      if (targetPayload != null) {
-        processedImages.add(targetPayload)
-      }
     }
 
     val assistantMsgId = "msg_${UUID.randomUUID()}"
@@ -1274,11 +1633,14 @@ class MousomiViewModel @Inject constructor(
             .processMessage(
               OrchestrationRequest(
                 conversationId = conversationId,
-                userPrompt = userText,
+                userPrompt = modelPromptText,
                 historyMessages = historyBefore,
                 currentTurnImages = processedImages,
                 requestedModelId = _uiState.value.selectedModel.modelId,
-                isTaskMode = _uiState.value.inputMode == InputMode.TASK,
+                isTaskMode =
+                  _uiState.value.inputMode == InputMode.TASK ||
+                    _uiState.value.operatingMode == OperatingMode.TASK_MODE,
+                operatingMode = _uiState.value.operatingMode,
                 pendingMediaItems = pendingMedia,
                 deepResearchRequested = deepResearchRequested,
                 imageGenerationRequested = imageGenerationRequested,
@@ -1291,10 +1653,23 @@ class MousomiViewModel @Inject constructor(
                 is OrchestrationEvent.Routed -> {
                   routedModelName = event.decision.selectedModel.displayName
                   routedCategoryLabel = event.decision.category.label
-                  _uiState.update { it.copy(activeRoutingReason = event.decision.reason) }
+                  _uiState.update {
+                    it.copy(
+                      activeRoutingReason = event.decision.reason,
+                      resolvedAutoModelName =
+                        if (it.selectedModel == AiModelOption.MOUSOMI_AUTO) {
+                          event.decision.selectedModel.displayName
+                        } else {
+                          it.resolvedAutoModelName
+                        },
+                    )
+                  }
                 }
                 is OrchestrationEvent.TitleSuggested -> {
                   chatRepository.updateConversationTitle(conversationId, event.title)
+                }
+                is OrchestrationEvent.ResearchTelemetry -> {
+                  _uiState.update { it.copy(researchActivity = event.snapshot) }
                 }
                 is OrchestrationEvent.BlocksUpdated -> {
                   latestBlocks = event.blocks
@@ -1425,6 +1800,18 @@ class MousomiViewModel @Inject constructor(
                         )
                       )
                       activeAssistantMessageId = null
+                      val liveState = _uiState.value
+                      if (liveState.isGeminiLiveOpen &&
+                        liveState.hasAudioPermission &&
+                        !liveState.isLiveVoicePaused &&
+                        !liveState.isLiveVoiceMuted
+                      ) {
+                        delay(900L)
+                        val refreshed = _uiState.value
+                        if (refreshed.isGeminiLiveOpen && !refreshed.isLiveVoicePaused && !refreshed.isLiveVoiceMuted && !refreshed.isGenerating) {
+                          voiceController.startListening(refreshed.voicePreferences.preferredLanguage)
+                        }
+                      }
                     }
                     else -> Unit
                   }
@@ -1479,13 +1866,17 @@ class MousomiViewModel @Inject constructor(
     action: OrbPopupAction,
     onRequestScreenShare: () -> Unit = {},
     onRequestCameraCapture: () -> Unit = {},
+    onNavigateToLens: () -> Unit = {},
     onNavigateToAssistantHub: (Int) -> Unit = {},
   ) {
     when (action) {
       OrbPopupAction.VOICE_ASSISTANT -> onToggleVoiceDialog(true)
       OrbPopupAction.OPEN_CHAT -> _uiState.update { it.copy(inputMode = InputMode.CHAT) }
       OrbPopupAction.QUICK_ASK -> _uiState.update { it.copy(inputMode = InputMode.CHAT, inputText = "") }
-      OrbPopupAction.OPEN_CAMERA -> onRequestCameraCapture()
+      OrbPopupAction.OPEN_CAMERA -> {
+        onRequestOpenLens()
+        onNavigateToLens()
+      }
       OrbPopupAction.ANALYZE_IMAGE -> onSelectContextualAction("analyze_image")
       OrbPopupAction.GENERATE_IMAGE -> onSelectContextualAction("generate_image")
       OrbPopupAction.SCREEN_ASSISTANT -> analyzeLatestScreenFrameOrPrompt(onRequestScreenShare)
@@ -1631,6 +2022,7 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onToggleDrawingOverlay(open: Boolean) {
+    assistantSessionStateManager?.onDrawingChanged(open)
     _uiState.update {
       it.copy(
         isDrawingOverlayOpen = open,
@@ -2004,15 +2396,253 @@ class MousomiViewModel @Inject constructor(
       lower.contains("start visual scan")
   }
 
+  private fun shouldLaunchScreenSelection(prompt: String): Boolean {
+    val lower = prompt.trim().lowercase(Locale.US)
+    if (lower.length > 90) return false
+    return lower == "select screen" ||
+      lower == "screen select" ||
+      lower == "screen selection" ||
+      lower == "select on screen" ||
+      lower == "circle to search" ||
+      lower.contains("select region on screen") ||
+      lower.contains("highlight on screen") ||
+      lower.contains("circle on screen") ||
+      lower.contains("crop my screen") ||
+      lower.contains("crop the screen") ||
+      lower.contains("start screen selection")
+  }
+
+  // --- Live Screen Selection, Smart Auto-Crop & Compact Image Editor ---
+
+  fun onStartScreenSelectionFlow(onRequestConsent: () -> Unit) {
+    _uiState.update {
+      it.copy(
+        isAttachmentSheetOpen = false,
+        isMoreToolsSheetOpen = false,
+        isImageToolsSheetOpen = false,
+      )
+    }
+    screenSelectionManager?.markAwaitingConsent(useSystemOverlay = false)
+    onRequestConsent()
+  }
+
+  fun onConsumePendingStartScreenSelection() {
+    _uiState.update { it.copy(pendingStartScreenSelection = false) }
+  }
+
+  fun onScreenSelectionConsentCancelled() {
+    screenSelectionManager?.cancelSelection()
+    _uiState.update { it.copy(statusToastMessage = "Screen selection cancelled.") }
+  }
+
+  fun onSelectSelectionTool(mode: SelectionToolMode) {
+    screenSelectionManager?.selectToolMode(mode)
+  }
+
+  fun onSelectionStrokeStart(point: NormPoint) {
+    screenSelectionManager?.onStrokeStart(point)
+  }
+
+  fun onSelectionStrokeMove(point: NormPoint) {
+    screenSelectionManager?.onStrokeMove(point)
+  }
+
+  fun onSelectionStrokeEnd() {
+    screenSelectionManager?.onStrokeEnd()
+  }
+
+  fun onSelectionAdjustHandle(handle: CropHandle, deltaXNorm: Float, deltaYNorm: Float) {
+    screenSelectionManager?.onAdjustHandle(handle, deltaXNorm, deltaYNorm)
+  }
+
+  fun onSelectionUndo() {
+    screenSelectionManager?.undo()
+  }
+
+  fun onSelectionClear() {
+    screenSelectionManager?.clearSelection()
+  }
+
+  fun onCancelScreenSelection() {
+    screenSelectionManager?.cancelSelection()
+  }
+
+  fun onConfirmScreenSelection(overlayWidthPx: Int, overlayHeightPx: Int) {
+    val mgr = screenSelectionManager ?: return
+    viewModelScope.launch {
+      val result = mgr.confirmAndAutoCrop(overlayWidthPx = overlayWidthPx, overlayHeightPx = overlayHeightPx)
+      result.onFailure { err ->
+        _uiState.update {
+          it.copy(statusToastMessage = err.message ?: "Unable to crop selected region.")
+        }
+      }
+      result.onSuccess {
+        _uiState.update { it.copy(shouldRequestComposerFocus = true) }
+      }
+    }
+  }
+
+  fun onReturnedFromSystemSelection() {
+    val latest = imageAttachmentManager?.attachedVisuals?.value.orEmpty()
+    _uiState.update { state ->
+      var updatedPending = state.pendingAttachments
+      latest.forEach { vis ->
+        val preview = AttachmentPreview.PickedPhotoUri(vis.croppedUriString)
+        if (preview !in updatedPending) {
+          updatedPending = (updatedPending + preview).takeLast(4)
+        }
+      }
+      state.copy(
+        pendingAttachments = updatedPending,
+        attachedVisualsByUri = latest.associateBy { it.croppedUriString },
+        shouldRequestComposerFocus = true,
+      )
+    }
+  }
+
+  fun onConsumeComposerFocusRequest() {
+    _uiState.update { it.copy(shouldRequestComposerFocus = false) }
+  }
+
+  fun onOpenCompactImageEditor(targetUri: String? = null) {
+    val ctrl = imageEditingController
+    val mgr = imageAttachmentManager
+    if (ctrl == null || mgr == null) return
+
+    val targetItem =
+      targetUri?.let { mgr.findByUri(it) }
+        ?: _uiState.value.pendingAttachments
+          .filterIsInstance<AttachmentPreview.PickedPhotoUri>()
+          .lastOrNull()
+          ?.let { mgr.findByUri(it.uri) }
+        ?: mgr.latestEditableVisual()
+
+    if (targetItem != null) {
+      ctrl.beginEditing(targetItem)
+      return
+    }
+
+    // Also allow editing a regular gallery photo attachment if present
+    val fallbackUri =
+      targetUri
+        ?: _uiState.value.pendingAttachments
+          .filterIsInstance<AttachmentPreview.PickedPhotoUri>()
+          .lastOrNull()
+          ?.uri
+    if (fallbackUri != null) {
+      val path = Uri.parse(fallbackUri).path
+      if (!path.isNullOrBlank() && File(path).exists()) {
+        val tempItem =
+          mgr.attachCroppedVisual(
+            croppedFile = File(path),
+            sourceFrameFilePath = path,
+            captureMetadata = null,
+            normCropRect = NormBoundingBox(0.05f, 0.05f, 0.95f, 0.95f),
+            detectedShape = DetectedRegionShape.RECTANGLE,
+            isSettling = false,
+          )
+        ctrl.beginEditing(tempItem)
+      } else {
+        _uiState.update { it.copy(statusToastMessage = "Tap on an attached image or select a screen region to crop.") }
+      }
+    }
+  }
+
+  fun onAdjustImageEditorHandle(handle: CropHandle, deltaXNorm: Float, deltaYNorm: Float) {
+    imageEditingController?.adjustHandle(handle, deltaXNorm, deltaYNorm)
+  }
+
+  fun onSelectEditorAspectPreset(preset: CropAspectPreset) {
+    imageEditingController?.setAspectPreset(preset)
+  }
+
+  fun onRotateEditor90() {
+    imageEditingController?.rotate90()
+  }
+
+  fun onResetEditorCrop() {
+    imageEditingController?.resetToOriginal()
+  }
+
+  fun onConfirmImageEditor() {
+    val ctrl = imageEditingController ?: return
+    viewModelScope.launch {
+      ctrl.confirmEdit().onFailure { err ->
+        _uiState.update { it.copy(statusToastMessage = err.message ?: "Unable to update crop.") }
+      }
+      _uiState.update { it.copy(shouldRequestComposerFocus = true) }
+    }
+  }
+
+  fun onCancelImageEditor() {
+    imageEditingController?.cancelEdit()
+  }
+
+  fun onRetakeScreenSelection(onRequestConsent: () -> Unit) {
+    imageEditingController?.cancelEdit()
+    onStartScreenSelectionFlow(onRequestConsent)
+  }
+
   fun onToggleGeminiLive(open: Boolean) {
     if (open) {
       liveSessionStartedAtMs = System.currentTimeMillis()
       liveSessionTurnsCount = 0
+      silentRetryCount = 0
+      assistantSessionStateManager?.activateFromTrigger(
+        edge = EdgeActivationEdge.BOTTOM,
+        expandPanel = false,
+      )
       voiceController.playActivationChime(_uiState.value.voicePreferences)
-      if (_uiState.value.hasAudioPermission) {
-        voiceController.interruptSpeakingAndListen(_uiState.value.voicePreferences.preferredLanguage)
+      val prefs = _uiState.value.voicePreferences
+      val allowInterrupt = _uiState.value.privacyPerformanceConfig.allowVoiceInterruption
+      val canUseLiveSocket =
+        geminiLiveVoiceEngine != null &&
+          geminiLiveVoiceEngine.isFirebaseAvailable() &&
+          _uiState.value.hasAudioPermission
+      if (canUseLiveSocket) {
+        _uiState.update {
+          it.copy(
+            isGeminiLiveOpen = true,
+            isGeminiLiveMinimized = false,
+            isLiveVoicePaused = false,
+            isLiveVoiceMuted = false,
+            isUsingGeminiLiveSocket = true,
+            liveAssistantTranscript = "",
+          )
+        }
+        geminiLiveVoiceEngine!!.startSession(
+          preferences = prefs,
+          allowInterruptions = allowInterrupt,
+          onFallbackRequired = { reason ->
+            viewModelScope.launch {
+              _uiState.update { current ->
+                current.copy(
+                  isUsingGeminiLiveSocket = false,
+                  statusToastMessage = "Switched to voice fallback: $reason",
+                )
+              }
+              if (_uiState.value.isGeminiLiveOpen && _uiState.value.hasAudioPermission && !_uiState.value.isLiveVoicePaused) {
+                voiceController.interruptSpeakingAndListen(prefs.preferredLanguage)
+              }
+            }
+          },
+        )
+        return
+      } else if (_uiState.value.hasAudioPermission) {
+        voiceController.interruptSpeakingAndListen(prefs.preferredLanguage)
+      }
+      _uiState.update {
+        it.copy(
+          isGeminiLiveOpen = true,
+          isGeminiLiveMinimized = false,
+          isLiveVoicePaused = false,
+          isLiveVoiceMuted = false,
+          isUsingGeminiLiveSocket = false,
+          liveAssistantTranscript = "",
+        )
       }
     } else {
+      silentRetryCount = 0
       val startedAt = liveSessionStartedAtMs
       if (startedAt != null) {
         val convId = _uiState.value.activeConversationId
@@ -2031,15 +2661,61 @@ class MousomiViewModel @Inject constructor(
           )
         }
       }
+      geminiLiveVoiceEngine?.stopAndClose()
       voiceController.stopListening()
       voiceController.stopSpeaking()
-    }
-    _uiState.update {
-      it.copy(
-        isGeminiLiveOpen = open,
-        isGeminiLiveMinimized = if (!open) false else false,
+      assistantSessionStateManager?.onEndLiveAssistant(
+        keepScreenShare = _uiState.value.screenShareStatus != ScreenShareStatus.STOPPED
       )
+      _uiState.update {
+        it.copy(
+          isGeminiLiveOpen = false,
+          isGeminiLiveMinimized = false,
+          isLiveVoicePaused = false,
+          isLiveVoiceMuted = false,
+          isUsingGeminiLiveSocket = false,
+          liveAssistantTranscript = "",
+        )
+      }
     }
+  }
+
+  fun onTogglePauseLiveVoice() {
+    val state = _uiState.value
+    if (!state.isGeminiLiveOpen) return
+    val nextPaused = !state.isLiveVoicePaused
+    silentRetryCount = 0
+    if (state.isUsingGeminiLiveSocket && geminiLiveVoiceEngine != null) {
+      if (nextPaused) {
+        geminiLiveVoiceEngine.pauseSession()
+      } else {
+        geminiLiveVoiceEngine.resumeSession()
+      }
+    } else {
+      if (nextPaused) {
+        voiceController.stopListening()
+        voiceController.stopSpeaking()
+      } else if (state.hasAudioPermission && !state.isLiveVoiceMuted && !state.isGenerating) {
+        voiceController.startListening(state.voicePreferences.preferredLanguage)
+      }
+      assistantSessionStateManager?.onPausedChanged(nextPaused)
+    }
+    _uiState.update { it.copy(isLiveVoicePaused = nextPaused) }
+  }
+
+  fun onToggleMuteLiveVoice() {
+    val state = _uiState.value
+    val nextMuted = !state.isLiveVoiceMuted
+    if (state.isUsingGeminiLiveSocket && geminiLiveVoiceEngine != null) {
+      geminiLiveVoiceEngine.setMuted(nextMuted)
+    } else {
+      if (nextMuted) {
+        voiceController.stopListening()
+      } else if (state.isGeminiLiveOpen && state.hasAudioPermission && !state.isLiveVoicePaused && !state.isGenerating) {
+        voiceController.startListening(state.voicePreferences.preferredLanguage)
+      }
+    }
+    _uiState.update { it.copy(isLiveVoiceMuted = nextMuted) }
   }
 
   fun onToggleGeminiLiveMinimized(minimized: Boolean) {
@@ -2054,6 +2730,10 @@ class MousomiViewModel @Inject constructor(
     val clean = promptText.trim()
     if (clean.isEmpty()) return
     liveSessionTurnsCount += 1
+    if (_uiState.value.isUsingGeminiLiveSocket && geminiLiveVoiceEngine != null) {
+      geminiLiveVoiceEngine.sendFollowUpText(clean)
+      return
+    }
     viewModelScope.launch {
       executePrompt(
         conversationId = _uiState.value.activeConversationId,
@@ -2080,6 +2760,11 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onStartVoiceListening() {
+    silentRetryCount = 0
+    if (_uiState.value.isUsingGeminiLiveSocket && geminiLiveVoiceEngine != null) {
+      geminiLiveVoiceEngine.resumeSession()
+      return
+    }
     voiceController.playActivationChime(_uiState.value.voicePreferences)
     if (_uiState.value.privacyPerformanceConfig.allowVoiceInterruption) {
       voiceController.interruptSpeakingAndListen(_uiState.value.voicePreferences.preferredLanguage)
@@ -2089,6 +2774,10 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onStopVoiceListening() {
+    if (_uiState.value.isUsingGeminiLiveSocket && geminiLiveVoiceEngine != null) {
+      geminiLiveVoiceEngine.pauseSession()
+      return
+    }
     voiceController.stopListening()
   }
 
@@ -2405,11 +3094,17 @@ class MousomiViewModel @Inject constructor(
       proxyBaseUrl = state.proxyBaseUrl,
       geminiApiKey = state.geminiApiKey,
       groqApiKey = state.groqApiKey,
+      cloudflareAccountId = state.cloudflareAccountId,
+      cloudflareApiToken = state.cloudflareApiToken,
+      strictFreeImageOnly = state.strictFreeImageOnly,
+      allowPaidImageFallbackApproved = state.allowPaidImageFallbackApproved,
       themeModeName = state.themeMode.name,
       voicePreferences = state.voicePreferences,
       selectedModelOptionName = state.selectedModel.name,
+      operatingModeName = state.operatingMode.name,
       hydrogenBackingModelId = state.hydrogenBackingModelId,
       groqReasoningModelId = state.groqReasoningModelId,
+      groqHelperGuardModelId = state.groqHelperGuardModelId,
       imageModelId = state.imageModelId,
       externalSearchUrl = state.externalSearchUrl,
       externalSearchApiKey = state.externalSearchApiKey,
@@ -2425,32 +3120,9 @@ class MousomiViewModel @Inject constructor(
   }
 
   private fun persistCurrentSettings() {
-    val state = _uiState.value
+    val snapshot = buildCurrentAppSettingsSnapshot()
     viewModelScope.launch {
-      settingsRepository.saveSettings(
-        AppSettings(
-          connectionMode = state.connectionMode,
-          proxyBaseUrl = state.proxyBaseUrl,
-          geminiApiKey = state.geminiApiKey,
-          groqApiKey = state.groqApiKey,
-          themeModeName = state.themeMode.name,
-          voicePreferences = state.voicePreferences,
-          selectedModelOptionName = state.selectedModel.name,
-          hydrogenBackingModelId = state.hydrogenBackingModelId,
-          groqReasoningModelId = state.groqReasoningModelId,
-          imageModelId = state.imageModelId,
-          externalSearchUrl = state.externalSearchUrl,
-          externalSearchApiKey = state.externalSearchApiKey,
-          analyticsSandboxEnabled = state.analyticsSandboxEnabled,
-          composerGlowIntensity = state.composerGlowIntensity,
-          edgeLightConfig = state.edgeLightConfig,
-          floatingOrbConfig = state.floatingOrbConfig,
-          screenIntelligenceConfig = state.screenIntelligenceConfig,
-          agentBudgetConfig = state.agentBudgetConfig,
-          notificationConfig = state.notificationConfig,
-          privacyPerformanceConfig = state.privacyPerformanceConfig,
-        )
-      )
+      settingsRepository.saveSettings(snapshot)
     }
   }
 

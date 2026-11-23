@@ -1,5 +1,10 @@
 package com.example.ui.model
 
+import com.example.core.assistant.AssistantSessionPhase
+import com.example.core.assistant.EdgeActivationSignal
+import com.example.core.screen.AttachedVisualItem
+import com.example.core.screen.ImageEditState
+import com.example.core.screen.ScreenSelectionUiState
 import com.example.core.voice.VoiceState
 import com.example.domain.model.ActiveEditImageTarget
 import com.example.domain.model.AgentBudgetConfig
@@ -7,24 +12,39 @@ import com.example.domain.model.AgentStepPlan
 import com.example.domain.model.AgentTaskLogItem
 import com.example.domain.model.AiResponseState
 import com.example.domain.model.AutomationTaskRecord
+import com.example.domain.model.BackgroundReplaceStyle
+import com.example.domain.model.BatchImageItemState
 import com.example.domain.model.ConnectionMode
 import com.example.domain.model.DeviceActionResult
 import com.example.domain.model.DomainConversation
 import com.example.domain.model.EdgeLightConfig
+import com.example.domain.model.EditPlan
 import com.example.domain.model.FloatingOrbConfig
 import com.example.domain.model.GeneratedImageResult
+import com.example.domain.model.ImageAdjustmentParams
+import com.example.domain.model.ImageEditFeatureType
+import com.example.domain.model.ImageGenerationStatus
 import com.example.domain.model.ImageVersionRecord
 import com.example.domain.model.InstalledAppInfo
 import com.example.domain.model.ManagedTaskItem
 import com.example.domain.model.MemoryRecord
+import com.example.domain.model.ModelSubstitutionPrompt
 import com.example.domain.model.NeonComposerState
+import com.example.domain.model.NormPoint
 import com.example.domain.model.NotificationIntelligenceConfig
 import com.example.domain.model.NotificationSummaryRecord
 import com.example.domain.model.OneTapActivationResult
+import com.example.domain.model.OperatingMode
 import com.example.domain.model.PendingMediaItem
 import com.example.domain.model.PermissionCategoryItem
+import com.example.domain.model.PosterAspectRatio
+import com.example.domain.model.PosterDesignSpec
+import com.example.domain.model.PosterFontChoice
+import com.example.domain.model.PosterTemplatePreset
+import com.example.domain.model.PosterTextLayer
 import com.example.domain.model.PrivacyAndPerformanceConfig
 import com.example.domain.model.ReminderEntry
+import com.example.domain.model.ResearchActivitySnapshot
 import com.example.domain.model.ResponseBlock
 import com.example.domain.model.ScreenFrameRecord
 import com.example.domain.model.ScreenIntelligenceConfig
@@ -50,25 +70,43 @@ enum class AiModelOption(
     modelId = VerifiedModelCatalog.HYDROGEN_SLOT_ID,
     shortLabel = "4 Hydrogen",
     displayName = "Gemini 4 Hydrogen",
-    description = "New Base Intelligence · Advanced AI Engine",
+    description = "Advanced Intelligence & Multimodal Reasoning · Search Grounding",
   ),
-  GEMINI_PRO(
-    modelId = VerifiedModelCatalog.geminiPro.id,
-    shortLabel = "Pro",
-    displayName = "Gemini Pro",
-    description = "Advanced Reasoning · Coding · Complex Analysis",
+  GEMINI_IMAGE_STUDIO(
+    modelId = VerifiedModelCatalog.IMAGE_STUDIO_SLOT_ID,
+    shortLabel = "Image Studio",
+    displayName = "Gemini Image Studio",
+    description = "AI Image Generation & Creative Editing · Free-First Router",
   ),
-  GEMINI_FLASH(
-    modelId = VerifiedModelCatalog.geminiFlash.id,
-    shortLabel = "Flash",
-    displayName = "Gemini Flash",
-    description = "Fast Responses · Everyday AI · Multimodal Tasks",
+  GEMINI_FLASH_LITE(
+    modelId = VerifiedModelCatalog.FLASH_LITE_SLOT_ID,
+    shortLabel = "Flash-Lite",
+    displayName = "Gemini Flash-Lite",
+    description = "Ultra-Fast Intelligence · Low Latency Everyday Tasks",
   ),
-  GROQ_REASONING(
-    modelId = VerifiedModelCatalog.DEFAULT_GROQ_REASONING_MODEL_ID,
-    shortLabel = "Groq",
-    displayName = "Groq Reasoning",
-    description = "Fast Inference · Logical Reasoning · Technical Assistance",
+  GEMINI_LIVE_AUDIO(
+    modelId = VerifiedModelCatalog.LIVE_AUDIO_SLOT_ID,
+    shortLabel = "Live Audio",
+    displayName = "Gemini Live Audio",
+    description = "Real-Time Voice Intelligence · Duplex Mic & Natural Speech",
+  ),
+  GROQ_HIGH_SPEED_REASONING(
+    modelId = VerifiedModelCatalog.GROQ_REASONING_SLOT_ID,
+    shortLabel = "Groq Reason",
+    displayName = "Groq High-Speed Reasoning",
+    description = "Fast Reasoning & Coding (Qwen 3.8 27B / GPT-OSS 120B)",
+  ),
+  GROQ_ULTRA_FAST_HELPER_GUARD(
+    modelId = VerifiedModelCatalog.GROQ_HELPER_GUARD_SLOT_ID,
+    shortLabel = "Helper & Guard",
+    displayName = "Groq Ultra-Fast Helper & Guard",
+    description = "Ultra-Fast Helper & Prompt Safety (GPT-OSS 20B / Safeguard)",
+  ),
+  MOUSOMI_AUTO(
+    modelId = VerifiedModelCatalog.MOUSOMI_AUTO_SLOT_ID,
+    shortLabel = "Auto",
+    displayName = "Mousomi Auto",
+    description = "Smart Automatic Router · Displays the actual active backing model",
   ),
 }
 
@@ -110,6 +148,57 @@ data class ChatMessage(
     get() = attachments.firstOrNull()
 }
 
+data class ImageStudioUiState(
+  val activeFeature: ImageEditFeatureType = ImageEditFeatureType.TEXT_TO_IMAGE,
+  val promptInput: String = "",
+  val sourceUriOrPath: String? = null,
+  val sourceWidthPx: Int = 1024,
+  val sourceHeightPx: Int = 1024,
+  val collageUris: List<String> = emptyList(),
+  val outputFilePath: String? = null,
+  val beforeFilePath: String? = null,
+  val outputHasTransparency: Boolean = false,
+  val outputSourceBadge: String? = null,
+  val outputWidthPx: Int = 0,
+  val outputHeightPx: Int = 0,
+  val isBusy: Boolean = false,
+  val status: ImageGenerationStatus? = null,
+  val errorMessage: String? = null,
+  val adjustments: ImageAdjustmentParams = ImageAdjustmentParams(),
+  val rotateDegrees: Float = 0f,
+  val flipHorizontal: Boolean = false,
+  val portraitBokehAmount: Float = 14f,
+  val backgroundStyle: BackgroundReplaceStyle = BackgroundReplaceStyle.TRANSPARENT_PNG,
+  val edgeFeatherPx: Float = 2.5f,
+  val customBackdropUri: String? = null,
+  val maskPaths: List<List<NormPoint>> = emptyList(),
+  val maskBrushRadiusNorm: Float = 0.055f,
+  val posterSpec: PosterDesignSpec =
+    PosterDesignSpec(
+      aspectRatio = PosterAspectRatio.SQUARE_1_1,
+      template = PosterTemplatePreset.POETICS_MIDNIGHT,
+      layers =
+        listOf(
+          PosterTextLayer(
+            id = "headline",
+            text = "মৌসুমী এআই স্টুডিও",
+            fontChoice = PosterFontChoice.HIND_SILIGURI,
+            fontSizeSp = 46f,
+            yPositionFraction = 0.42f,
+          ),
+          PosterTextLayer(
+            id = "subtitle",
+            text = "Crystal-clear Bengali & English typography",
+            fontChoice = PosterFontChoice.OUTFIT_CLEAN,
+            fontSizeSp = 24f,
+            yPositionFraction = 0.62f,
+            backdropOpacity = 0.16f,
+          ),
+        ),
+    ),
+  val lastEditPlan: EditPlan? = null,
+)
+
 data class MousomiUiState(
   val activeConversationId: String = "conv_default",
   val conversations: List<DomainConversation> = emptyList(),
@@ -117,7 +206,9 @@ data class MousomiUiState(
   val inputText: String = "",
   val editingMessageId: String? = null,
   val inputMode: InputMode = InputMode.CHAT,
-  val selectedModel: AiModelOption = AiModelOption.GEMINI_4_HYDROGEN,
+  val operatingMode: OperatingMode = OperatingMode.NORMAL_CHAT,
+  val selectedModel: AiModelOption = AiModelOption.MOUSOMI_AUTO,
+  val resolvedAutoModelName: String? = null,
   val pendingAttachments: List<AttachmentPreview> = emptyList(),
   val responseState: AiResponseState = AiResponseState.Idle,
   val activeRoutingReason: String? = null,
@@ -126,8 +217,13 @@ data class MousomiUiState(
   val proxyBaseUrl: String = "",
   val geminiApiKey: String = "",
   val groqApiKey: String = "",
+  val cloudflareAccountId: String = "",
+  val cloudflareApiToken: String = "",
+  val strictFreeImageOnly: Boolean = true,
+  val allowPaidImageFallbackApproved: Boolean = false,
   val hydrogenBackingModelId: String = VerifiedModelCatalog.DEFAULT_HYDROGEN_BACKING_MODEL_ID,
   val groqReasoningModelId: String = VerifiedModelCatalog.DEFAULT_GROQ_REASONING_MODEL_ID,
+  val groqHelperGuardModelId: String = VerifiedModelCatalog.DEFAULT_GROQ_HELPER_MODEL_ID,
   val imageModelId: String = VerifiedModelCatalog.DEFAULT_IMAGE_MODEL_ID,
   val externalSearchUrl: String = "",
   val externalSearchApiKey: String = "",
@@ -142,6 +238,8 @@ data class MousomiUiState(
   val isProfileDialogOpen: Boolean = false,
   val isGeminiLiveOpen: Boolean = false,
   val isGeminiLiveMinimized: Boolean = false,
+  val isLiveVoicePaused: Boolean = false,
+  val isLiveVoiceMuted: Boolean = false,
   val isVoiceDialogOpen: Boolean = false,
   val isDrawingOverlayOpen: Boolean = false,
   val isQuickNoteDialogOpen: Boolean = false,
@@ -182,7 +280,23 @@ data class MousomiUiState(
   val isMoreToolsSheetOpen: Boolean = false,
   val isCompletedPulseActive: Boolean = false,
   val pendingNavigateToLens: Boolean = false,
+  val pendingNavigateToImageStudio: Boolean = false,
   val authSession: com.example.domain.auth.AuthUserSession = com.example.domain.auth.AuthUserSession(),
+  val screenSelectionState: ScreenSelectionUiState = ScreenSelectionUiState(),
+  val attachedVisualsByUri: Map<String, AttachedVisualItem> = emptyMap(),
+  val activeImageEditState: ImageEditState? = null,
+  val shouldRequestComposerFocus: Boolean = false,
+  val pendingStartScreenSelection: Boolean = false,
+  val researchActivity: ResearchActivitySnapshot? = null,
+  val isResearchPanelExpanded: Boolean = true,
+  val pendingSubstitutionPrompt: ModelSubstitutionPrompt? = null,
+  val imageStudioState: ImageStudioUiState = ImageStudioUiState(),
+  val batchImageItems: List<BatchImageItemState> = emptyList(),
+  val isBatchRunning: Boolean = false,
+  val assistantSessionPhase: AssistantSessionPhase = AssistantSessionPhase.INACTIVE,
+  val edgeActivationSignal: EdgeActivationSignal = EdgeActivationSignal(),
+  val liveAssistantTranscript: String = "",
+  val isUsingGeminiLiveSocket: Boolean = false,
 ) {
   val pendingAttachment: AttachmentPreview?
     get() = pendingAttachments.firstOrNull()
@@ -193,7 +307,8 @@ data class MousomiUiState(
         responseState is AiResponseState.Thinking ||
         responseState is AiResponseState.Searching ||
         responseState is AiResponseState.Generating ||
-        responseState is AiResponseState.Streaming
+        responseState is AiResponseState.Streaming ||
+        researchActivity?.isActive == true
 
   val isAnyLiveSessionActive: Boolean
     get() =
@@ -201,7 +316,10 @@ data class MousomiUiState(
         isGeminiLiveOpen ||
         voiceState is VoiceState.Listening ||
         voiceState is VoiceState.Speaking ||
-        screenShareStatus != ScreenShareStatus.STOPPED
+        screenShareStatus != ScreenShareStatus.STOPPED ||
+        screenSelectionState.isActive ||
+        imageStudioState.isBusy ||
+        isBatchRunning
 
   val hasImageContext: Boolean
     get() =
@@ -218,11 +336,18 @@ data class MousomiUiState(
 
   val neonComposerState: NeonComposerState
     get() {
+      val terminalImageStates =
+        setOf(
+          ImageGenerationStatus.COMPLETED,
+          ImageGenerationStatus.FAILED,
+          ImageGenerationStatus.QUOTA_EXHAUSTED,
+          ImageGenerationStatus.CANCELLED,
+        )
       val hasGeneratedImgInProgress =
-        messages.lastOrNull()?.blocks?.any {
-          it is ResponseBlock.GeneratedImageBlock &&
-            it.image.status.name !in setOf("COMPLETED", "FAILED")
-        } == true
+        imageStudioState.isBusy ||
+          messages.lastOrNull()?.blocks?.any {
+            it is ResponseBlock.GeneratedImageBlock && it.image.status !in terminalImageStates
+          } == true
       return when {
         voiceState is VoiceState.Listening -> NeonComposerState.VOICE_ACTIVE
         voiceState is VoiceState.Speaking -> NeonComposerState.AI_SPEAKING

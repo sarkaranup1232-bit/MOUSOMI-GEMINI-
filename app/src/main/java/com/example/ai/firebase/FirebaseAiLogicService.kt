@@ -51,8 +51,12 @@ class FirebaseAiLogicService @Inject constructor(
     val clean = requestedId.trim().lowercase()
     return when {
       clean.contains("argon") -> "gemini-4-argon"
+      clean.contains("carbon") -> "gemini-4-carbon"
+      clean.contains("neon") -> "gemini-4-neon"
+      clean.contains("hydrogen") -> "gemini-4-hydrogen"
       clean.contains("pro") && !clean.contains("1.5") && !clean.contains("2.0") && !clean.contains("2.5") ->
         "gemini-4-argon"
+      clean == "gemini-3.1-flash-lite" -> "gemini-3.1-flash-lite"
       clean.contains("lite") && clean.contains("3.") -> "gemini-3.5-flash-lite"
       clean.startsWith("gemini-3.") || clean.startsWith("gemini-4-") -> requestedId.trim()
       // Map legacy/deprecated IDs (1.5, 2.0, 2.5) and virtual slots cleanly to supported default

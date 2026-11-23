@@ -8,9 +8,16 @@ import com.example.domain.model.AiModelSpec
 import com.example.domain.model.AppSettings
 import com.example.domain.model.ConnectionMode
 import com.example.domain.model.DeepResearchProgress
+import com.example.domain.model.LiveSourceLoadStatus
+import com.example.domain.model.LiveSourceTelemetry
 import com.example.domain.model.ProviderType
+import com.example.domain.model.ResearchActivitySnapshot
 import com.example.domain.model.ResearchReport
+import com.example.domain.model.ResearchStageId
+import com.example.domain.model.ResearchStageItem
+import com.example.domain.model.ResearchStageStatus
 import com.example.domain.model.SearchResultItem
+import com.example.domain.model.SourceVerificationStatus
 import com.example.research.search.SearchQueryRequest
 import com.example.research.search.SearchService
 import com.example.research.search.SearchTopic
@@ -18,10 +25,14 @@ import com.example.research.verification.SourceVerifier
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlin.coroutines.coroutineContext
 
 @Serializable
 private data class LlmResearchSynthesis(
@@ -47,13 +58,50 @@ class DeepResearchEngine @Inject constructor(
     model: AiModelSpec,
     settings: AppSettings,
   ): Flow<DeepResearchProgress> = flow {
+    val stageMap = ResearchStageId.entries.associateWith {
+      ResearchStageItem(stage = it, status = ResearchStageStatus.WAITING)
+    }.toMutableMap()
+    val liveSources = mutableListOf<LiveSourceTelemetry>()
+    val retrievedRaw = mutableListOf<SearchResultItem>()
+    var verifiedSourcesSnapshot = emptyList<SearchResultItem>()
+    var plannedQueries = emptyList<String>()
+
+    fun buildSnapshot(
+      headline: String,
+      isActive: Boolean = true,
+      isCancelled: Boolean = false,
+    ): ResearchActivitySnapshot =
+      ResearchActivitySnapshot(
+        query = question,
+        isActive = isActive,
+        isCancelled = isCancelled,
+        currentHeadline = headline,
+        plannedQueries = plannedQueries,
+        stages = ResearchStageId.entries.mapNotNull { stageMap[it] },
+        liveSources = liveSources.toList(),
+        retrievedSources = if (verifiedSourcesSnapshot.isNotEmpty()) verifiedSourcesSnapshot else retrievedRaw.toList(),
+      )
+
+    fun updateStage(stage: ResearchStageId, status: ResearchStageStatus, detail: String = "") {
+      stageMap[stage] = ResearchStageItem(stage = stage, status = status, detail = detail)
+    }
+
     try {
+      // Stage 1: Understand
+      updateStage(ResearchStageId.UNDERSTAND, ResearchStageStatus.ACTIVE, "Normalizing intent & language")
       emit(DeepResearchProgress.UnderstandingQuestion)
+      emit(DeepResearchProgress.StageUpdate(buildSnapshot("Understanding your research question…")))
       val complexity = detectComplexity(question)
+      updateStage(ResearchStageId.UNDERSTAND, ResearchStageStatus.COMPLETED, complexity)
       emit(DeepResearchProgress.DetectingComplexity(complexity))
 
-      val queries = buildResearchQueries(question, complexity)
-      emit(DeepResearchProgress.PlanningQueries(queries))
+      // Stage 2: Planning
+      coroutineContext.ensureActive()
+      updateStage(ResearchStageId.PLANNING, ResearchStageStatus.ACTIVE, "Decomposing multi-angle queries")
+      plannedQueries = buildResearchQueries(question, complexity)
+      updateStage(ResearchStageId.PLANNING, ResearchStageStatus.COMPLETED, "${plannedQueries.size} targeted queries")
+      emit(DeepResearchProgress.PlanningQueries(plannedQueries))
+      emit(DeepResearchProgress.StageUpdate(buildSnapshot("Planned ${plannedQueries.size} search angles…")))
 
       val topic =
         when {
@@ -64,15 +112,18 @@ class DeepResearchEngine @Inject constructor(
           else -> SearchTopic.RESEARCH
         }
 
-      val rawResults = mutableListOf<SearchResultItem>()
+      // Stage 3: Live Search
+      updateStage(ResearchStageId.LIVE_SEARCH, ResearchStageStatus.ACTIVE, "Querying live search providers")
+      emit(DeepResearchProgress.StageUpdate(buildSnapshot("Searching live web sources…")))
       var lastError: Throwable? = null
-      queries.forEachIndexed { idx, q ->
+      plannedQueries.forEachIndexed { idx, q ->
+        coroutineContext.ensureActive()
         emit(
           DeepResearchProgress.SearchingWeb(
             currentQuery = q,
             queryIndex = idx + 1,
-            totalQueries = queries.size,
-            sourcesCollected = rawResults.size,
+            totalQueries = plannedQueries.size,
+            sourcesCollected = retrievedRaw.size,
           )
         )
         val res =
@@ -82,46 +133,114 @@ class DeepResearchEngine @Inject constructor(
               topic = topic,
               page = 1,
               pageSize = 6,
-              includePageContent = idx == 0,
+              includePageContent = idx <= 1,
             ),
             settings,
           )
         if (res.isSuccess) {
-          rawResults += res.getOrThrow().results
+          val found = res.getOrThrow().results
+          retrievedRaw += found
+          found.forEach { item ->
+            if (liveSources.none { it.url == item.url }) {
+              liveSources +=
+                LiveSourceTelemetry(
+                  id = item.id,
+                  domain = item.sourceDomain,
+                  title = item.title,
+                  url = item.url,
+                  faviconUrl =
+                    item.faviconUrl ?: "https://www.google.com/s2/favicons?domain=${item.sourceDomain}&sz=64",
+                  loadStatus = LiveSourceLoadStatus.CONNECTING,
+                )
+            }
+          }
+          emit(
+            DeepResearchProgress.StageUpdate(
+              buildSnapshot("Found ${retrievedRaw.size} candidate sources (${idx + 1}/${plannedQueries.size})…")
+            )
+          )
         } else {
           lastError = res.exceptionOrNull()
         }
       }
 
-      if (rawResults.isEmpty()) {
+      if (retrievedRaw.isEmpty()) {
         val msg =
           lastError?.message
             ?: "Unable to retrieve live web sources for deep research. Check your API key or Search configuration in Settings."
+        updateStage(ResearchStageId.LIVE_SEARCH, ResearchStageStatus.FAILED, msg)
+        emit(DeepResearchProgress.StageUpdate(buildSnapshot("Live Search failed", isActive = false)))
         emit(DeepResearchProgress.Failed(msg))
         return@flow
       }
 
-      val verifiedBundle = sourceVerifier.verifyAndCompare(rawResults)
+      updateStage(ResearchStageId.LIVE_SEARCH, ResearchStageStatus.COMPLETED, "${retrievedRaw.size} hits retrieved")
+
+      // Stage 4: Source Reading
+      coroutineContext.ensureActive()
+      updateStage(ResearchStageId.SOURCE_READING, ResearchStageStatus.ACTIVE, "Inspecting page titles, dates & excerpts")
+      liveSources.forEachIndexed { idx, src ->
+        val matching = retrievedRaw.firstOrNull { it.url == src.url }
+        val status =
+          when {
+            matching == null -> LiveSourceLoadStatus.FAILED
+            matching.verificationStatus == SourceVerificationStatus.FETCH_FAILED -> LiveSourceLoadStatus.FAILED
+            !matching.pageExcerpt.isNullOrBlank() -> LiveSourceLoadStatus.READ
+            else -> LiveSourceLoadStatus.OPENED
+          }
+        liveSources[idx] = src.copy(loadStatus = status)
+      }
+      val analyzedPagesCount = retrievedRaw.count { !it.pageExcerpt.isNullOrBlank() }
+      updateStage(
+        ResearchStageId.SOURCE_READING,
+        ResearchStageStatus.COMPLETED,
+        "$analyzedPagesCount full excerpts read, ${retrievedRaw.size} metadata inspected",
+      )
+      emit(DeepResearchProgress.AnalyzingPages(analyzedCount = analyzedPagesCount, totalCount = retrievedRaw.size))
+      emit(DeepResearchProgress.StageUpdate(buildSnapshot("Reading & extracting verified pages…")))
+
+      // Stage 5: Cross-Verification
+      coroutineContext.ensureActive()
+      updateStage(ResearchStageId.CROSS_VERIFICATION, ResearchStageStatus.ACTIVE, "Comparing claims & HTTPS domains")
+      val verifiedBundle = sourceVerifier.verifyAndCompare(retrievedRaw)
       val verifiedSources = verifiedBundle.uniqueVerifiedSources
+      verifiedSourcesSnapshot = verifiedSources
+
       emit(
         DeepResearchProgress.DeduplicatingAndVerifying(
-          rawCount = rawResults.size,
+          rawCount = retrievedRaw.size,
           verifiedCount = verifiedSources.size,
         )
       )
 
       if (verifiedSources.isEmpty()) {
-        emit(
-          DeepResearchProgress.Failed(
-            "Retrieved links failed HTTPS source verification (${verifiedBundle.rejectedCount} rejected). Refusing to fabricate research citations."
-          )
-        )
+        val err =
+          "Retrieved links failed HTTPS source verification (${verifiedBundle.rejectedCount} rejected). Refusing to fabricate research citations."
+        updateStage(ResearchStageId.CROSS_VERIFICATION, ResearchStageStatus.FAILED, err)
+        emit(DeepResearchProgress.StageUpdate(buildSnapshot("Verification failed", isActive = false)))
+        emit(DeepResearchProgress.Failed(err))
         return@flow
       }
 
-      emit(DeepResearchProgress.SynthesizingReport(verifiedSources.size))
+      updateStage(
+        ResearchStageId.CROSS_VERIFICATION,
+        ResearchStageStatus.COMPLETED,
+        "${verifiedSources.size} unique HTTPS sources verified",
+      )
+      emit(DeepResearchProgress.StageUpdate(buildSnapshot("Cross-verified ${verifiedSources.size} unique sources…")))
 
-      val synthesis = synthesizeWithModel(question, queries, verifiedSources, model, settings)
+      // Stage 6: Analysis (strictly structured synthesis — never prints internal chain-of-thought)
+      coroutineContext.ensureActive()
+      updateStage(ResearchStageId.ANALYSIS, ResearchStageStatus.ACTIVE, "Synthesizing grounded evidence")
+      emit(DeepResearchProgress.SynthesizingReport(verifiedSources.size))
+      emit(DeepResearchProgress.StageUpdate(buildSnapshot("Synthesizing evidence & reconciling conflicts…")))
+
+      val synthesis = synthesizeWithModel(question, plannedQueries, verifiedSources, model, settings)
+      updateStage(ResearchStageId.ANALYSIS, ResearchStageStatus.COMPLETED, "Analysis ready")
+
+      // Stage 7: Structured Final Report
+      coroutineContext.ensureActive()
+      updateStage(ResearchStageId.FINAL_REPORT, ResearchStageStatus.ACTIVE, "Formatting cited report")
       val report =
         ResearchReport(
           query = question,
@@ -134,7 +253,7 @@ class DeepResearchEngine @Inject constructor(
             )
           },
           methodology = synthesis.methodology.ifBlank {
-            "Executed ${queries.size} live search queries, removed ${verifiedBundle.duplicatesRemoved} duplicate entries, verified HTTPS links, and compared claims across ${verifiedSources.size} distinct sources."
+            "Executed ${plannedQueries.size} live search queries, removed ${verifiedBundle.duplicatesRemoved} duplicate entries, verified HTTPS links, and compared claims across ${verifiedSources.size} distinct sources."
           },
           keyFindings = synthesis.keyFindings.ifEmpty {
             verifiedSources.take(4).map { "[${it.publisher}] ${it.snippet.take(180)}" }
@@ -153,10 +272,25 @@ class DeepResearchEngine @Inject constructor(
           generatedAtMs = System.currentTimeMillis(),
         )
 
+      updateStage(ResearchStageId.FINAL_REPORT, ResearchStageStatus.COMPLETED, "${verifiedSources.size} citations attached")
+      emit(DeepResearchProgress.StageUpdate(buildSnapshot("Research complete", isActive = false)))
       emit(DeepResearchProgress.Completed(report))
     } catch (e: CancellationException) {
+      ResearchStageId.entries.forEach { st ->
+        val current = stageMap[st]
+        if (current != null && (current.status == ResearchStageStatus.WAITING || current.status == ResearchStageStatus.ACTIVE)) {
+          stageMap[st] = current.copy(status = ResearchStageStatus.CANCELLED)
+        }
+      }
       throw e
     } catch (e: Exception) {
+      ResearchStageId.entries.forEach { st ->
+        val current = stageMap[st]
+        if (current != null && current.status == ResearchStageStatus.ACTIVE) {
+          stageMap[st] = current.copy(status = ResearchStageStatus.FAILED, detail = e.localizedMessage ?: "Error")
+        }
+      }
+      emit(DeepResearchProgress.StageUpdate(buildSnapshot("Research interrupted", isActive = false)))
       emit(DeepResearchProgress.Failed(e.localizedMessage ?: "Deep research encountered an error."))
     }
   }
@@ -209,7 +343,7 @@ class DeepResearchEngine @Inject constructor(
       Verified retrieved sources:
       $sourceDigest
 
-      Return ONLY valid JSON matching this schema:
+      Return ONLY valid JSON matching this schema (do not include chain-of-thought or <think> tags):
       {
         "executiveSummary": "...",
         "objectives": ["..."],
@@ -228,7 +362,7 @@ class DeepResearchEngine @Inject constructor(
         .streamChat(
           AiChatRequest(
             model = model,
-            systemPrompt = "You are a rigorous Research Synthesis Engine. Output valid JSON strictly grounded in provided sources.",
+            systemPrompt = "You are a rigorous Research Synthesis Engine. Output clean valid JSON strictly grounded in provided sources. Never output internal reasoning tags.",
             turns = listOf(AiTurn(isUser = true, text = prompt)),
             settings = settings,
             temperature = 0.25,
@@ -239,9 +373,13 @@ class DeepResearchEngine @Inject constructor(
         }
     }
 
-    val rawText = rawBuilder.toString().trim()
+    val cleanedRaw =
+      rawBuilder
+        .toString()
+        .replace(Regex("<think>[\\s\\S]*?</think>"), "")
+        .trim()
     val jsonSlice =
-      rawText
+      cleanedRaw
         .removePrefix("```json")
         .removePrefix("```")
         .removeSuffix("```")
@@ -254,10 +392,10 @@ class DeepResearchEngine @Inject constructor(
 
     return runCatching { json.decodeFromString<LlmResearchSynthesis>(jsonSlice) }
       .getOrElse {
-        if (rawText.length > 80) {
+        if (cleanedRaw.length > 80) {
           LlmResearchSynthesis(
-            executiveSummary = rawText.take(450),
-            detailedAnalysis = rawText,
+            executiveSummary = cleanedRaw.take(450),
+            detailedAnalysis = cleanedRaw,
             conclusion = "Synthesized from ${sources.size} verified web sources.",
           )
         } else {

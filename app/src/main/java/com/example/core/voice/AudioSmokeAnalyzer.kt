@@ -123,6 +123,28 @@ class AudioSmokeAnalyzer @Inject constructor(
     return true
   }
 
+  fun publishExternalRms(rmsNormalized: Float) {
+    if (isCapturingFlag.get()) return
+    val clamped = rmsNormalized.coerceIn(0f, 1f)
+    if (clamped < 0.01f) {
+      _metrics.value = VoiceAudioMetrics.SILENT
+    } else {
+      _metrics.value =
+        VoiceAudioMetrics(
+          rmsNormalized = clamped,
+          peakNormalized = (clamped * 1.15f).coerceIn(0f, 1f),
+          shortTimeEnergy = clamped * clamped,
+          isVoiceActive = clamped > 0.08f,
+          estimatedPitchHz = 0f,
+          pitchConfidence = 0f,
+          lowBandEnergy = clamped * 0.85f,
+          midBandEnergy = clamped,
+          highBandEnergy = clamped * 0.65f,
+          timestampMs = System.currentTimeMillis(),
+        )
+    }
+  }
+
   fun stopCapture() {
     isCapturingFlag.set(false)
     captureJob?.cancel()

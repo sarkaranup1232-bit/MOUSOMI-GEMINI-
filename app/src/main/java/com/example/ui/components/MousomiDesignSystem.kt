@@ -6,6 +6,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.SweepGradient
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -31,6 +32,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
@@ -78,6 +80,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -96,10 +100,12 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
+import com.example.core.screen.AttachedVisualItem
 import com.example.domain.model.ActiveEditImageTarget
 import com.example.domain.model.AgentStepPlan
 import com.example.domain.model.AgentStepStatus
 import com.example.domain.model.NeonComposerState
+import com.example.domain.model.OperatingMode
 import com.example.ui.model.AttachmentPreview
 import com.example.ui.model.InputMode
 import com.example.ui.theme.ElectricBlue
@@ -326,6 +332,9 @@ fun NeonChatComposer(
   isGenerating: Boolean,
   isEditingMessage: Boolean,
   showDragHandle: Boolean = false,
+  operatingMode: OperatingMode = OperatingMode.NORMAL_CHAT,
+  onSelectOperatingMode: (OperatingMode) -> Unit = {},
+  onOpenImageStudio: () -> Unit = {},
   onSelectMode: (InputMode) -> Unit,
   onInputChanged: (String) -> Unit,
   onOpenAttachments: () -> Unit,
@@ -339,6 +348,9 @@ fun NeonChatComposer(
   onStopGeneration: () -> Unit,
   onContextualAction: (String) -> Unit,
   modifier: Modifier = Modifier,
+  attachedVisualsByUri: Map<String, AttachedVisualItem> = emptyMap(),
+  onEditImagesClick: (() -> Unit)? = null,
+  composerFocusRequester: FocusRequester? = null,
 ) {
   val colors = LocalMousomiColors.current
   val onBg = MaterialTheme.colorScheme.onBackground
@@ -353,44 +365,58 @@ fun NeonChatComposer(
       else -> NeonComposerState.IDLE
     }
 
-  val infiniteTransition = rememberInfiniteTransition(label = "neon_composer_border")
-  val rotationDeg by
-    infiniteTransition.animateFloat(
-      initialValue = 0f,
-      targetValue = 360f,
-      animationSpec =
-        infiniteRepeatable(
-          animation =
-            tween(
-              durationMillis =
-                when (effectiveState) {
-                  NeonComposerState.AI_THINKING,
-                  NeonComposerState.IMAGE_GENERATING,
-                  NeonComposerState.VOICE_ACTIVE -> 1900
-                  NeonComposerState.TYPING,
-                  NeonComposerState.AI_SPEAKING,
-                  NeonComposerState.FOCUSED -> 3100
-                  NeonComposerState.COMPLETED -> 2400
-                  else -> 5200
-                },
-              easing = LinearEasing,
+  // Strictly animate bright sweeping neon border ONLY during active AI/Voice/Image execution
+  val isVibrantExecutionActive =
+    effectiveState in
+      setOf(
+        NeonComposerState.AI_THINKING,
+        NeonComposerState.IMAGE_GENERATING,
+        NeonComposerState.VOICE_ACTIVE,
+        NeonComposerState.AI_SPEAKING,
+        NeonComposerState.ERROR,
+      )
+
+  val shouldSpinNeon = !reducedMotion
+  val rotationDeg =
+    if (shouldSpinNeon) {
+      val infiniteTransition = rememberInfiniteTransition(label = "neon_composer_border")
+      val animated by
+        infiniteTransition.animateFloat(
+          initialValue = 0f,
+          targetValue = 360f,
+          animationSpec =
+            infiniteRepeatable(
+              animation =
+                tween(
+                  durationMillis =
+                    when (effectiveState) {
+                      NeonComposerState.AI_THINKING,
+                      NeonComposerState.IMAGE_GENERATING,
+                      NeonComposerState.VOICE_ACTIVE,
+                      NeonComposerState.ERROR -> 1850
+                      NeonComposerState.AI_SPEAKING -> 2400
+                      NeonComposerState.FOCUSED,
+                      NeonComposerState.TYPING,
+                      NeonComposerState.COMPLETED -> 3200
+                      NeonComposerState.IDLE -> 4200
+                    },
+                  easing = LinearEasing,
+                ),
+              repeatMode = RepeatMode.Restart,
             ),
-          repeatMode = RepeatMode.Restart,
-        ),
-      label = "neon_rotation",
-    )
+          label = "neon_rotation",
+        )
+      animated
+    } else {
+      28f
+    }
 
   val targetAlpha =
-    when (effectiveState) {
-      NeonComposerState.IDLE -> 0.86f
-      NeonComposerState.FOCUSED -> 1.0f
-      NeonComposerState.TYPING -> 0.96f
-      NeonComposerState.AI_THINKING,
-      NeonComposerState.IMAGE_GENERATING,
-      NeonComposerState.VOICE_ACTIVE,
-      NeonComposerState.AI_SPEAKING -> 1.0f
-      NeonComposerState.ERROR -> 1.0f
-      NeonComposerState.COMPLETED -> 0.95f
+    when {
+      isVibrantExecutionActive -> 1.0f
+      effectiveState == NeonComposerState.COMPLETED -> 0.88f
+      isFocused || effectiveState == NeonComposerState.TYPING -> 0.85f
+      else -> 0.68f
     } * glowIntensity.coerceIn(0.45f, 1.0f)
 
   val animatedGlowAlpha by animateFloatAsState(
@@ -401,20 +427,24 @@ fun NeonChatComposer(
 
   val borderStrokeDp by animateDpAsState(
     targetValue =
-      if (isFocused || effectiveState != NeonComposerState.IDLE) MousomiDesignTokens.ComposerFocusedBorderWidth
-      else MousomiDesignTokens.ComposerIdleBorderWidth,
+      when {
+        isVibrantExecutionActive -> MousomiDesignTokens.ComposerFocusedBorderWidth
+        isFocused || effectiveState != NeonComposerState.IDLE -> 2.3.dp
+        else -> MousomiDesignTokens.ComposerIdleBorderWidth
+      },
     animationSpec = tween(200),
     label = "composer_border_width",
   )
 
-  val mergedBottomInsets = WindowInsets.navigationBars.union(WindowInsets.ime)
+  val mergedBottomInsets =
+    WindowInsets.navigationBars.union(WindowInsets.displayCutout).union(WindowInsets.ime)
 
   Column(
     modifier =
       modifier
         .fillMaxWidth()
         .windowInsetsPadding(mergedBottomInsets)
-        .padding(bottom = 8.dp),
+        .padding(bottom = 12.dp),
     horizontalAlignment = Alignment.CenterHorizontally,
   ) {
     if (showDragHandle) {
@@ -489,73 +519,148 @@ fun NeonChatComposer(
       }
     }
 
-    if (pendingAttachments.isNotEmpty()) {
-      Row(
+    // All 5 Operating Modes Pill Strip + Quick Create Image & Image Studio Chips (horizontally scrollable without clipping)
+    Row(
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .horizontalScroll(rememberScrollState())
+          .padding(vertical = 4.dp),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Spacer(modifier = Modifier.width(6.dp))
+      ComposerModePill(
+        label = stringResource(R.string.mode_normal),
+        selected = operatingMode == OperatingMode.NORMAL_CHAT && inputMode != InputMode.TASK,
+        onClick = {
+          onSelectMode(InputMode.CHAT)
+          onSelectOperatingMode(OperatingMode.NORMAL_CHAT)
+        },
+        testTag = "mode_normal_button",
+      )
+      ComposerModePill(
+        label = stringResource(R.string.mode_analysis),
+        selected = operatingMode == OperatingMode.ANALYSIS_THINK,
+        onClick = {
+          onSelectMode(InputMode.CHAT)
+          onSelectOperatingMode(OperatingMode.ANALYSIS_THINK)
+        },
+        testTag = "mode_analysis_button",
+      )
+      ComposerModePill(
+        label = stringResource(R.string.mode_ai_search),
+        selected = operatingMode == OperatingMode.GOOGLE_AI_SEARCH,
+        onClick = {
+          onSelectMode(InputMode.CHAT)
+          onSelectOperatingMode(OperatingMode.GOOGLE_AI_SEARCH)
+        },
+        testTag = "mode_search_button",
+      )
+      ComposerModePill(
+        label = stringResource(R.string.mode_deep_research),
+        selected = operatingMode == OperatingMode.DEEP_RESEARCH,
+        onClick = {
+          onSelectMode(InputMode.CHAT)
+          onSelectOperatingMode(OperatingMode.DEEP_RESEARCH)
+        },
+        testTag = "mode_deep_research_button",
+      )
+      ComposerModePill(
+        label = stringResource(R.string.mode_task_mode),
+        selected = operatingMode == OperatingMode.TASK_MODE || inputMode == InputMode.TASK,
+        onClick = {
+          onSelectMode(InputMode.TASK)
+          onSelectOperatingMode(OperatingMode.TASK_MODE)
+        },
+        testTag = "mode_task_button",
+      )
+
+      // Restored Create Image chip & Image Studio entry point right on composer strip
+      Surface(
+        onClick = { onContextualAction("create_image") },
+        shape = CircleShape,
+        color = colors.activeChipContainer,
+        border = BorderStroke(1.dp, NeonMagenta.copy(alpha = 0.45f)),
+        modifier = Modifier.testTag("context_chip_create_image"),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.AutoAwesome,
+            contentDescription = null,
+            tint = NeonMagenta,
+            modifier = Modifier.size(14.dp),
+          )
+          Text(
+            text = stringResource(R.string.create_image_chip),
+            color = onBg,
+            style = MaterialTheme.typography.labelLarge,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            softWrap = false,
+          )
+        }
+      }
+
+      Surface(
+        onClick = onOpenImageStudio,
+        shape = CircleShape,
+        color = colors.activeChipContainer,
+        border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.45f)),
+        modifier = Modifier.testTag("context_chip_image_studio"),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.AutoFixHigh,
+            contentDescription = null,
+            tint = NeonCyan,
+            modifier = Modifier.size(14.dp),
+          )
+          Text(
+            text = stringResource(R.string.image_studio_title),
+            color = onBg,
+            style = MaterialTheme.typography.labelLarge,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            softWrap = false,
+          )
+        }
+      }
+      Spacer(modifier = Modifier.width(6.dp))
+    }
+
+    val hasEditableVisualAttachment =
+      pendingAttachments.any {
+        it is AttachmentPreview.PickedPhotoUri || it is AttachmentPreview.SampleInlineArtwork
+      }
+    if (hasEditableVisualAttachment && onEditImagesClick != null) {
+      Box(
         modifier =
           Modifier
             .fillMaxWidth()
-            .widthIn(max = 680.dp)
-            .horizontalScroll(rememberScrollState())
+            .widthIn(max = 660.dp)
             .padding(horizontal = 16.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        contentAlignment = Alignment.CenterStart,
       ) {
-        pendingAttachments.forEachIndexed { idx, attachment ->
-          Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = colors.activeChipContainer,
-          ) {
-            Row(
-              modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-              Text(
-                text =
-                  when (attachment) {
-                    AttachmentPreview.SampleInlineArtwork -> "Sample Art"
-                    is AttachmentPreview.PickedPhotoUri -> "Photo ${idx + 1}"
-                    is AttachmentPreview.MediaFile -> attachment.item.displayName.take(18)
-                  },
-                color = onBg,
-                style = MaterialTheme.typography.labelLarge,
-              )
-              Icon(
-                imageVector = Icons.Rounded.Close,
-                contentDescription = "Remove attachment",
-                tint = colors.mutedText,
-                modifier =
-                  Modifier
-                    .size(18.dp)
-                    .clip(CircleShape)
-                    .clickable { onRemoveAttachment(attachment) },
-              )
-            }
-          }
-        }
+        FloatingEditImagesPill(
+          visible = true,
+          onClick = onEditImagesClick,
+        )
       }
     }
 
-    Row(
-      modifier = Modifier.padding(top = 2.dp, bottom = 6.dp),
-      horizontalArrangement = Arrangement.spacedBy(10.dp),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      ComposerModePill(
-        label = stringResource(R.string.mode_chat),
-        selected = inputMode == InputMode.CHAT,
-        onClick = { onSelectMode(InputMode.CHAT) },
-        testTag = "mode_chat_button",
-      )
-      ComposerModePill(
-        label = stringResource(R.string.mode_task),
-        selected = inputMode == InputMode.TASK,
-        onClick = { onSelectMode(InputMode.TASK) },
-        testTag = "mode_task_button",
-      )
-    }
-
     // Signature Concentric Multicolor Neon Capsule with reserved outer glow bleed padding
-    val glowBleedDp = 6.dp
+    val glowBleedDp = 7.dp
     val outerCorner = MousomiDesignTokens.ComposerCornerRadius
     val innerCorner = (outerCorner - borderStrokeDp).coerceAtLeast(20.dp)
     val borderColors = remember(effectiveState) { MousomiDesignTokens.composerBorderColors(effectiveState) }
@@ -577,7 +682,7 @@ fun NeonChatComposer(
         Modifier
           .fillMaxWidth()
           .widthIn(max = 660.dp)
-          .padding(horizontal = 8.dp)
+          .padding(horizontal = 10.dp)
           .testTag("neon_chat_composer"),
     ) {
       // Aspect-corrected continuous vivid neon border + soft unclipped glow around all 4 rounded corners
@@ -595,7 +700,7 @@ fun NeonChatComposer(
         val cx = w / 2f
         val cy = h / 2f
         val outerCornerPx = outerCorner.toPx()
-        val angle = if (reducedMotion) 25f else rotationDeg
+        val angle = if (reducedMotion) 28f else rotationDeg
 
         val drawW = (w - glowBleedPx * 2f).coerceAtLeast(4f)
         val drawH = (h - glowBleedPx * 2f).coerceAtLeast(4f)
@@ -615,15 +720,18 @@ fun NeonChatComposer(
         drawIntoCanvas { canvas ->
           val nc = canvas.nativeCanvas
 
-          // Layer 1: Smooth outer neon bloom inside reserved glowBleedPx (never clipped at corners or edges)
-          paint.strokeWidth = strokePx * 2.4f
-          paint.alpha = (animatedGlowAlpha * 0.42f * 255f).toInt().coerceIn(8, 255)
-          paint.maskFilter = BlurMaskFilter(glowBleedPx * 0.95f, BlurMaskFilter.Blur.NORMAL)
+          // Layer 1: Smooth outer neon bloom across IDLE, FOCUSED, and active states
+          paint.strokeWidth = strokePx * (if (isVibrantExecutionActive) 2.5f else 2.0f)
+          paint.alpha =
+            (animatedGlowAlpha * (if (isVibrantExecutionActive) 0.45f else 0.34f) * 255f)
+              .toInt()
+              .coerceIn(14, 255)
+          paint.maskFilter = BlurMaskFilter(glowBleedPx * 0.92f, BlurMaskFilter.Blur.NORMAL)
           nc.drawRoundRect(rectF, haloCorner, haloCorner, paint)
 
-          // Layer 2: Crisp luminous concentric border aligned to the inner pill perimeter
+          // Layer 2: Crisp luminous concentric border aligned cleanly to all 4 rounded corners
           paint.strokeWidth = strokePx
-          paint.alpha = (animatedGlowAlpha * 255f).toInt().coerceIn(48, 255)
+          paint.alpha = (animatedGlowAlpha * 255f).toInt().coerceIn(64, 255)
           paint.maskFilter = null
           nc.drawRoundRect(rectF, haloCorner, haloCorner, paint)
         }
@@ -636,70 +744,85 @@ fun NeonChatComposer(
           else colors.inputPillContainer.copy(alpha = 0.98f),
         modifier = Modifier.fillMaxWidth().padding(glowBleedDp + borderStrokeDp),
       ) {
-        Row(
-          modifier =
-            Modifier
-              .fillMaxWidth()
-              .padding(start = 8.dp, end = 8.dp, top = 5.dp, bottom = 5.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          IconButton(
-            onClick = onOpenAttachments,
-            modifier = Modifier.minimumInteractiveComponentSize().testTag("attachment_button"),
-          ) {
-            Box(contentAlignment = Alignment.Center) {
-              GeminiFourPointSparkle(
-                size = 21.dp,
-                animated =
-                  effectiveState == NeonComposerState.AI_THINKING ||
-                    effectiveState == NeonComposerState.IMAGE_GENERATING,
-              )
-            }
-          }
-
-          Box(
-            modifier = Modifier.weight(1f).padding(horizontal = 6.dp, vertical = 10.dp),
-            contentAlignment = Alignment.CenterStart,
-          ) {
-            if (inputText.isEmpty()) {
-              Text(
-                text =
-                  when {
-                    activeEditTarget != null -> "Describe edit for image v${activeEditTarget.versionNumber}…"
-                    inputMode == InputMode.TASK -> stringResource(R.string.input_placeholder_task)
-                    else -> stringResource(R.string.input_placeholder_chat)
-                  },
-                color = colors.mutedText,
-                style = MaterialTheme.typography.bodyLarge,
-                fontSize = 16.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-              )
-            }
-
-            BasicTextField(
-              value = inputText,
-              onValueChange = onInputChanged,
-              textStyle =
-                MaterialTheme.typography.bodyLarge.copy(
-                  color = onBg,
-                  fontSize = 16.sp,
-                ),
-              cursorBrush = SolidColor(NeonCyan),
-              maxLines = 4,
-              keyboardOptions =
-                KeyboardOptions(
-                  capitalization = KeyboardCapitalization.Sentences,
-                  imeAction = ImeAction.Send,
-                ),
-              keyboardActions = KeyboardActions(onSend = { if (!isGenerating) onSendClick() }),
-              modifier =
-                Modifier
-                  .fillMaxWidth()
-                  .onFocusChanged { isFocused = it.isFocused }
-                  .testTag("chat_input_field"),
+        Column(modifier = Modifier.fillMaxWidth().animateContentSize()) {
+          if (pendingAttachments.isNotEmpty()) {
+            ChatComposerAttachmentView(
+              pendingAttachments = pendingAttachments,
+              attachedVisualsByUri = attachedVisualsByUri,
+              onRemoveAttachment = onRemoveAttachment,
+              onTapImageAttachment = { onEditImagesClick?.invoke() },
             )
           }
+
+          Row(
+            modifier =
+              Modifier
+                .fillMaxWidth()
+                .padding(start = 8.dp, end = 8.dp, top = 5.dp, bottom = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            IconButton(
+              onClick = onOpenAttachments,
+              modifier = Modifier.minimumInteractiveComponentSize().testTag("attachment_button"),
+            ) {
+              Box(contentAlignment = Alignment.Center) {
+                GeminiFourPointSparkle(
+                  size = 21.dp,
+                  animated =
+                    effectiveState == NeonComposerState.AI_THINKING ||
+                      effectiveState == NeonComposerState.IMAGE_GENERATING,
+                )
+              }
+            }
+
+            Box(
+              modifier = Modifier.weight(1f).padding(horizontal = 6.dp, vertical = 10.dp),
+              contentAlignment = Alignment.CenterStart,
+            ) {
+              if (inputText.isEmpty()) {
+                Text(
+                  text =
+                    when {
+                      activeEditTarget != null -> "Describe edit for image v${activeEditTarget.versionNumber}…"
+                      operatingMode == OperatingMode.TASK_MODE || inputMode == InputMode.TASK ->
+                        stringResource(R.string.input_placeholder_task)
+                      operatingMode == OperatingMode.ANALYSIS_THINK -> stringResource(R.string.input_placeholder_analysis)
+                      operatingMode == OperatingMode.GOOGLE_AI_SEARCH -> stringResource(R.string.input_placeholder_search)
+                      operatingMode == OperatingMode.DEEP_RESEARCH -> stringResource(R.string.input_placeholder_research)
+                      else -> stringResource(R.string.input_placeholder_chat)
+                    },
+                  color = colors.mutedText,
+                  style = MaterialTheme.typography.bodyLarge,
+                  fontSize = 16.sp,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
+
+              BasicTextField(
+                value = inputText,
+                onValueChange = onInputChanged,
+                textStyle =
+                  MaterialTheme.typography.bodyLarge.copy(
+                    color = onBg,
+                    fontSize = 16.sp,
+                  ),
+                cursorBrush = SolidColor(NeonCyan),
+                maxLines = 4,
+                keyboardOptions =
+                  KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Sentences,
+                    imeAction = ImeAction.Send,
+                  ),
+                keyboardActions = KeyboardActions(onSend = { if (!isGenerating) onSendClick() }),
+                modifier =
+                  Modifier
+                    .fillMaxWidth()
+                    .let { if (composerFocusRequester != null) it.focusRequester(composerFocusRequester) else it }
+                    .onFocusChanged { isFocused = it.isFocused }
+                    .testTag("chat_input_field"),
+              )
+            }
 
           IconButton(
             onClick = onVoiceClick,
@@ -763,17 +886,18 @@ fun NeonChatComposer(
                     )
                   }
                 }
-              else ->
-                Surface(
-                  onClick = onLiveClick,
-                  shape = CircleShape,
-                  color = ElectricBlue,
-                  modifier = Modifier.size(44.dp).testTag("gemini_live_button"),
-                ) {
-                  Box(contentAlignment = Alignment.Center) {
-                    GeminiLiveWaveformIcon(tint = Color.White, size = 21.dp)
+                else ->
+                  Surface(
+                    onClick = onLiveClick,
+                    shape = CircleShape,
+                    color = ElectricBlue,
+                    modifier = Modifier.size(44.dp).testTag("gemini_live_button"),
+                  ) {
+                    Box(contentAlignment = Alignment.Center) {
+                      GeminiLiveWaveformIcon(tint = Color.White, size = 21.dp)
+                    }
                   }
-                }
+              }
             }
           }
         }
@@ -798,7 +922,7 @@ private fun ComposerModePill(
         .clip(CircleShape)
         .background(if (selected) colors.activeChipContainer else Color.Transparent)
         .clickable(onClick = onClick)
-        .padding(horizontal = 18.dp, vertical = 5.dp)
+        .padding(horizontal = 14.dp, vertical = 7.dp)
         .testTag(testTag),
     contentAlignment = Alignment.Center,
   ) {
@@ -808,6 +932,8 @@ private fun ComposerModePill(
       style = MaterialTheme.typography.labelLarge,
       fontSize = 14.sp,
       fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+      maxLines = 1,
+      softWrap = false,
     )
   }
 }

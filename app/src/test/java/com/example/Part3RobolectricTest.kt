@@ -98,10 +98,10 @@ class Part3RobolectricTest {
 
     // Strictly 1 checkmark (on selected model) and NO Image Generation model
     composeRule.onAllNodesWithContentDescription("Selected").assertCountEquals(1)
-    assertEquals(4, AiModelOption.entries.size)
+    assertEquals(7, AiModelOption.entries.size)
 
-    composeRule.onNodeWithTag("model_option_GROQ_REASONING").performScrollTo().performClick()
-    assertEquals(AiModelOption.GROQ_REASONING, selected)
+    composeRule.onNodeWithTag("model_option_GROQ_HIGH_SPEED_REASONING").performScrollTo().performClick()
+    assertEquals(AiModelOption.GROQ_HIGH_SPEED_REASONING, selected)
   }
 
   @Test

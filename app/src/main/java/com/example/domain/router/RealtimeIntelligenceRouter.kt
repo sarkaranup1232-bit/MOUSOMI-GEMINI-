@@ -195,6 +195,7 @@ class RealtimeIntelligenceRouter @Inject constructor(
       listOf(
         "hi", "hello", "hey", "good morning", "good evening", "good night",
         "how are you", "thanks", "thank you", "হ্যালো", "হাই", "ধন্যবাদ", "नमस्ते",
+        "nomoshkar", "kemon acho",
       )
 
     private val imageGenerationPhrases =
@@ -203,7 +204,7 @@ class RealtimeIntelligenceRouter @Inject constructor(
         "make an image", "draw an image", "draw a picture", "generate a picture",
         "create a picture", "generate artwork", "create artwork", "generate a photo",
         "create a logo", "generate a logo", "design a poster", "generate wallpaper",
-        "create wallpaper", "ছবি তৈরি কর", "ছবি বানাও", "चित्र बनाओ",
+        "create wallpaper", "chobi banao", "chobi toiri", "ছবি তৈরি কর", "ছবি বানাও", "चित्र बनाओ",
       )
 
     private val imageEditKeywords =
@@ -216,16 +217,17 @@ class RealtimeIntelligenceRouter @Inject constructor(
 
     private val deepResearchPhrases =
       listOf(
-        "deep research", "research in detail", "comprehensive report", "in-depth research",
+        "deep research", "deep reasearch", "research in detail", "comprehensive report", "in-depth research",
         "in detail research", "detailed research", "literature review", "deep dive",
-        "research report", "বিস্তারিত গবেষণা", "গভীর গবেষণা",
+        "research report", "বিস্তারিত গবেষণা", "গভীর গবেষণা", "gobhir gobeshona",
       )
 
     private val liveSearchKeywords =
       listOf(
         "today's", "today ", "latest ", "current ", "news", "breaking", "recent ",
-        "this week", "this month", "search ", "look up", "find today", "up to date",
-        "live price", "weather", "release date", "2026", "আজকের", "সর্বশেষ", "খবর", "ताज़ा", "समाचार",
+        "this week", "this month", "search ", "serch ", "look up", "find today", "up to date",
+        "live price", "weather", "release date", "2026", "আজকের", "সর্বশেষ", "খবর", "khobor",
+        "ताज़ा", "समाचार",
       )
 
     private val chartKeywords =
@@ -257,7 +259,7 @@ class RealtimeIntelligenceRouter @Inject constructor(
       listOf(
         "generate music", "generate a song", "create music", "create a song",
         "compose music", "compose a song", "make music", "generate a beat",
-        "create a beat", "compose a beat", "ai music", "lyria",
+        "create a beat", "compose a beat", "ai music", "lyria", "gaan banao", "গান বানাও",
       )
 
     private val mapsKeywords =
@@ -265,7 +267,7 @@ class RealtimeIntelligenceRouter @Inject constructor(
         "nearby ", "near me", "directions to", "route to", "google maps",
         "restaurants near", "restaurants in ", "hotels near", "hotels in ",
         "cafes near", "hospital near", "places to visit in", "how far is",
-        "distance from ", "map of ",
+        "distance from ", "map of ", "kothay ache", "কাছাকাছি ",
       )
   }
 }

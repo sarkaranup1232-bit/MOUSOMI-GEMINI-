@@ -4,6 +4,8 @@ import com.example.ai.firebase.FirebaseAiLogicService
 import com.example.domain.model.AiModelSpec
 import com.example.domain.model.AppSettings
 import com.example.domain.model.ConnectionMode
+import com.example.domain.model.ModelSubstitutionPrompt
+import com.example.domain.model.OperatingMode
 import com.example.domain.model.ProviderType
 import com.example.domain.model.RoutingDecision
 import com.example.domain.model.TaskCategory
@@ -30,6 +32,106 @@ class DefaultModelRouter @Inject constructor(
       reasoningKeywords.any { it in q } || q.length > 260 -> TaskCategory.COMPLEX_REASONING
       knowledgeKeywords.any { it in q } -> TaskCategory.GENERAL_KNOWLEDGE
       else -> TaskCategory.CASUAL_CONVERSATION
+    }
+  }
+
+  /**
+   * Checks if the user's explicitly selected model lacks a requested capability or provider credentials,
+   * returning a substitution confirmation prompt instead of silently swapping the model when interactive
+   * user consent is desired. Returns null if the model is compatible or if Mousomi Auto is active.
+   */
+  fun checkSubstitutionNeeded(
+    prompt: String,
+    hasImages: Boolean,
+    operatingMode: OperatingMode,
+    requestedSlotOrModelId: String?,
+    settings: AppSettings,
+  ): ModelSubstitutionPrompt? {
+    val req = requestedSlotOrModelId?.trim().orEmpty()
+    if (req.isEmpty() || req == AUTO_MODEL_ID || req == VerifiedModelCatalog.MOUSOMI_AUTO_SLOT_ID || req == "MOUSOMI_AUTO") {
+      return null
+    }
+    val explicitSpec = resolveExplicitSpec(req, settings) ?: return null
+    val useProxy = settings.connectionMode == ConnectionMode.BACKEND_PROXY
+    val hasFirebaseAi = firebaseAiLogicService?.isAvailable() == true
+    val hasGemini = useProxy || settings.geminiApiKey.isNotBlank() || hasFirebaseAi
+    val hasGroq = useProxy || settings.groqApiKey.isNotBlank()
+
+    val hydrogenSpec = VerifiedModelCatalog.createHydrogenSpec(settings.hydrogenBackingModelId)
+    val groqSpec = VerifiedModelCatalog.createGroqReasoningSpec(settings.groqReasoningModelId)
+
+    if (hasImages && !explicitSpec.capabilities.supportsVision && hasGemini) {
+      return ModelSubstitutionPrompt(
+        title = "Vision Not Supported on ${explicitSpec.displayName}",
+        message =
+          "${explicitSpec.displayName} is text-only and cannot inspect your attached image(s). Switch to ${hydrogenSpec.displayName} for this request?",
+        requestedModelId = explicitSpec.id,
+        suggestedModelId = hydrogenSpec.selectorSlotId,
+        suggestedModelDisplayName = hydrogenSpec.displayName,
+        pendingPrompt = prompt,
+        pendingMode = operatingMode,
+      )
+    }
+
+    if ((operatingMode == OperatingMode.GOOGLE_AI_SEARCH || operatingMode == OperatingMode.DEEP_RESEARCH) &&
+      !explicitSpec.capabilities.supportsGoogleSearchGrounding &&
+      hasGemini
+    ) {
+      return ModelSubstitutionPrompt(
+        title = "Search Grounding Unavailable on ${explicitSpec.displayName}",
+        message =
+          "${operatingMode.label} needs grounded search synthesis. Allow switching to ${hydrogenSpec.displayName}?",
+        requestedModelId = explicitSpec.id,
+        suggestedModelId = hydrogenSpec.selectorSlotId,
+        suggestedModelDisplayName = hydrogenSpec.displayName,
+        pendingPrompt = prompt,
+        pendingMode = operatingMode,
+      )
+    }
+
+    if (explicitSpec.provider == ProviderType.GROQ && !hasGroq && hasGemini) {
+      return ModelSubstitutionPrompt(
+        title = "Groq Not Configured",
+        message =
+          "Groq API key is missing for ${explicitSpec.displayName}. Switch to ${hydrogenSpec.displayName} instead?",
+        requestedModelId = explicitSpec.id,
+        suggestedModelId = hydrogenSpec.selectorSlotId,
+        suggestedModelDisplayName = hydrogenSpec.displayName,
+        pendingPrompt = prompt,
+        pendingMode = operatingMode,
+      )
+    }
+
+    if (explicitSpec.provider == ProviderType.GEMINI && !hasGemini && hasGroq && !hasImages) {
+      return ModelSubstitutionPrompt(
+        title = "Gemini Unavailable",
+        message =
+          "Gemini connection is currently unavailable for ${explicitSpec.displayName}. Use ${groqSpec.displayName} instead?",
+        requestedModelId = explicitSpec.id,
+        suggestedModelId = groqSpec.selectorSlotId,
+        suggestedModelDisplayName = groqSpec.displayName,
+        pendingPrompt = prompt,
+        pendingMode = operatingMode,
+      )
+    }
+
+    return null
+  }
+
+  fun routeWithOperatingMode(
+    prompt: String,
+    hasImages: Boolean,
+    imageCount: Int,
+    requestedModelId: String?,
+    settings: AppSettings,
+    operatingMode: OperatingMode = OperatingMode.NORMAL_CHAT,
+  ): Result<RoutingDecision> {
+    val effectiveSettings =
+      if (settings.operatingModeName == operatingMode.name) settings
+      else settings.copy(operatingModeName = operatingMode.name)
+    val baseResult = route(prompt, hasImages, imageCount, requestedModelId, effectiveSettings)
+    return baseResult.map { decision ->
+      decision.copy(operatingMode = operatingMode)
     }
   }
 
@@ -64,36 +166,30 @@ class DefaultModelRouter @Inject constructor(
     }
 
     val hydrogenSpec = VerifiedModelCatalog.createHydrogenSpec(settings.hydrogenBackingModelId)
+    val imageSpec = VerifiedModelCatalog.createImageStudioSpec(settings.imageModelId)
+    val flashLiteSpec = VerifiedModelCatalog.geminiFlashLite
+    val liveAudioSpec = VerifiedModelCatalog.geminiLiveAudio
     val groqReasoningSpec = VerifiedModelCatalog.createGroqReasoningSpec(settings.groqReasoningModelId)
+    val groqHelperSpec = VerifiedModelCatalog.createGroqHelperGuardSpec(settings.groqHelperGuardModelId)
 
     val req = requestedModelId?.trim().orEmpty()
-    val isHydrogenOrAuto =
+    val isMousomiAuto =
       req.isEmpty() ||
         req == AUTO_MODEL_ID ||
-        req == VerifiedModelCatalog.HYDROGEN_SLOT_ID ||
-        req == "GEMINI_4_HYDROGEN"
+        req == VerifiedModelCatalog.MOUSOMI_AUTO_SLOT_ID ||
+        req == "MOUSOMI_AUTO"
 
-    if (!isHydrogenOrAuto) {
-      val explicitSpec: AiModelSpec? =
-        when (req) {
-          VerifiedModelCatalog.geminiPro.id, "GEMINI_PRO" -> VerifiedModelCatalog.geminiPro
-          VerifiedModelCatalog.geminiFlash.id, "GEMINI_FLASH" -> VerifiedModelCatalog.geminiFlash
-          groqReasoningSpec.id, VerifiedModelCatalog.DEFAULT_GROQ_REASONING_MODEL_ID, "GROQ_REASONING" ->
-            groqReasoningSpec
-          VerifiedModelCatalog.groqLlama70b.id -> VerifiedModelCatalog.groqLlama70b
-          VerifiedModelCatalog.groqLlama8bInstant.id -> VerifiedModelCatalog.groqLlama8bInstant
-          else -> VerifiedModelCatalog.allModels.firstOrNull { it.id == req }
-        }
-
+    if (!isMousomiAuto) {
+      val explicitSpec = resolveExplicitSpec(req, settings)
       if (explicitSpec != null) {
         if (hasImages && !explicitSpec.capabilities.supportsVision) {
           if (hasGemini) {
             return Result.success(
               RoutingDecision(
-                selectedModel = VerifiedModelCatalog.geminiFlash,
+                selectedModel = hydrogenSpec,
                 category = category,
                 reason =
-                  "${explicitSpec.displayName} is text-only; auto-switched to ${VerifiedModelCatalog.geminiFlash.displayName} for verified vision.",
+                  "${explicitSpec.displayName} is text-only; routed to ${hydrogenSpec.displayName} for verified vision.",
                 useProxy = useProxy,
               )
             )
@@ -129,14 +225,13 @@ class DefaultModelRouter @Inject constructor(
           )
         }
 
-        // Graceful provider failover if requested provider lacks credentials but another provider is configured
         if (!hasImages && hasGroq && explicitSpec.provider == ProviderType.GEMINI) {
           return Result.success(
             RoutingDecision(
               selectedModel = groqReasoningSpec,
               category = category,
               reason =
-                "Gemini key missing; gracefully routed to ${groqReasoningSpec.displayName} (${groqReasoningSpec.id}).",
+                "Gemini key missing; routed to ${groqReasoningSpec.displayName} (${groqReasoningSpec.id}).",
               useProxy = useProxy,
             )
           )
@@ -144,10 +239,9 @@ class DefaultModelRouter @Inject constructor(
         if (hasGemini && explicitSpec.provider == ProviderType.GROQ) {
           return Result.success(
             RoutingDecision(
-              selectedModel = VerifiedModelCatalog.geminiFlash,
+              selectedModel = hydrogenSpec,
               category = category,
-              reason =
-                "Groq key missing; gracefully routed to ${VerifiedModelCatalog.geminiFlash.displayName}.",
+              reason = "Groq key missing; routed to ${hydrogenSpec.displayName}.",
               useProxy = useProxy,
             )
           )
@@ -163,40 +257,35 @@ class DefaultModelRouter @Inject constructor(
       }
     }
 
-    // Default: Gemini 4 Hydrogen (or auto-routed Phase 2 compatibility)
+    // Mousomi Auto intelligent routing across the 7-model ecosystem
+    val operatingMode =
+      runCatching { OperatingMode.valueOf(settings.operatingModeName) }
+        .getOrDefault(OperatingMode.NORMAL_CHAT)
+
     val preferredOrder: List<AiModelSpec> =
-      when (category) {
-        TaskCategory.IMAGE_ANALYSIS ->
-          listOf(hydrogenSpec, VerifiedModelCatalog.geminiFlash, VerifiedModelCatalog.geminiPro)
-        TaskCategory.COMPLEX_REASONING,
-        TaskCategory.CODING,
-        TaskCategory.DOCUMENT_ANALYSIS,
-        TaskCategory.DATA_ANALYSIS ->
-          listOf(
-            hydrogenSpec,
-            VerifiedModelCatalog.geminiPro,
-            groqReasoningSpec,
-            VerifiedModelCatalog.geminiFlash,
-          )
-        TaskCategory.RESEARCH_REQUESTS,
-        TaskCategory.GENERAL_KNOWLEDGE ->
-          listOf(
-            hydrogenSpec,
-            VerifiedModelCatalog.geminiFlash,
-            groqReasoningSpec,
-            VerifiedModelCatalog.groqLlama70b,
-          )
-        TaskCategory.CASUAL_CONVERSATION ->
-          if (req == AUTO_MODEL_ID && hasGroq && !hasGemini) {
-            listOf(VerifiedModelCatalog.groqLlama8bInstant, groqReasoningSpec, hydrogenSpec)
+      when {
+        hasImages -> listOf(hydrogenSpec, flashLiteSpec, imageSpec)
+        operatingMode == OperatingMode.DEEP_RESEARCH ||
+          operatingMode == OperatingMode.GOOGLE_AI_SEARCH ->
+          listOf(hydrogenSpec, flashLiteSpec, groqReasoningSpec)
+        operatingMode == OperatingMode.ANALYSIS_THINK ||
+          operatingMode == OperatingMode.TASK_MODE ->
+          listOf(hydrogenSpec, groqReasoningSpec, flashLiteSpec, groqHelperSpec)
+        category == TaskCategory.COMPLEX_REASONING ||
+          category == TaskCategory.CODING ||
+          category == TaskCategory.DOCUMENT_ANALYSIS ||
+          category == TaskCategory.DATA_ANALYSIS ->
+          listOf(hydrogenSpec, groqReasoningSpec, flashLiteSpec, groqHelperSpec)
+        category == TaskCategory.RESEARCH_REQUESTS ||
+          category == TaskCategory.GENERAL_KNOWLEDGE ->
+          listOf(hydrogenSpec, flashLiteSpec, groqReasoningSpec, VerifiedModelCatalog.groqLlama70b)
+        category == TaskCategory.CASUAL_CONVERSATION ->
+          if (hasGroq && !hasGemini) {
+            listOf(groqHelperSpec, groqReasoningSpec, VerifiedModelCatalog.groqLlama8bInstant)
           } else {
-            listOf(
-              hydrogenSpec,
-              VerifiedModelCatalog.geminiFlash,
-              groqReasoningSpec,
-              VerifiedModelCatalog.groqLlama8bInstant,
-            )
+            listOf(flashLiteSpec, hydrogenSpec, groqHelperSpec, groqReasoningSpec)
           }
+        else -> listOf(hydrogenSpec, flashLiteSpec, liveAudioSpec, groqReasoningSpec, groqHelperSpec)
       }
 
     val chosen =
@@ -223,10 +312,37 @@ class DefaultModelRouter @Inject constructor(
       RoutingDecision(
         selectedModel = chosen,
         category = category,
-        reason = "Routed ${category.label} -> ${chosen.displayName} (${chosen.id})",
+        reason = "Mousomi Auto (${category.label}) → ${chosen.displayName} (${chosen.id})",
         useProxy = useProxy,
+        resolvedFromAuto = true,
+        operatingMode = operatingMode,
       )
     )
+  }
+
+  private fun resolveExplicitSpec(req: String, settings: AppSettings): AiModelSpec? {
+    val hydrogenSpec = VerifiedModelCatalog.createHydrogenSpec(settings.hydrogenBackingModelId)
+    val imageSpec = VerifiedModelCatalog.createImageStudioSpec(settings.imageModelId)
+    val groqReasoningSpec = VerifiedModelCatalog.createGroqReasoningSpec(settings.groqReasoningModelId)
+    val groqHelperSpec = VerifiedModelCatalog.createGroqHelperGuardSpec(settings.groqHelperGuardModelId)
+    return when (req) {
+      VerifiedModelCatalog.HYDROGEN_SLOT_ID, "GEMINI_4_HYDROGEN", "GEMINI_PRO", hydrogenSpec.id -> hydrogenSpec
+      VerifiedModelCatalog.IMAGE_STUDIO_SLOT_ID, "GEMINI_IMAGE_STUDIO", imageSpec.id,
+      VerifiedModelCatalog.DEFAULT_IMAGE_MODEL_ID, VerifiedModelCatalog.DEPRECATED_IMAGE_MODEL_ID -> imageSpec
+      VerifiedModelCatalog.FLASH_LITE_SLOT_ID, "GEMINI_FLASH_LITE", "GEMINI_FLASH",
+      VerifiedModelCatalog.DEFAULT_FLASH_LITE_MODEL_ID, VerifiedModelCatalog.LEGACY_HYDROGEN_FALLBACK_ID ->
+        VerifiedModelCatalog.geminiFlashLite
+      VerifiedModelCatalog.LIVE_AUDIO_SLOT_ID, "GEMINI_LIVE_AUDIO", VerifiedModelCatalog.DEFAULT_LIVE_AUDIO_MODEL_ID ->
+        VerifiedModelCatalog.geminiLiveAudio
+      VerifiedModelCatalog.GROQ_REASONING_SLOT_ID, "GROQ_HIGH_SPEED_REASONING", "GROQ_REASONING",
+      groqReasoningSpec.id, VerifiedModelCatalog.DEFAULT_GROQ_REASONING_MODEL_ID -> groqReasoningSpec
+      VerifiedModelCatalog.GROQ_HELPER_GUARD_SLOT_ID, "GROQ_ULTRA_FAST_HELPER_GUARD",
+      groqHelperSpec.id, VerifiedModelCatalog.DEFAULT_GROQ_HELPER_MODEL_ID, VerifiedModelCatalog.GROQ_SAFEGUARD_MODEL_ID ->
+        groqHelperSpec
+      VerifiedModelCatalog.groqLlama70b.id -> VerifiedModelCatalog.groqLlama70b
+      VerifiedModelCatalog.groqLlama8bInstant.id -> VerifiedModelCatalog.groqLlama8bInstant
+      else -> VerifiedModelCatalog.allModels.firstOrNull { it.id == req || it.selectorSlotId == req }
+    }
   }
 
   companion object {

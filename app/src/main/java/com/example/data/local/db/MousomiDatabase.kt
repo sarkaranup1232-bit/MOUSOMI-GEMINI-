@@ -105,8 +105,11 @@ interface ChatDao {
     ReminderEntity::class,
     ManagedTaskEntity::class,
     DeviceActionLogEntity::class,
+    ImageTaskEntity::class,
+    ImageAssetEntity::class,
+    ImageProviderStatusEntity::class,
   ],
-  version = 5,
+  version = 6,
   exportSchema = false,
 )
 abstract class MousomiDatabase : RoomDatabase() {
@@ -115,6 +118,7 @@ abstract class MousomiDatabase : RoomDatabase() {
   abstract fun part4OperationsDao(): Part4OperationsDao
   abstract fun part5Dao(): Part5Dao
   abstract fun addOnDao(): AddOnDao
+  abstract fun imageStudioDao(): ImageStudioDao
 
   companion object {
     val MIGRATION_1_2 =
@@ -410,6 +414,69 @@ abstract class MousomiDatabase : RoomDatabase() {
           )
           db.execSQL("CREATE INDEX IF NOT EXISTS index_device_action_logs_timestampMs ON device_action_logs(timestampMs)")
           db.execSQL("CREATE INDEX IF NOT EXISTS index_device_action_logs_category ON device_action_logs(category)")
+        }
+      }
+
+    val MIGRATION_5_6 =
+      object : Migration(5, 6) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+          db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS image_tasks (
+              taskId TEXT NOT NULL PRIMARY KEY,
+              conversationId TEXT NOT NULL,
+              featureType TEXT NOT NULL,
+              executionSource TEXT NOT NULL,
+              prompt TEXT NOT NULL,
+              editPlanJson TEXT NOT NULL,
+              inputAssetId TEXT,
+              maskPath TEXT,
+              outputAssetId TEXT,
+              providerId TEXT NOT NULL,
+              modelId TEXT NOT NULL,
+              status TEXT NOT NULL,
+              errorMessage TEXT,
+              createdAtMs INTEGER NOT NULL,
+              updatedAtMs INTEGER NOT NULL
+            )
+            """.trimIndent()
+          )
+          db.execSQL("CREATE INDEX IF NOT EXISTS index_image_tasks_conversationId ON image_tasks(conversationId)")
+          db.execSQL("CREATE INDEX IF NOT EXISTS index_image_tasks_status ON image_tasks(status)")
+          db.execSQL("CREATE INDEX IF NOT EXISTS index_image_tasks_createdAtMs ON image_tasks(createdAtMs)")
+
+          db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS image_assets (
+              assetId TEXT NOT NULL PRIMARY KEY,
+              localPreviewPath TEXT NOT NULL,
+              mediaStoreUri TEXT,
+              mimeType TEXT NOT NULL,
+              width INTEGER NOT NULL,
+              height INTEGER NOT NULL,
+              fileSizeBytes INTEGER NOT NULL,
+              hasTransparency INTEGER NOT NULL,
+              sourceBadge TEXT NOT NULL,
+              createdAtMs INTEGER NOT NULL
+            )
+            """.trimIndent()
+          )
+          db.execSQL("CREATE INDEX IF NOT EXISTS index_image_assets_createdAtMs ON image_assets(createdAtMs)")
+
+          db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS image_provider_status (
+              providerId TEXT NOT NULL PRIMARY KEY,
+              displayName TEXT NOT NULL,
+              connectionStatus TEXT NOT NULL,
+              quotaState TEXT NOT NULL,
+              isFreeTier INTEGER NOT NULL,
+              activeModelId TEXT NOT NULL,
+              lastVerifiedAtMs INTEGER,
+              lastErrorDetail TEXT
+            )
+            """.trimIndent()
+          )
         }
       }
   }

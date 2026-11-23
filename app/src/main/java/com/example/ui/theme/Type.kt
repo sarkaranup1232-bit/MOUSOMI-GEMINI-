@@ -20,6 +20,28 @@ val BodyFontFamily = FontFamily(
   Font(R.font.plus_jakarta_sans, FontWeight.SemiBold),
 )
 
+val BengaliSansFontFamily = FontFamily(
+  Font(R.font.noto_sans_bengali, FontWeight.Normal),
+  Font(R.font.noto_sans_bengali, FontWeight.Medium),
+  Font(R.font.noto_sans_bengali, FontWeight.Bold),
+)
+
+val BengaliDisplayFontFamily = FontFamily(
+  Font(R.font.hind_siliguri, FontWeight.Normal),
+  Font(R.font.hind_siliguri, FontWeight.SemiBold),
+  Font(R.font.hind_siliguri, FontWeight.Bold),
+)
+
+val EditorialSerifFontFamily = FontFamily(
+  Font(R.font.playfair_display, FontWeight.Normal),
+  Font(R.font.playfair_display, FontWeight.Bold),
+)
+
+val TechDisplayFontFamily = FontFamily(
+  Font(R.font.space_grotesk, FontWeight.Normal),
+  Font(R.font.space_grotesk, FontWeight.Bold),
+)
+
 val Typography =
   Typography(
     displaySmall =

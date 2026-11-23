@@ -7,9 +7,11 @@ import com.example.ai.provider.AiProvider
 import com.example.ai.provider.GeminiAiProvider
 import com.example.ai.provider.GroqAiProvider
 import com.example.ai.provider.ProxyAiProvider
+import com.example.ai.provider.api.CloudflareWorkersAiService
 import com.example.ai.provider.api.GeminiApiService
 import com.example.ai.provider.api.GroqApiService
 import com.example.ai.provider.api.ProxyApiService
+import com.example.data.local.db.ImageStudioDao
 import com.example.ai.image.CompositeImageGenerationProvider
 import com.example.ai.image.ImageGenerationProvider
 import com.example.core.voice.AndroidSpeechToTextEngine
@@ -69,6 +71,10 @@ annotation class GroqRetrofit
 @Qualifier
 @Retention(AnnotationRetention.BINARY)
 annotation class ProxyRetrofit
+
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class CloudflareRetrofit
 
 @MapKey
 annotation class ProviderKey(val value: ProviderType)
@@ -160,8 +166,23 @@ object NetworkAndStorageModule {
 
   @Provides
   @Singleton
+  @CloudflareRetrofit
+  fun provideCloudflareRetrofit(client: OkHttpClient, json: Json): Retrofit =
+    Retrofit.Builder()
+      .baseUrl("https://api.cloudflare.com/client/v4/")
+      .client(client)
+      .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+      .build()
+
+  @Provides
+  @Singleton
   fun provideProxyApiService(@ProxyRetrofit retrofit: Retrofit): ProxyApiService =
     retrofit.create(ProxyApiService::class.java)
+
+  @Provides
+  @Singleton
+  fun provideCloudflareWorkersAiService(@CloudflareRetrofit retrofit: Retrofit): CloudflareWorkersAiService =
+    retrofit.create(CloudflareWorkersAiService::class.java)
 
   @Provides
   @Singleton
@@ -172,6 +193,7 @@ object NetworkAndStorageModule {
         MousomiDatabase.MIGRATION_2_3,
         MousomiDatabase.MIGRATION_3_4,
         MousomiDatabase.MIGRATION_4_5,
+        MousomiDatabase.MIGRATION_5_6,
       )
       .build()
 
@@ -190,6 +212,9 @@ object NetworkAndStorageModule {
 
   @Provides
   fun provideAddOnDao(database: MousomiDatabase): AddOnDao = database.addOnDao()
+
+  @Provides
+  fun provideImageStudioDao(database: MousomiDatabase): ImageStudioDao = database.imageStudioDao()
 }
 
 @Module

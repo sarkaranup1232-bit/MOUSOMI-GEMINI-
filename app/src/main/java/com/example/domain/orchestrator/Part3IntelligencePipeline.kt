@@ -162,12 +162,20 @@ class Part3IntelligencePipeline @Inject constructor(
               is DeepResearchProgress.DetectingComplexity ->
                 collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Thinking("Research depth: ${progress.complexityLabel}")))
               is DeepResearchProgress.PlanningQueries ->
-                collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Searching("Planned ${progress.queries.size} live search queries…")))
+                collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Searching("Planning ${progress.queries.size} live search queries…")))
               is DeepResearchProgress.SearchingWeb ->
                 collector.emit(
                   OrchestrationEvent.StateChanged(
                     AiResponseState.Searching(
-                      "Searching (${progress.queryIndex}/${progress.totalQueries}): ${progress.currentQuery} • ${progress.sourcesCollected} sources"
+                      "Searching the web (${progress.queryIndex}/${progress.totalQueries}): ${progress.sourcesCollected} sources discovered"
+                    )
+                  )
+                )
+              is DeepResearchProgress.AnalyzingPages ->
+                collector.emit(
+                  OrchestrationEvent.StateChanged(
+                    AiResponseState.Searching(
+                      "Pages being analyzed: ${progress.analyzedCount}/${progress.totalCount} extracted • comparing claims…"
                     )
                   )
                 )
@@ -175,16 +183,19 @@ class Part3IntelligencePipeline @Inject constructor(
                 collector.emit(
                   OrchestrationEvent.StateChanged(
                     AiResponseState.Searching(
-                      "Verified ${progress.verifiedCount} HTTPS sources (${progress.rawCount - progress.verifiedCount} duplicates/invalid filtered)"
+                      "Verification status: ${progress.verifiedCount} HTTPS sources verified (${progress.rawCount - progress.verifiedCount} duplicates/invalid removed)"
                     )
                   )
                 )
               is DeepResearchProgress.SynthesizingReport ->
                 collector.emit(
                   OrchestrationEvent.StateChanged(
-                    AiResponseState.Thinking("Synthesizing 10-section report from ${progress.verifiedSourcesCount} verified sources…")
+                    AiResponseState.Thinking("Generating final research report from ${progress.verifiedSourcesCount} verified sources…")
                   )
                 )
+              is DeepResearchProgress.StageUpdate -> {
+                collector.emit(OrchestrationEvent.ResearchTelemetry(progress.snapshot))
+              }
               is DeepResearchProgress.Completed -> {
                 finalBlocks =
                   listOf(
@@ -192,6 +203,14 @@ class Part3IntelligencePipeline @Inject constructor(
                     ResponseBlock.SourceCitations(progress.report.references),
                   )
                 finalText = progress.report.executiveSummary
+              }
+              is DeepResearchProgress.PartialCancelled -> {
+                collector.emit(OrchestrationEvent.ResearchTelemetry(progress.snapshot))
+                if (progress.snapshot.retrievedSources.isNotEmpty()) {
+                  val partialBlocks = listOf(ResponseBlock.SourceCitations(progress.snapshot.retrievedSources))
+                  collector.emit(OrchestrationEvent.BlocksUpdated(partialBlocks))
+                }
+                collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Cancelled))
               }
               DeepResearchProgress.Cancelled ->
                 collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Cancelled))

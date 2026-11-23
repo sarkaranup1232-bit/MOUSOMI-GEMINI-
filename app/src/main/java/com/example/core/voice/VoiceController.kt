@@ -24,9 +24,18 @@ import java.util.Locale
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+
+enum class LiveVoiceControlCommand {
+  PAUSE,
+  RESUME,
+  STOP,
+}
 
 sealed interface VoiceState {
   data object Idle : VoiceState
@@ -37,7 +46,10 @@ sealed interface VoiceState {
 
   data class Speaking(val messageId: String) : VoiceState
 
-  data class Error(val message: String) : VoiceState
+  data class Error(
+    val message: String,
+    val isRecoverableSilence: Boolean = false,
+  ) : VoiceState
 }
 
 interface SpeechToTextGateway {
@@ -55,6 +67,20 @@ interface SpeechToTextGateway {
     onError: (String) -> Unit,
     onRmsNormalized: (Float) -> Unit,
   ) = startListening(languageTag, onPartial, onFinal, onError)
+
+  fun startListeningWithRmsDetailed(
+    languageTag: String,
+    onPartial: (String) -> Unit,
+    onFinal: (String) -> Unit,
+    onError: (message: String, isRecoverableSilence: Boolean) -> Unit,
+    onRmsNormalized: (Float) -> Unit,
+  ) = startListeningWithRms(
+    languageTag = languageTag,
+    onPartial = onPartial,
+    onFinal = onFinal,
+    onError = { msg -> onError(msg, false) },
+    onRmsNormalized = onRmsNormalized,
+  )
 
   fun stopListening()
 
@@ -84,7 +110,42 @@ class AndroidSpeechToTextEngine @Inject constructor(
 ) : SpeechToTextGateway {
 
   private val mainHandler = Handler(Looper.getMainLooper())
+  private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
   private var recognizer: SpeechRecognizer? = null
+  private var listenFocusRequest: AudioFocusRequest? = null
+
+  private fun requestListenAudioFocus() {
+    val am = audioManager ?: return
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      val req =
+        AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+          .setAudioAttributes(
+            AudioAttributes.Builder()
+              .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+              .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+              .build()
+          )
+          .build()
+      listenFocusRequest = req
+      runCatching { am.requestAudioFocus(req) }
+    } else {
+      @Suppress("DEPRECATION")
+      runCatching {
+        am.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+      }
+    }
+  }
+
+  private fun abandonListenAudioFocus() {
+    val am = audioManager ?: return
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      listenFocusRequest?.let { runCatching { am.abandonAudioFocusRequest(it) } }
+      listenFocusRequest = null
+    } else {
+      @Suppress("DEPRECATION")
+      runCatching { am.abandonAudioFocus(null) }
+    }
+  }
 
   override fun startListening(
     languageTag: String,
@@ -92,7 +153,13 @@ class AndroidSpeechToTextEngine @Inject constructor(
     onFinal: (String) -> Unit,
     onError: (String) -> Unit,
   ) {
-    startListeningWithRms(languageTag, onPartial, onFinal, onError) {}
+    startListeningWithRmsDetailed(
+      languageTag = languageTag,
+      onPartial = onPartial,
+      onFinal = onFinal,
+      onError = { msg, _ -> onError(msg) },
+      onRmsNormalized = {},
+    )
   }
 
   override fun startListeningWithRms(
@@ -102,13 +169,30 @@ class AndroidSpeechToTextEngine @Inject constructor(
     onError: (String) -> Unit,
     onRmsNormalized: (Float) -> Unit,
   ) {
+    startListeningWithRmsDetailed(
+      languageTag = languageTag,
+      onPartial = onPartial,
+      onFinal = onFinal,
+      onError = { msg, _ -> onError(msg) },
+      onRmsNormalized = onRmsNormalized,
+    )
+  }
+
+  override fun startListeningWithRmsDetailed(
+    languageTag: String,
+    onPartial: (String) -> Unit,
+    onFinal: (String) -> Unit,
+    onError: (message: String, isRecoverableSilence: Boolean) -> Unit,
+    onRmsNormalized: (Float) -> Unit,
+  ) {
     mainHandler.post {
       if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-        onError("Speech recognition service is unavailable on this device.")
+        onError("Speech recognition service is unavailable on this device.", false)
         return@post
       }
 
-      recognizer?.destroy()
+      runCatching { recognizer?.destroy() }
+      requestListenAudioFocus()
       val sr = SpeechRecognizer.createSpeechRecognizer(context)
       recognizer = sr
 
@@ -139,6 +223,7 @@ class AndroidSpeechToTextEngine @Inject constructor(
 
           override fun onResults(results: Bundle?) {
             onRmsNormalized(0f)
+            abandonListenAudioFocus()
             val text =
               results
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -147,23 +232,29 @@ class AndroidSpeechToTextEngine @Inject constructor(
             if (text.isNotBlank()) {
               onFinal(text)
             } else {
-              onError("No speech detected. Please try again.")
+              onError("No speech detected. Please try again.", true)
             }
           }
 
           override fun onError(error: Int) {
             onRmsNormalized(0f)
+            abandonListenAudioFocus()
+            val recoverableSilence =
+              error == SpeechRecognizer.ERROR_NO_MATCH ||
+                error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+                error == SpeechRecognizer.ERROR_CLIENT
             val message =
               when (error) {
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
                   "Microphone permission is required for voice input."
-                SpeechRecognizer.ERROR_NO_MATCH -> "Could not recognize speech. Try speaking again."
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech detected before timeout."
+                SpeechRecognizer.ERROR_NO_MATCH -> "Listening for speech…"
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out; resuming mic…"
+                SpeechRecognizer.ERROR_AUDIO -> "Audio input interrupted; check microphone availability."
                 SpeechRecognizer.ERROR_NETWORK,
                 SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network error during speech recognition."
                 else -> "Speech recognition error ($error)."
               }
-            onError(message)
+            onError(message, recoverableSilence)
           }
         }
       )
@@ -173,20 +264,29 @@ class AndroidSpeechToTextEngine @Inject constructor(
           putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
           putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag)
           putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+          putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2200L)
+          putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1600L)
+          putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1500L)
         }
-      sr.startListening(intent)
+      runCatching { sr.startListening(intent) }.onFailure { err ->
+        abandonListenAudioFocus()
+        onError(err.localizedMessage ?: "Unable to start speech recognizer.", false)
+      }
     }
   }
 
   override fun stopListening() {
     mainHandler.post {
-      recognizer?.stopListening()
+      abandonListenAudioFocus()
+      runCatching { recognizer?.stopListening() }
+      runCatching { recognizer?.cancel() }
     }
   }
 
   override fun release() {
     mainHandler.post {
-      recognizer?.destroy()
+      abandonListenAudioFocus()
+      runCatching { recognizer?.destroy() }
       recognizer = null
     }
   }
@@ -225,21 +325,23 @@ class AndroidTextToSpeechEngine @Inject constructor(
           )
           .build()
       focusRequest = req
-      am.requestAudioFocus(req)
+      runCatching { am.requestAudioFocus(req) }
     } else {
       @Suppress("DEPRECATION")
-      am.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+      runCatching {
+        am.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+      }
     }
   }
 
   private fun abandonAudioFocus() {
     val am = audioManager ?: return
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      focusRequest?.let { am.abandonAudioFocusRequest(it) }
+      focusRequest?.let { runCatching { am.abandonAudioFocusRequest(it) } }
       focusRequest = null
     } else {
       @Suppress("DEPRECATION")
-      am.abandonAudioFocus(null)
+      runCatching { am.abandonAudioFocus(null) }
     }
   }
 
@@ -362,15 +464,21 @@ class AndroidTextToSpeechEngine @Inject constructor(
   }
 
   override fun stop() {
-    tts?.stop()
+    onDoneCallback = null
+    onStartCallback = null
+    onErrorCallback = null
+    onSpeechProgressListener?.invoke(0f)
+    runCatching { tts?.stop() }
     abandonAudioFocus()
-    onDoneCallback?.invoke()
   }
 
   override fun release() {
-    tts?.stop()
+    onDoneCallback = null
+    onStartCallback = null
+    onErrorCallback = null
+    runCatching { tts?.stop() }
     abandonAudioFocus()
-    tts?.shutdown()
+    runCatching { tts?.shutdown() }
     tts = null
     isReady = false
   }
@@ -404,6 +512,16 @@ class VoiceController @Inject constructor(
   private val _ttsSpeechEnergy = MutableStateFlow(0f)
   val ttsSpeechEnergy: StateFlow<Float> = _ttsSpeechEnergy.asStateFlow()
 
+  private val _ttsCompletedTick = MutableStateFlow(0L)
+  val ttsCompletedTick: StateFlow<Long> = _ttsCompletedTick.asStateFlow()
+
+  private val _liveControlCommands = MutableSharedFlow<LiveVoiceControlCommand>(extraBufferCapacity = 8)
+  val liveControlCommands: SharedFlow<LiveVoiceControlCommand> = _liveControlCommands.asSharedFlow()
+
+  fun dispatchLiveControlCommand(command: LiveVoiceControlCommand) {
+    _liveControlCommands.tryEmit(command)
+  }
+
   private val _fallbackAudioMetrics = MutableStateFlow(VoiceAudioMetrics.SILENT)
   val audioMetrics: StateFlow<VoiceAudioMetrics>
     get() = audioSmokeAnalyzer?.metrics ?: _fallbackAudioMetrics.asStateFlow()
@@ -419,23 +537,28 @@ class VoiceController @Inject constructor(
 
   fun startListening(language: ResponseLanguage) {
     ttsGateway.stop()
+    // Ensure hardware AudioRecord analyzer is released so SpeechRecognizer owns the mic exclusively
+    audioSmokeAnalyzer?.stopCapture()
     _audioRmsNormalized.value = 0f
     _voiceState.value = VoiceState.Listening()
-    audioSmokeAnalyzer?.startCapture()
-    sttGateway.startListeningWithRms(
+    sttGateway.startListeningWithRmsDetailed(
       languageTag = language.localeTag,
       onPartial = { partial -> _voiceState.value = VoiceState.Listening(partial) },
       onFinal = { finalTranscript ->
-        audioSmokeAnalyzer?.stopCapture()
+        audioSmokeAnalyzer?.publishExternalRms(0f)
         _audioRmsNormalized.value = 0f
         _voiceState.value = VoiceState.TranscriptReady(finalTranscript)
       },
-      onError = { err ->
-        audioSmokeAnalyzer?.stopCapture()
+      onError = { err, isRecoverableSilence ->
+        audioSmokeAnalyzer?.publishExternalRms(0f)
         _audioRmsNormalized.value = 0f
-        _voiceState.value = VoiceState.Error(err)
+        _voiceState.value = VoiceState.Error(err, isRecoverableSilence)
       },
-      onRmsNormalized = { rms -> _audioRmsNormalized.value = rms.coerceIn(0f, 1f) },
+      onRmsNormalized = { rms ->
+        val clamped = rms.coerceIn(0f, 1f)
+        _audioRmsNormalized.value = clamped
+        audioSmokeAnalyzer?.publishExternalRms(clamped)
+      },
     )
   }
 
@@ -450,12 +573,13 @@ class VoiceController @Inject constructor(
     sttGateway.stopListening()
     audioSmokeAnalyzer?.stopCapture()
     _audioRmsNormalized.value = 0f
-    if (_voiceState.value is VoiceState.Listening) {
+    if (_voiceState.value is VoiceState.Listening || _voiceState.value is VoiceState.Error) {
       _voiceState.value = VoiceState.Idle
     }
   }
 
   fun speakResponse(messageId: String, text: String, preferences: VoicePreferences) {
+    sttGateway.stopListening()
     audioSmokeAnalyzer?.stopCapture()
     _ttsSpeechEnergy.value = 0.4f
     _voiceState.value = VoiceState.Speaking(messageId)
@@ -468,11 +592,12 @@ class VoiceController @Inject constructor(
         _ttsSpeechEnergy.value = 0f
         _audioRmsNormalized.value = 0f
         _voiceState.value = VoiceState.Idle
+        _ttsCompletedTick.value = _ttsCompletedTick.value + 1L
       },
       onError = { err ->
         _ttsSpeechEnergy.value = 0f
         _audioRmsNormalized.value = 0f
-        _voiceState.value = VoiceState.Error(err)
+        _voiceState.value = VoiceState.Error(err, isRecoverableSilence = false)
       },
     )
   }

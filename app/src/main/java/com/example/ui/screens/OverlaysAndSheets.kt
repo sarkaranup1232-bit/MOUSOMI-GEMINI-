@@ -116,6 +116,7 @@ import com.example.ui.model.AiModelOption
 import com.example.ui.theme.DisplayFontFamily
 import com.example.ui.theme.LocalMousomiColors
 import com.example.ui.theme.NeonCyan
+import com.example.ui.theme.WarmAmber
 
 @Composable
 fun MousomiDrawerContent(
@@ -327,7 +328,7 @@ fun ModelSelectionBottomSheet(
         fontSize = 20.sp,
       )
       Text(
-        text = "Select one of the four supported Mousomi AI models.",
+        text = "Select one of the seven supported Mousomi AI models.",
         style = MaterialTheme.typography.bodyMedium,
         color = colors.mutedText,
       )
@@ -385,6 +386,7 @@ fun AttachmentBottomSheet(
   onPickDocuments: () -> Unit = {},
   onTakeCameraPhoto: () -> Unit = {},
   onOpenLens: () -> Unit = {},
+  onStartScreenSelection: () -> Unit = {},
   onAttachSamplePreview: () -> Unit,
   onDismiss: () -> Unit,
 ) {
@@ -489,12 +491,18 @@ fun AttachmentBottomSheet(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
       ) {
         AttachmentTile(
+          icon = Icons.Outlined.CenterFocusWeak,
+          label = "Select Screen",
+          onClick = onStartScreenSelection,
+          modifier = Modifier.weight(1f).testTag("attach_screen_select_button"),
+        )
+        AttachmentTile(
           icon = Icons.Outlined.Image,
           label = "Sample Art",
           onClick = onAttachSamplePreview,
           modifier = Modifier.weight(1f).testTag("attach_sample_button"),
         )
-        Spacer(modifier = Modifier.weight(2f))
+        Spacer(modifier = Modifier.weight(1f))
       }
 
       Text(
@@ -585,6 +593,7 @@ fun MoreToolsBottomSheet(
   onSelectToolAction: (String) -> Unit,
   onOpenScreenAssistant: () -> Unit,
   onOpenLens: () -> Unit = {},
+  onStartScreenSelection: () -> Unit = {},
   onDismiss: () -> Unit,
 ) {
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -657,7 +666,13 @@ fun MoreToolsBottomSheet(
           onClick = { onSelectToolAction("data_analysis") },
           modifier = Modifier.weight(1f).testTag("more_tool_data"),
         )
-        Spacer(modifier = Modifier.weight(2f))
+        AttachmentTile(
+          icon = Icons.Outlined.CenterFocusWeak,
+          label = "Select Screen",
+          onClick = onStartScreenSelection,
+          modifier = Modifier.weight(1f).testTag("more_tool_screen_selection"),
+        )
+        Spacer(modifier = Modifier.weight(1f))
       }
     }
   }
@@ -709,13 +724,17 @@ fun ProfileAccountDialog(
 ) {
   val colors = LocalMousomiColors.current
   val displayTitle =
-    if (authSession.isSignedIn && authSession.displayName.isNotBlank()) authSession.displayName else "HACKER"
+    when {
+      authSession.isSignedIn && authSession.displayName.isNotBlank() -> authSession.displayName
+      authSession.isGuest -> "Guest User"
+      else -> "Mousomi User"
+    }
   val avatarInitial = displayTitle.firstOrNull()?.uppercaseChar()?.toString() ?: "M"
   val subtitleText =
-    if (authSession.isSignedIn && !authSession.email.isNullOrBlank()) {
-      authSession.email
-    } else {
-      "Mousomi AI • ${authSession.entitlementTier.label}"
+    when {
+      authSession.isSignedIn && !authSession.email.isNullOrBlank() -> authSession.email
+      authSession.isGuest -> "Local Guest Mode • On-device storage"
+      else -> "Mousomi AI • ${authSession.entitlementTier.label}"
     }
 
   Dialog(onDismissRequest = onDismiss) {
@@ -789,7 +808,7 @@ fun ProfileAccountDialog(
           Text("Permissions & Privacy")
         }
 
-        if (authSession.isSignedIn && onSignOut != null) {
+        if ((authSession.isSignedIn || authSession.isGuest) && onSignOut != null) {
           Spacer(modifier = Modifier.height(8.dp))
           OutlinedButton(
             onClick = {
@@ -797,10 +816,22 @@ fun ProfileAccountDialog(
               onSignOut()
             },
             shape = RoundedCornerShape(14.dp),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
-            modifier = Modifier.fillMaxWidth().height(48.dp).testTag("profile_sign_out_button"),
+            border =
+              BorderStroke(
+                1.dp,
+                if (authSession.isGuest) colors.liveButtonBlue.copy(alpha = 0.65f)
+                else MaterialTheme.colorScheme.error.copy(alpha = 0.6f),
+              ),
+            modifier =
+              Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .testTag(if (authSession.isGuest) "profile_sign_in_from_guest_button" else "profile_sign_out_button"),
           ) {
-            Text("Sign Out", color = MaterialTheme.colorScheme.error)
+            Text(
+              text = if (authSession.isGuest) "Sign in with Google" else "Sign Out",
+              color = if (authSession.isGuest) colors.liveButtonBlue else MaterialTheme.colorScheme.error,
+            )
           }
         }
 
@@ -923,11 +954,16 @@ fun GeminiLiveOverlay(
   voiceState: VoiceState,
   voiceRmsNormalized: Float = 0f,
   isThinking: Boolean = false,
+  isPaused: Boolean = false,
+  isMuted: Boolean = false,
+  selectedModelLabel: String = "Mousomi Auto",
   voiceGender: VoiceGender = VoiceGender.FEMALE,
   latestAssistantText: String = "",
   onSelectVoiceGender: (VoiceGender) -> Unit = {},
   onStartListening: () -> Unit,
   onStopListening: () -> Unit,
+  onTogglePause: () -> Unit = {},
+  onToggleMute: () -> Unit = {},
   onSendFollowUp: (String) -> Unit = {},
   onOpenCamera: () -> Unit = {},
   onRunDeepSearch: () -> Unit = {},
@@ -938,7 +974,6 @@ fun GeminiLiveOverlay(
 ) {
   BackHandler(onBack = onClose)
 
-  var isMuted by remember { mutableStateOf(false) }
   var followUpText by remember { mutableStateOf("") }
 
   Box(
@@ -961,7 +996,7 @@ fun GeminiLiveOverlay(
       verticalAlignment = Alignment.CenterVertically,
     ) {
       Row(verticalAlignment = Alignment.CenterVertically) {
-        GeminiFourPointSparkle(size = 26.dp, animated = true)
+        GeminiFourPointSparkle(size = 26.dp, animated = !isPaused)
         Spacer(modifier = Modifier.width(10.dp))
         Text(
           text = "Mousomi Live",
@@ -982,12 +1017,15 @@ fun GeminiLiveOverlay(
           Text(
             text =
               when {
+                isPaused -> "Paused"
+                isMuted -> "Muted"
                 isThinking -> "Thinking"
                 voiceState is VoiceState.Listening -> "Listening"
                 voiceState is VoiceState.Speaking -> "Speaking"
-                else -> "Voice Ready"
+                voiceState is VoiceState.Error && voiceState.isRecoverableSilence -> "Reconnecting"
+                else -> "Live Ready"
               },
-            color = NeonCyan,
+            color = if (isPaused) WarmAmber else NeonCyan,
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
           )
@@ -1015,10 +1053,10 @@ fun GeminiLiveOverlay(
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {
       AnimatedAIOrb(
-        voiceState = voiceState,
-        voiceRmsNormalized = voiceRmsNormalized,
-        isThinking = isThinking,
-        isMuted = isMuted,
+        voiceState = if (isPaused) VoiceState.Idle else voiceState,
+        voiceRmsNormalized = if (isPaused || isMuted) 0f else voiceRmsNormalized,
+        isThinking = !isPaused && isThinking,
+        isMuted = isMuted || isPaused,
         orbSize = 180.dp,
         audioMetrics = audioMetrics,
       )
@@ -1026,8 +1064,8 @@ fun GeminiLiveOverlay(
       Spacer(modifier = Modifier.height(12.dp))
 
       VoiceWaveform(
-        isActive = !isMuted && (voiceState is VoiceState.Listening || voiceState is VoiceState.Speaking),
-        rmsNormalized = voiceRmsNormalized,
+        isActive = !isPaused && !isMuted && (voiceState is VoiceState.Listening || voiceState is VoiceState.Speaking),
+        rmsNormalized = if (isPaused || isMuted) 0f else voiceRmsNormalized,
       )
 
       Spacer(modifier = Modifier.height(16.dp))
@@ -1035,12 +1073,15 @@ fun GeminiLiveOverlay(
       Text(
         text =
           when {
+            isPaused -> "Live conversation paused"
             isMuted -> "Microphone muted"
             isThinking -> "Processing your request…"
             voiceState is VoiceState.Listening && voiceState.partialTranscript.isNotBlank() ->
               voiceState.partialTranscript
-            voiceState is VoiceState.Listening -> "Listening…"
-            voiceState is VoiceState.Speaking -> "Speaking response…"
+            voiceState is VoiceState.Listening -> "Listening continuously…"
+            voiceState is VoiceState.Speaking -> "Speaking response (tap Pause/Mic to interrupt)…"
+            voiceState is VoiceState.Error && voiceState.isRecoverableSilence -> "Listening for your voice…"
+            voiceState is VoiceState.Error -> voiceState.message
             else -> "Tap mic to speak with Mousomi AI"
           },
         color = Color.White,
@@ -1050,7 +1091,7 @@ fun GeminiLiveOverlay(
       )
       Spacer(modifier = Modifier.height(6.dp))
       Text(
-        text = "Voice: ${voiceGender.label} • Interrupt anytime or minimize to float",
+        text = "${voiceGender.label} • $selectedModelLabel • Continuous bidirectional turn loop",
         color = Color.White.copy(alpha = 0.72f),
         style = MaterialTheme.typography.bodyMedium,
         textAlign = TextAlign.Center,
@@ -1164,24 +1205,49 @@ fun GeminiLiveOverlay(
 
       Row(
         modifier = Modifier.padding(bottom = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(20.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
       ) {
         Surface(
-          onClick = {
-            isMuted = !isMuted
-            if (isMuted) onStopListening() else onStartListening()
-          },
+          onClick = onToggleMute,
           shape = CircleShape,
           color = if (isMuted) Color.White else Color.White.copy(alpha = 0.16f),
-          modifier = Modifier.size(62.dp).testTag("live_mute_toggle_button"),
+          modifier = Modifier.size(56.dp).testTag("live_mute_toggle_button"),
         ) {
           Box(contentAlignment = Alignment.Center) {
             Icon(
               imageVector = if (isMuted) Icons.Outlined.MicOff else Icons.Outlined.Mic,
               contentDescription = if (isMuted) "Unmute" else "Mute",
               tint = if (isMuted) Color.Black else Color.White,
-              modifier = Modifier.size(26.dp),
+              modifier = Modifier.size(24.dp),
+            )
+          }
+        }
+
+        Surface(
+          onClick = {
+            if (isPaused) onTogglePause() else if (voiceState !is VoiceState.Listening && !isThinking) onStartListening() else onTogglePause()
+          },
+          shape = CircleShape,
+          color = if (isPaused) NeonCyan else Color.White.copy(alpha = 0.16f),
+          border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.65f)),
+          modifier = Modifier.height(50.dp).testTag("live_pause_toggle_button"),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Icon(
+              imageVector = if (isPaused) Icons.Outlined.Mic else Icons.Rounded.Stop,
+              contentDescription = if (isPaused) "Resume Live Voice" else "Pause Live Voice",
+              tint = if (isPaused) Color.Black else Color.White,
+              modifier = Modifier.size(18.dp),
+            )
+            Text(
+              text = if (isPaused) "Resume" else "Pause",
+              color = if (isPaused) Color.Black else Color.White,
+              style = MaterialTheme.typography.labelLarge,
             )
           }
         }
@@ -1197,12 +1263,12 @@ fun GeminiLiveOverlay(
           modifier = Modifier.height(50.dp).testTag("live_emergency_stop_button"),
         ) {
           Row(
-            modifier = Modifier.padding(horizontal = 16.dp),
+            modifier = Modifier.padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
           ) {
             Icon(Icons.Rounded.Stop, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
-            Text("Emergency Stop", color = Color.White, style = MaterialTheme.typography.labelLarge)
+            Text("Stop", color = Color.White, style = MaterialTheme.typography.labelLarge)
           }
         }
 
@@ -1210,14 +1276,14 @@ fun GeminiLiveOverlay(
           onClick = onClose,
           shape = CircleShape,
           color = Color(0xFFDC2626),
-          modifier = Modifier.size(62.dp).testTag("close_gemini_live_button"),
+          modifier = Modifier.size(56.dp).testTag("close_gemini_live_button"),
         ) {
           Box(contentAlignment = Alignment.Center) {
             Icon(
               imageVector = Icons.Rounded.Close,
               contentDescription = "End Live Voice",
               tint = Color.White,
-              modifier = Modifier.size(28.dp),
+              modifier = Modifier.size(26.dp),
             )
           }
         }
@@ -1231,21 +1297,24 @@ fun MinimizedGeminiLivePill(
   voiceState: VoiceState,
   voiceRmsNormalized: Float,
   isThinking: Boolean,
+  isPaused: Boolean = false,
+  isMuted: Boolean = false,
   audioMetrics: VoiceAudioMetrics,
   onStartListening: () -> Unit,
   onStopListening: () -> Unit,
+  onTogglePause: () -> Unit = {},
+  onToggleMute: () -> Unit = {},
   onExpand: () -> Unit,
   onClose: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   var offsetX by remember { mutableStateOf(0f) }
   var offsetY by remember { mutableStateOf(0f) }
-  var isMuted by remember { mutableStateOf(false) }
 
   Surface(
     shape = CircleShape,
     color = Color(0xFF071330).copy(alpha = 0.94f),
-    border = BorderStroke(1.2.dp, NeonCyan.copy(alpha = 0.72f)),
+    border = BorderStroke(1.2.dp, (if (isPaused) WarmAmber else NeonCyan).copy(alpha = 0.72f)),
     tonalElevation = 8.dp,
     modifier =
       modifier
@@ -1262,19 +1331,20 @@ fun MinimizedGeminiLivePill(
     Row(
       modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
       verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
       AnimatedAIOrb(
-        voiceState = voiceState,
-        voiceRmsNormalized = voiceRmsNormalized,
-        isThinking = isThinking,
-        isMuted = isMuted,
+        voiceState = if (isPaused) VoiceState.Idle else voiceState,
+        voiceRmsNormalized = if (isPaused || isMuted) 0f else voiceRmsNormalized,
+        isThinking = !isPaused && isThinking,
+        isMuted = isMuted || isPaused,
         orbSize = 34.dp,
         audioMetrics = audioMetrics,
       )
       Text(
         text =
           when {
+            isPaused -> "Paused"
             isMuted -> "Muted"
             isThinking -> "Thinking"
             voiceState is VoiceState.Listening -> "Listening"
@@ -1286,11 +1356,8 @@ fun MinimizedGeminiLivePill(
         fontWeight = FontWeight.SemiBold,
       )
       IconButton(
-        onClick = {
-          isMuted = !isMuted
-          if (isMuted) onStopListening() else onStartListening()
-        },
-        modifier = Modifier.size(36.dp),
+        onClick = onToggleMute,
+        modifier = Modifier.size(34.dp),
       ) {
         Icon(
           imageVector = if (isMuted) Icons.Outlined.MicOff else Icons.Outlined.Mic,
@@ -1300,8 +1367,19 @@ fun MinimizedGeminiLivePill(
         )
       }
       IconButton(
+        onClick = onTogglePause,
+        modifier = Modifier.size(34.dp),
+      ) {
+        Icon(
+          imageVector = if (isPaused) Icons.Outlined.Mic else Icons.Rounded.Stop,
+          contentDescription = if (isPaused) "Resume Live Voice" else "Pause Live Voice",
+          tint = if (isPaused) NeonCyan else WarmAmber,
+          modifier = Modifier.size(18.dp),
+        )
+      }
+      IconButton(
         onClick = onExpand,
-        modifier = Modifier.size(36.dp).testTag("expand_gemini_live_button"),
+        modifier = Modifier.size(34.dp).testTag("expand_gemini_live_button"),
       ) {
         Icon(
           imageVector = Icons.Outlined.OpenInFull,
@@ -1312,7 +1390,7 @@ fun MinimizedGeminiLivePill(
       }
       IconButton(
         onClick = onClose,
-        modifier = Modifier.size(36.dp).testTag("end_minimized_live_button"),
+        modifier = Modifier.size(34.dp).testTag("end_minimized_live_button"),
       ) {
         Icon(
           imageVector = Icons.Rounded.Close,

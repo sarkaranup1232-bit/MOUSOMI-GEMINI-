@@ -45,10 +45,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.core.assistant.AssistantRoleHelper
 import com.example.core.edge.EdgeLightStateMapper
 import com.example.core.voice.VoiceState
 import com.example.domain.model.AgentBudgetConfig
@@ -195,11 +197,26 @@ fun EdgeLightStudioSection(
       }
     }
 
+    Text("Glow Intensity Profile", style = MaterialTheme.typography.labelLarge)
+    Row(
+      modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      com.example.domain.model.EdgeLightIntensity.entries.forEach { profile ->
+        FilterChip(
+          selected = config.intensity == profile,
+          onClick = { onUpdate(config.copy(intensity = profile)) },
+          label = { Text(profile.label) },
+          modifier = Modifier.testTag("edge_intensity_${profile.name}"),
+        )
+      }
+    }
+
     Text("Brightness (${(config.brightness * 100).toInt()}%)", style = MaterialTheme.typography.labelMedium)
     Slider(
       value = config.brightness,
       onValueChange = { onUpdate(config.copy(brightness = it)) },
-      valueRange = 0.15f..1.0f,
+      valueRange = 0.20f..1.0f,
     )
 
     Text("Speed (${"%.1f".format(config.animationSpeed)}x)", style = MaterialTheme.typography.labelMedium)
@@ -538,11 +555,21 @@ fun NotificationsAndAutomationSection(
       ) {
         Text("Manage Android Notification Access")
       }
+      val context = LocalContext.current
+      val roleStatus = remember(context) { AssistantRoleHelper.getStatus(context) }
+      Text(
+        text = roleStatus.setupSummary,
+        style = MaterialTheme.typography.bodySmall,
+        color = LocalMousomiColors.current.mutedText,
+      )
       OutlinedButton(
         onClick = onRequestAssistantRole,
         modifier = Modifier.fillMaxWidth().testTag("set_default_assistant_button"),
       ) {
-        Text("Set as Default Android Assistant")
+        Text(
+          if (roleStatus.isDefaultAssistant) "Default Android Assistant Active"
+          else "Set as Default Android Assistant"
+        )
       }
       uiState.notificationSummaries.take(5).forEach { item ->
         Surface(

@@ -1,6 +1,8 @@
 package com.example.core.overlay
 
 import androidx.compose.ui.geometry.Offset
+import com.example.core.display.DisplayGeometry
+import com.example.core.display.DisplayGeometryManager
 import com.example.domain.model.FloatingOrbConfig
 
 object OrbPositionHelper {
@@ -15,6 +17,33 @@ object OrbPositionHelper {
     val clamped = clampFraction(rawXFraction)
     if (!snapToEdge) return clamped
     return if (clamped < 0.5f) 0.06f else 0.94f
+  }
+
+  fun computeSnappedXPixel(
+    currentX: Int,
+    bubbleSizePx: Int,
+    geometry: DisplayGeometry,
+    snapToEdge: Boolean,
+  ): Int {
+    val (clampedX, _) = DisplayGeometryManager.clampBubbleCoordinates(currentX, 0, bubbleSizePx, geometry)
+    if (!snapToEdge) return clampedX
+    val center = clampedX + bubbleSizePx / 2f
+    val edgePad = (10f * geometry.density).toInt()
+    val minX = geometry.safeLeftPx + edgePad
+    val maxX = (geometry.screenWidthPx - geometry.safeRightPx - bubbleSizePx - edgePad).coerceAtLeast(minX)
+    return if (center < geometry.screenWidthPx / 2f) minX else maxX
+  }
+
+  fun isInsideBottomDismissZone(
+    bubbleTopLeftX: Int,
+    bubbleTopLeftY: Int,
+    bubbleSizePx: Int,
+    geometry: DisplayGeometry,
+  ): Boolean {
+    val centerX = bubbleTopLeftX + bubbleSizePx / 2f
+    val centerY = bubbleTopLeftY + bubbleSizePx / 2f
+    val target = DisplayGeometryManager.computeDismissTargetSpec(geometry)
+    return DisplayGeometryManager.isPointInsideDismissTarget(centerX, centerY, target)
   }
 
   fun pixelOffsetForConfig(

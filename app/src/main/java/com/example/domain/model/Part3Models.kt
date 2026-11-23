@@ -63,6 +63,7 @@ data class SearchResultItem(
   val sourceDomain: String,
   val relevanceScore: Double = 1.0,
   val pageExcerpt: String? = null,
+  val faviconUrl: String? = null,
 )
 
 @Serializable
@@ -143,15 +144,78 @@ data class ResearchReport(
   }
 }
 
+@Serializable
+enum class ResearchStageId(val order: Int, val label: String) {
+  UNDERSTAND(1, "Understand"),
+  PLANNING(2, "Planning"),
+  LIVE_SEARCH(3, "Live Search"),
+  SOURCE_READING(4, "Source Reading"),
+  CROSS_VERIFICATION(5, "Cross-Verification"),
+  ANALYSIS(6, "Analysis"),
+  FINAL_REPORT(7, "Structured Final Report"),
+}
+
+@Serializable
+enum class ResearchStageStatus(val label: String) {
+  WAITING("Waiting"),
+  ACTIVE("Active"),
+  COMPLETED("Completed"),
+  FAILED("Failed"),
+  SKIPPED("Skipped"),
+  CANCELLED("Cancelled"),
+}
+
+@Serializable
+data class ResearchStageItem(
+  val stage: ResearchStageId,
+  val status: ResearchStageStatus = ResearchStageStatus.WAITING,
+  val detail: String = "",
+)
+
+@Serializable
+enum class LiveSourceLoadStatus(val label: String) {
+  CONNECTING("Connecting"),
+  OPENED("Opened"),
+  READ("Read"),
+  FAILED("Failed"),
+}
+
+@Serializable
+data class LiveSourceTelemetry(
+  val id: String,
+  val domain: String,
+  val title: String,
+  val url: String,
+  val faviconUrl: String? = null,
+  val loadStatus: LiveSourceLoadStatus = LiveSourceLoadStatus.CONNECTING,
+  val note: String? = null,
+)
+
+@Serializable
+data class ResearchActivitySnapshot(
+  val query: String,
+  val isActive: Boolean = true,
+  val isCancelled: Boolean = false,
+  val currentHeadline: String = "Mousomi is researching…",
+  val plannedQueries: List<String> = emptyList(),
+  val stages: List<ResearchStageItem> =
+    ResearchStageId.entries.map { ResearchStageItem(stage = it, status = ResearchStageStatus.WAITING) },
+  val liveSources: List<LiveSourceTelemetry> = emptyList(),
+  val retrievedSources: List<SearchResultItem> = emptyList(),
+)
+
 sealed interface DeepResearchProgress {
   data object UnderstandingQuestion : DeepResearchProgress
   data class DetectingComplexity(val complexityLabel: String) : DeepResearchProgress
   data class PlanningQueries(val queries: List<String>) : DeepResearchProgress
   data class SearchingWeb(val currentQuery: String, val queryIndex: Int, val totalQueries: Int, val sourcesCollected: Int) : DeepResearchProgress
+  data class AnalyzingPages(val analyzedCount: Int, val totalCount: Int) : DeepResearchProgress
   data class DeduplicatingAndVerifying(val rawCount: Int, val verifiedCount: Int) : DeepResearchProgress
   data class SynthesizingReport(val verifiedSourcesCount: Int) : DeepResearchProgress
+  data class StageUpdate(val snapshot: ResearchActivitySnapshot) : DeepResearchProgress
   data class Completed(val report: ResearchReport) : DeepResearchProgress
   data object Cancelled : DeepResearchProgress
+  data class PartialCancelled(val snapshot: ResearchActivitySnapshot) : DeepResearchProgress
   data class Failed(val reason: String) : DeepResearchProgress
 }
 

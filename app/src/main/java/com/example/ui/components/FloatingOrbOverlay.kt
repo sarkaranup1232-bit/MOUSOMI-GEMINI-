@@ -47,6 +47,7 @@ fun InAppFloatingOrbOverlay(
   modifier: Modifier = Modifier,
   audioMetrics: VoiceAudioMetrics = VoiceAudioMetrics.SILENT,
   onPopupAction: ((OrbPopupAction) -> Unit)? = null,
+  onSelectScreenRegion: (() -> Unit)? = null,
 ) {
   if (!config.enabled || !config.inAppPreviewVisible) return
 
@@ -157,6 +158,13 @@ fun InAppFloatingOrbOverlay(
               menuOpen = false
               onQuickAction(OrbQuickAction.DRAW_ON_SCREEN)
             },
+            onSelectScreenRegion =
+              onSelectScreenRegion?.let { launch ->
+                {
+                  menuOpen = false
+                  launch()
+                }
+              },
             onDismiss = { menuOpen = false },
           )
         }

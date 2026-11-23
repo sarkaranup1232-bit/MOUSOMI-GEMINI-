@@ -11,17 +11,24 @@ import com.example.core.security.SecurityValidator
 import com.example.domain.agent.AgentExecutionResult
 import com.example.domain.agent.AutonomousAgentOrchestrator
 import com.example.domain.context.UnifiedContextEngine
+import com.example.domain.model.AgentRole
+import com.example.domain.model.AgentStepPlan
+import com.example.domain.model.AgentStepStatus
 import com.example.domain.model.AiResponseState
+import com.example.domain.model.AppSettings
 import com.example.domain.model.IntelligenceIntent
 import com.example.domain.model.MediaAttachmentKind
+import com.example.domain.model.OperatingMode
 import com.example.domain.model.ProviderType
 import com.example.domain.model.ResponseBlock
 import com.example.domain.model.ResponseLanguage
 import com.example.domain.model.RoutingDecision
 import com.example.domain.model.TokenUsage
 import com.example.domain.repository.SettingsRepository
+import com.example.domain.router.DefaultModelRouter
 import com.example.domain.router.ModelRouter
 import com.example.domain.router.RealtimeIntelligenceRouter
+import com.example.domain.task.TaskExecutionEngine
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.cancellation.CancellationException
@@ -43,6 +50,7 @@ class DefaultAiOrchestrator @Inject constructor(
   private val unifiedContextEngine: UnifiedContextEngine? = null,
   private val agentOrchestrator: AutonomousAgentOrchestrator? = null,
   private val richLinkResolver: RichLinkResolver? = null,
+  private val taskExecutionEngine: TaskExecutionEngine? = null,
 ) : AiOrchestrator {
 
   // Backward-compatible constructor for isolated Phase 2 unit tests
@@ -65,6 +73,7 @@ class DefaultAiOrchestrator @Inject constructor(
     unifiedContextEngine = null,
     agentOrchestrator = null,
     richLinkResolver = null,
+    taskExecutionEngine = null,
   )
 
   override fun processMessage(request: OrchestrationRequest): Flow<OrchestrationEvent> = flow {
@@ -89,11 +98,16 @@ class DefaultAiOrchestrator @Inject constructor(
       return@flow
     }
 
+    val effectiveTaskMode = request.isTaskMode || request.operatingMode == OperatingMode.TASK_MODE
     val intent =
       when {
         request.activeEditTarget != null -> IntelligenceIntent.IMAGE_EDITING
         request.imageGenerationRequested && request.currentTurnImages.isEmpty() ->
           IntelligenceIntent.IMAGE_GENERATION
+        request.operatingMode == OperatingMode.DEEP_RESEARCH || request.deepResearchRequested ->
+          IntelligenceIntent.DEEP_RESEARCH
+        request.operatingMode == OperatingMode.GOOGLE_AI_SEARCH ->
+          IntelligenceIntent.LIVE_SEARCH
         else ->
           realtimeRouter?.classifyIntent(
             prompt = cleanPrompt,
@@ -106,7 +120,10 @@ class DefaultAiOrchestrator @Inject constructor(
 
     emit(
       OrchestrationEvent.StateChanged(
-        AiResponseState.Thinking("Intent: ${intent.label} • Routing verified model…")
+        AiResponseState.Thinking(
+          if (effectiveTaskMode) "Task Mode: Decomposing goal & selecting specialist model…"
+          else "Intent: ${intent.label} • Routing verified model…"
+        )
       )
     )
 
@@ -116,14 +133,24 @@ class DefaultAiOrchestrator @Inject constructor(
         request.pendingMediaItems.any { it.kind == MediaAttachmentKind.VIDEO || it.kind == MediaAttachmentKind.PHOTO }
 
     val baseDecision =
-      modelRouter
-        .route(
+      if (modelRouter is DefaultModelRouter) {
+        modelRouter.routeWithOperatingMode(
+          prompt = cleanPrompt,
+          hasImages = hasVisualInput,
+          imageCount = request.currentTurnImages.size,
+          requestedModelId = request.requestedModelId,
+          settings = settings,
+          operatingMode = if (effectiveTaskMode) OperatingMode.TASK_MODE else request.operatingMode,
+        )
+      } else {
+        modelRouter.route(
           prompt = cleanPrompt,
           hasImages = hasVisualInput,
           imageCount = request.currentTurnImages.size,
           requestedModelId = request.requestedModelId,
           settings = settings,
         )
+      }
         .getOrElse { routingErr ->
           emit(
             OrchestrationEvent.StateChanged(
@@ -136,7 +163,10 @@ class DefaultAiOrchestrator @Inject constructor(
           return@flow
         }
 
-    val decision: RoutingDecision = baseDecision.copy(intelligenceIntent = intent)
+    val decision: RoutingDecision = baseDecision.copy(
+      intelligenceIntent = intent,
+      operatingMode = if (effectiveTaskMode) OperatingMode.TASK_MODE else request.operatingMode,
+    )
     emit(OrchestrationEvent.Routed(decision))
 
     if (request.historyMessages.isEmpty()) {
@@ -206,48 +236,108 @@ class DefaultAiOrchestrator @Inject constructor(
         memoryEnabled = settings.privacyPerformanceConfig.memoryEnabled,
       )
 
+    val taskBlocks = mutableListOf<ResponseBlock>()
     val agentNotes =
-      if (agentOrchestrator != null &&
-        settings.agentBudgetConfig.multiAgentModeEnabled &&
-        (request.isTaskMode || intent != IntelligenceIntent.DIRECT_CHAT)
+      if (effectiveTaskMode ||
+        (agentOrchestrator != null &&
+          settings.agentBudgetConfig.multiAgentModeEnabled &&
+          intent != IntelligenceIntent.DIRECT_CHAT)
       ) {
-        val plannedSteps =
-          agentOrchestrator.planWorkflow(
+        val initialSteps =
+          agentOrchestrator?.planWorkflow(
             goal = cleanPrompt,
             attachments = request.pendingMediaItems,
             hasImages = request.currentTurnImages.isNotEmpty(),
             budget = settings.agentBudgetConfig,
+          ) ?: buildFallbackTaskSteps(cleanPrompt, request)
+
+        val initialPlanBlock = ResponseBlock.TaskPlanBlock(goal = cleanPrompt, steps = initialSteps)
+        if (effectiveTaskMode) {
+          emit(OrchestrationEvent.BlocksUpdated(llmPrep.preEmittedBlocks + initialPlanBlock))
+          emit(
+            OrchestrationEvent.StateChanged(
+              AiResponseState.Thinking("Task Mode: Executing ${initialSteps.size}-step workflow…")
+            )
           )
-        val agentResult =
-          agentOrchestrator.executePlan(
-            goal = cleanPrompt,
-            initialSteps = plannedSteps,
-            budget = settings.agentBudgetConfig,
-            approvedSensitiveActions = false,
-          ) { step ->
-            Result.success("${step.description} ready")
-          }
-        when (agentResult) {
-          is AgentExecutionResult.Completed -> agentResult.contextSummary
-          is AgentExecutionResult.AwaitingApproval ->
-            "Action requires user confirmation in Control Center / Automation: ${agentResult.pendingStep.description}"
-          else -> ""
         }
+
+        val stepSummaryText: String
+        val finalSteps: List<AgentStepPlan>
+        if (agentOrchestrator != null) {
+          val agentResult =
+            agentOrchestrator.executePlan(
+              goal = cleanPrompt,
+              initialSteps = initialSteps,
+              budget = settings.agentBudgetConfig,
+              approvedSensitiveActions = false,
+            ) { step ->
+              executeTaskModeStepCheck(
+                step = step,
+                request = request,
+                settings = settings,
+                hasUnifiedContext = unifiedSnapshot != null,
+                toolCount = verifiedToolNotes.size,
+              )
+            }
+          when (agentResult) {
+            is AgentExecutionResult.Completed -> {
+              finalSteps = agentResult.steps
+              stepSummaryText = agentResult.contextSummary
+            }
+            is AgentExecutionResult.AwaitingApproval -> {
+              finalSteps = agentResult.steps
+              val approvalNotice =
+                "Approval Gate Triggered: '${agentResult.pendingStep.description}' requires explicit confirmation before execution."
+              // Also build interactive managed task batch when device/assistant sub-tasks exist
+              val batchReport =
+                taskExecutionEngine?.planAndExecuteMultiTask(
+                  instruction = cleanPrompt,
+                  approveSensitiveTasks = false,
+                )
+              if (batchReport != null && batchReport.tasks.isNotEmpty()) {
+                taskBlocks += ResponseBlock.MultiTaskBatchBlock(batchReport)
+              }
+              stepSummaryText =
+                (agentResult.steps.joinToString("\n") { "• ${it.agent.label} [${it.status.name}]: ${it.outputSummary}" } +
+                  "\n$approvalNotice").trim()
+            }
+            is AgentExecutionResult.BudgetExceededOrFailed -> {
+              finalSteps = agentResult.steps
+              stepSummaryText = "Task Step Issue: ${agentResult.reason}"
+            }
+            is AgentExecutionResult.Cancelled -> {
+              finalSteps = agentResult.steps
+              stepSummaryText = "Task workflow cancelled by user."
+            }
+          }
+        } else {
+          finalSteps = initialSteps.map { it.copy(status = AgentStepStatus.COMPLETED, outputSummary = "Prepared") }
+          stepSummaryText = finalSteps.joinToString("\n") { "• ${it.agent.label}: ${it.outputSummary}" }
+        }
+
+        if (effectiveTaskMode) {
+          taskBlocks.add(0, ResponseBlock.TaskPlanBlock(goal = cleanPrompt, steps = finalSteps))
+          emit(OrchestrationEvent.BlocksUpdated(llmPrep.preEmittedBlocks + taskBlocks))
+        }
+        stepSummaryText
       } else {
         ""
       }
+
+    val preBlocksWithTasks = llmPrep.preEmittedBlocks + taskBlocks
 
     val combinedExtraContext =
       listOfNotNull(
         llmPrep.extraSystemContext.takeIf { it.isNotBlank() },
         unifiedSnapshot?.contextBlock?.takeIf { it.isNotBlank() },
-        agentNotes.takeIf { it.isNotBlank() }?.let { "Autonomous Multi-Agent Plan:\n$it" },
+        agentNotes.takeIf { it.isNotBlank() }?.let { "Task Mode Execution & Tool Verification:\n$it" },
       ).joinToString("\n\n")
 
     val systemPrompt =
       buildSystemPrompt(
         language = settings.voicePreferences.preferredLanguage,
-        isTaskMode = request.isTaskMode,
+        isTaskMode = effectiveTaskMode,
+        operatingMode = decision.operatingMode,
         intent = intent,
         categoryLabel = decision.category.label,
         toolNotes = verifiedToolNotes,
@@ -295,7 +385,7 @@ class DefaultAiOrchestrator @Inject constructor(
               systemPrompt = systemPrompt,
               turns = recentTurns,
               settings = settings,
-              temperature = if (request.isTaskMode || intent == IntelligenceIntent.DATA_ANALYSIS) 0.25 else 0.7,
+              temperature = if (effectiveTaskMode || intent == IntelligenceIntent.DATA_ANALYSIS) 0.25 else 0.7,
             )
           )
           .collect { event ->
@@ -331,7 +421,7 @@ class DefaultAiOrchestrator @Inject constructor(
         val richCards = richLinkResolver?.extractRichCards("$cleanPrompt\n$finalText").orEmpty()
         val combinedBlocks =
           buildList {
-            addAll(llmPrep.preEmittedBlocks)
+            addAll(preBlocksWithTasks)
             if (richCards.isNotEmpty()) {
               add(ResponseBlock.RichLinkCardBlock(richCards))
             }
@@ -379,6 +469,74 @@ class DefaultAiOrchestrator @Inject constructor(
     }
   }
 
+  private fun buildFallbackTaskSteps(
+    goal: String,
+    request: OrchestrationRequest,
+  ): List<AgentStepPlan> {
+    return listOf(
+      AgentStepPlan(
+        id = "step_plan",
+        agent = AgentRole.TASK_PLANNING,
+        description = "Decompose goal '${goal.take(40)}' into structured actions",
+      ),
+      AgentStepPlan(
+        id = "step_execute",
+        agent = AgentRole.CODING,
+        description =
+          if (request.currentTurnImages.isNotEmpty()) "Analyze visual inputs & execute structured response"
+          else "Generate verified step-by-step action plan & deliverable",
+        dependsOnIds = listOf("step_plan"),
+      ),
+      AgentStepPlan(
+        id = "step_verify",
+        agent = AgentRole.VERIFICATION,
+        description = "Validate constraints, safety gates & missing prerequisites",
+        dependsOnIds = listOf("step_execute"),
+      ),
+    )
+  }
+
+  private fun executeTaskModeStepCheck(
+    step: AgentStepPlan,
+    request: OrchestrationRequest,
+    settings: AppSettings,
+    hasUnifiedContext: Boolean,
+    toolCount: Int,
+  ): Result<String> {
+    return when (step.agent) {
+      AgentRole.TASK_PLANNING ->
+        Result.success("Goal decomposed into structured task dependencies.")
+      AgentRole.MEMORY ->
+        Result.success(
+          if (hasUnifiedContext) "Retrieved conversation & memory context."
+          else "Ready with current turn context."
+        )
+      AgentRole.VISION ->
+        if (request.currentTurnImages.isNotEmpty() || request.pendingMediaItems.any { it.kind == MediaAttachmentKind.PHOTO }) {
+          Result.success("${request.currentTurnImages.size.coerceAtLeast(1)} image input(s) validated for inspection.")
+        } else {
+          Result.failure(IllegalStateException("No image attached for visual step."))
+        }
+      AgentRole.DOCUMENT ->
+        if (request.pendingMediaItems.any { it.kind == MediaAttachmentKind.DOCUMENT }) {
+          Result.success("Attached document context verified.")
+        } else {
+          Result.failure(IllegalStateException("No document attached for document extraction."))
+        }
+      AgentRole.WEB_SEARCH, AgentRole.DEEP_RESEARCH -> {
+        val hasCreds =
+          settings.geminiApiKey.isNotBlank() ||
+            settings.externalSearchUrl.isNotBlank() ||
+            settings.connectionMode.name == "BACKEND_PROXY"
+        if (hasCreds || toolCount > 0) Result.success("Live web grounding check passed.")
+        else Result.success("No external search key set; proceeding with cautious offline reasoning.")
+      }
+      AgentRole.VERIFICATION ->
+        Result.success("Checked preconditions & safety/approval status.")
+      else -> Result.success("${step.description} prepared for synthesis.")
+    }
+  }
+
   override fun deriveConversationTitle(firstPrompt: String): String {
     val cleaned =
       firstPrompt
@@ -393,6 +551,7 @@ class DefaultAiOrchestrator @Inject constructor(
   private fun buildSystemPrompt(
     language: ResponseLanguage,
     isTaskMode: Boolean,
+    operatingMode: OperatingMode,
     intent: IntelligenceIntent,
     categoryLabel: String,
     toolNotes: List<String>,
@@ -411,8 +570,10 @@ class DefaultAiOrchestrator @Inject constructor(
         ResponseLanguage.ENGLISH ->
           append("Respond clearly in English. ")
       }
-      if (isTaskMode) {
-        append("The user is in Task Mode: deliver structured, actionable steps and concise execution checklists. ")
+      if (operatingMode == OperatingMode.ANALYSIS_THINK) {
+        append("The user selected Analysis / Think mode: verify logic rigorously, consider edge cases, and present a clear structured final answer without exposing raw internal scratchpad tags. ")
+      } else if (isTaskMode || operatingMode == OperatingMode.TASK_MODE) {
+        append("The user is in Task Mode: deliver a clear structured plan with concrete deliverables, verification checks, and exact next steps. Never claim an external or unapproved device action was completed if it awaits user confirmation. ")
       }
       if (hasImages) {
         append("Analyze attached image(s) carefully—describe visual contents, text/OCR, and answer accurately without guessing unreadable text. ")

@@ -10,7 +10,8 @@ import kotlinx.coroutines.flow.asStateFlow
 data class AuthUserSession(
   val uid: String = "",
   val isSignedIn: Boolean = false,
-  val displayName: String = "Guest Creator",
+  val isGuest: Boolean = false,
+  val displayName: String = "Mousomi User",
   val email: String? = null,
   val photoUrl: String? = null,
   val entitlementTier: EntitlementTier = EntitlementTier.LOCAL_BYOK,
@@ -37,6 +38,8 @@ interface OptionalAuthGateway {
   suspend fun signInWithGoogle(activity: Activity): GoogleSignInOutcome =
     GoogleSignInOutcome.Error("Interactive sign-in not configured in this test gateway.")
 
+  suspend fun enterGuestMode() {}
+
   fun registerBeforeSignOutHook(hook: () -> Unit) {}
 
   suspend fun signOut()
@@ -49,6 +52,18 @@ class DefaultNoOpAuthGateway @Inject constructor() : OptionalAuthGateway {
   override fun observeSession(): Flow<AuthUserSession> = sessionFlow.asStateFlow()
 
   override fun getCurrentSession(): AuthUserSession = sessionFlow.value
+
+  override suspend fun enterGuestMode() {
+    sessionFlow.value =
+      AuthUserSession(
+        uid = "guest_local",
+        isSignedIn = false,
+        isGuest = true,
+        displayName = "Guest User",
+        email = null,
+        entitlementTier = EntitlementTier.LOCAL_BYOK,
+      )
+  }
 
   override suspend fun signOut() {
     sessionFlow.value = AuthUserSession()

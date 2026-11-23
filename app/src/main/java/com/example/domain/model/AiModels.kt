@@ -5,7 +5,40 @@ import kotlinx.serialization.Serializable
 enum class ProviderType {
   GEMINI,
   GROQ,
+  CLOUDFLARE,
   PROXY,
+}
+
+enum class OperatingMode(
+  val label: String,
+  val shortLabel: String,
+  val description: String,
+) {
+  NORMAL_CHAT(
+    label = "Normal Chat",
+    shortLabel = "Normal",
+    description = "Direct conversational AI using the active model or Mousomi Auto",
+  ),
+  ANALYSIS_THINK(
+    label = "Analysis / Think",
+    shortLabel = "Analysis",
+    description = "Deeper structured reasoning budget without exposing raw internal thoughts",
+  ),
+  GOOGLE_AI_SEARCH(
+    label = "Google AI Search",
+    shortLabel = "AI Search",
+    description = "Real-time grounded web search with inline clickable citations",
+  ),
+  DEEP_RESEARCH(
+    label = "Deep Research",
+    shortLabel = "Deep Research",
+    description = "7-stage live multi-source research, verification, and structured report",
+  ),
+  TASK_MODE(
+    label = "Task Mode",
+    shortLabel = "Task Mode",
+    description = "Structured multi-step planning, tool selection, approval gates & step execution",
+  ),
 }
 
 enum class TaskCategory(val label: String) {
@@ -41,6 +74,9 @@ data class AiCapabilities(
   val supportsGoogleSearchGrounding: Boolean = false,
   val supportsAudioInput: Boolean = false,
   val supportsVideoFrameAnalysis: Boolean = supportsVision,
+  val supportsImageGeneration: Boolean = false,
+  val supportsLiveAudio: Boolean = false,
+  val supportsPromptGuard: Boolean = false,
 )
 
 data class AiModelSpec(
@@ -52,14 +88,29 @@ data class AiModelSpec(
   val capabilities: AiCapabilities,
   val description: String,
   val selectorSlotId: String = id,
+  val fallbackModelIds: List<String> = emptyList(),
 )
 
 object VerifiedModelCatalog {
   const val HYDROGEN_SLOT_ID = "gemini_4_hydrogen"
-  const val DEFAULT_HYDROGEN_BACKING_MODEL_ID = "gemini-3.8-flash"
-  const val DEFAULT_GROQ_REASONING_MODEL_ID = "qwen/qwen3.8-27b"
-  const val FALLBACK_GROQ_MODEL_ID = "llama-3.3-70b-versatile"
+  const val IMAGE_STUDIO_SLOT_ID = "gemini_image_studio"
+  const val FLASH_LITE_SLOT_ID = "gemini_flash_lite"
+  const val LIVE_AUDIO_SLOT_ID = "gemini_live_audio"
+  const val GROQ_REASONING_SLOT_ID = "groq_high_speed_reasoning"
+  const val GROQ_HELPER_GUARD_SLOT_ID = "groq_helper_guard"
+  const val MOUSOMI_AUTO_SLOT_ID = "mousomi_auto"
+
+  const val DEFAULT_HYDROGEN_BACKING_MODEL_ID = "gemini-4-hydrogen"
+  const val LEGACY_HYDROGEN_FALLBACK_ID = "gemini-3.8-flash"
   const val DEFAULT_IMAGE_MODEL_ID = "gemini-nano-banana-2.1"
+  const val DEPRECATED_IMAGE_MODEL_ID = "gemini-3.1-flash-image"
+  const val DEFAULT_FLASH_LITE_MODEL_ID = "gemini-3.5-flash-lite"
+  const val DEFAULT_LIVE_AUDIO_MODEL_ID = "gemini-3.1-flash-live-preview"
+  const val DEFAULT_GROQ_REASONING_MODEL_ID = "qwen/qwen3.8-27b"
+  const val FALLBACK_GROQ_REASONING_MODEL_ID = "openai/gpt-oss-120b"
+  const val FALLBACK_GROQ_MODEL_ID = "llama-3.3-70b-versatile"
+  const val DEFAULT_GROQ_HELPER_MODEL_ID = "openai/gpt-oss-20b"
+  const val GROQ_SAFEGUARD_MODEL_ID = "openai/gpt-oss-safeguard-20b"
 
   fun createHydrogenSpec(backingModelId: String = DEFAULT_HYDROGEN_BACKING_MODEL_ID): AiModelSpec {
     val cleanId = backingModelId.trim().ifBlank { DEFAULT_HYDROGEN_BACKING_MODEL_ID }
@@ -68,29 +119,6 @@ object VerifiedModelCatalog {
       selectorSlotId = HYDROGEN_SLOT_ID,
       displayName = "Gemini 4 Hydrogen",
       shortLabel = "4 Hydrogen",
-      provider = ProviderType.GEMINI,
-      latencyTier = LatencyTier.BALANCED,
-      capabilities =
-        AiCapabilities(
-          supportsStreaming = true,
-          supportsVision = true,
-          supportsMultiImage = true,
-          supportsSystemInstruction = true,
-          maxContextTokens = 1_048_576,
-          supportsGoogleSearchGrounding = true,
-          supportsAudioInput = true,
-          supportsVideoFrameAnalysis = true,
-        ),
-      description = "New Base Intelligence · Advanced AI Engine",
-    )
-  }
-
-  val geminiPro =
-    AiModelSpec(
-      id = "gemini-4-argon",
-      selectorSlotId = "gemini_pro",
-      displayName = "Gemini Pro",
-      shortLabel = "Pro",
       provider = ProviderType.GEMINI,
       latencyTier = LatencyTier.DEEP_REASONING,
       capabilities =
@@ -104,15 +132,40 @@ object VerifiedModelCatalog {
           supportsAudioInput = true,
           supportsVideoFrameAnalysis = true,
         ),
-      description = "Advanced Reasoning · Coding · Complex Analysis",
+      description = "Advanced Intelligence & Multimodal Reasoning · Search Grounding",
+      fallbackModelIds = listOf(LEGACY_HYDROGEN_FALLBACK_ID, "gemini-2.5-flash"),
     )
+  }
 
-  val geminiFlash =
+  fun createImageStudioSpec(imageModelId: String = DEFAULT_IMAGE_MODEL_ID): AiModelSpec {
+    val cleanId = imageModelId.trim().ifBlank { DEFAULT_IMAGE_MODEL_ID }
+    return AiModelSpec(
+      id = cleanId,
+      selectorSlotId = IMAGE_STUDIO_SLOT_ID,
+      displayName = "Gemini Image Studio",
+      shortLabel = "Image Studio",
+      provider = ProviderType.GEMINI,
+      latencyTier = LatencyTier.BALANCED,
+      capabilities =
+        AiCapabilities(
+          supportsStreaming = false,
+          supportsVision = true,
+          supportsMultiImage = true,
+          supportsSystemInstruction = true,
+          maxContextTokens = 128_000,
+          supportsImageGeneration = true,
+        ),
+      description = "AI Image Generation & Creative Editing · Free-First Router ($cleanId)",
+      fallbackModelIds = listOf(DEPRECATED_IMAGE_MODEL_ID),
+    )
+  }
+
+  val geminiFlashLite =
     AiModelSpec(
-      id = "gemini-3.8-flash",
-      selectorSlotId = "gemini_flash",
-      displayName = "Gemini Flash",
-      shortLabel = "Flash",
+      id = DEFAULT_FLASH_LITE_MODEL_ID,
+      selectorSlotId = FLASH_LITE_SLOT_ID,
+      displayName = "Gemini Flash-Lite",
+      shortLabel = "Flash-Lite",
       provider = ProviderType.GEMINI,
       latencyTier = LatencyTier.ULTRA_FAST,
       capabilities =
@@ -126,16 +179,39 @@ object VerifiedModelCatalog {
           supportsAudioInput = true,
           supportsVideoFrameAnalysis = true,
         ),
-      description = "Fast Responses · Everyday AI · Multimodal Tasks",
+      description = "Ultra-Fast Intelligence · Low Latency Everyday Tasks",
+      fallbackModelIds = listOf("gemini-2.5-flash-lite", LEGACY_HYDROGEN_FALLBACK_ID),
+    )
+
+  val geminiLiveAudio =
+    AiModelSpec(
+      id = DEFAULT_LIVE_AUDIO_MODEL_ID,
+      selectorSlotId = LIVE_AUDIO_SLOT_ID,
+      displayName = "Gemini Live Audio",
+      shortLabel = "Live Audio",
+      provider = ProviderType.GEMINI,
+      latencyTier = LatencyTier.ULTRA_FAST,
+      capabilities =
+        AiCapabilities(
+          supportsStreaming = true,
+          supportsVision = true,
+          supportsMultiImage = false,
+          supportsSystemInstruction = true,
+          maxContextTokens = 128_000,
+          supportsAudioInput = true,
+          supportsLiveAudio = true,
+        ),
+      description = "Real-Time Voice Intelligence · Duplex Mic & Natural Speech",
+      fallbackModelIds = listOf(DEFAULT_HYDROGEN_BACKING_MODEL_ID),
     )
 
   fun createGroqReasoningSpec(modelId: String = DEFAULT_GROQ_REASONING_MODEL_ID): AiModelSpec {
     val cleanId = modelId.trim().ifBlank { DEFAULT_GROQ_REASONING_MODEL_ID }
     return AiModelSpec(
       id = cleanId,
-      selectorSlotId = "groq_reasoning",
-      displayName = "Groq Reasoning",
-      shortLabel = "Groq",
+      selectorSlotId = GROQ_REASONING_SLOT_ID,
+      displayName = "Groq High-Speed Reasoning",
+      shortLabel = "Groq Reason",
       provider = ProviderType.GROQ,
       latencyTier = LatencyTier.DEEP_REASONING,
       capabilities =
@@ -149,12 +225,64 @@ object VerifiedModelCatalog {
           supportsAudioInput = false,
           supportsVideoFrameAnalysis = false,
         ),
-      description = "Fast Inference · Logical Reasoning · Technical Assistance",
+      description = "Fast Reasoning & Coding ($cleanId / $FALLBACK_GROQ_REASONING_MODEL_ID)",
+      fallbackModelIds = listOf(FALLBACK_GROQ_REASONING_MODEL_ID, FALLBACK_GROQ_MODEL_ID),
     )
   }
 
-  // Preserved aliases for Phase 2 routing and tests
+  fun createGroqHelperGuardSpec(modelId: String = DEFAULT_GROQ_HELPER_MODEL_ID): AiModelSpec {
+    val cleanId = modelId.trim().ifBlank { DEFAULT_GROQ_HELPER_MODEL_ID }
+    return AiModelSpec(
+      id = cleanId,
+      selectorSlotId = GROQ_HELPER_GUARD_SLOT_ID,
+      displayName = "Groq Ultra-Fast Helper & Guard",
+      shortLabel = "Helper & Guard",
+      provider = ProviderType.GROQ,
+      latencyTier = LatencyTier.ULTRA_FAST,
+      capabilities =
+        AiCapabilities(
+          supportsStreaming = true,
+          supportsVision = false,
+          supportsMultiImage = false,
+          supportsSystemInstruction = true,
+          maxContextTokens = 128_000,
+          supportsPromptGuard = true,
+        ),
+      description = "Ultra-Fast Helper & Prompt Safety ($cleanId / $GROQ_SAFEGUARD_MODEL_ID)",
+      fallbackModelIds = listOf(GROQ_SAFEGUARD_MODEL_ID, "llama-3.1-8b-instant"),
+    )
+  }
+
+  val mousomiAuto =
+    AiModelSpec(
+      id = "auto",
+      selectorSlotId = MOUSOMI_AUTO_SLOT_ID,
+      displayName = "Mousomi Auto",
+      shortLabel = "Auto",
+      provider = ProviderType.GEMINI,
+      latencyTier = LatencyTier.BALANCED,
+      capabilities =
+        AiCapabilities(
+          supportsStreaming = true,
+          supportsVision = true,
+          supportsMultiImage = true,
+          supportsSystemInstruction = true,
+          maxContextTokens = 1_048_576,
+          supportsGoogleSearchGrounding = true,
+          supportsAudioInput = true,
+          supportsVideoFrameAnalysis = true,
+          supportsImageGeneration = true,
+          supportsLiveAudio = true,
+        ),
+      description = "Smart Automatic Router · Displays the actual active backing model",
+    )
+
+  // Preserved legacy aliases for compatibility with existing router & tests
+  val geminiImageStudio: AiModelSpec = createImageStudioSpec()
+  val geminiPro: AiModelSpec = createHydrogenSpec()
+  val geminiFlash: AiModelSpec = geminiFlashLite
   val groqReasoning: AiModelSpec = createGroqReasoningSpec()
+  val groqHelperGuard: AiModelSpec = createGroqHelperGuardSpec()
 
   val groqLlama70b =
     AiModelSpec(
@@ -192,11 +320,33 @@ object VerifiedModelCatalog {
       description = "Ultra-low-latency text chat via Groq",
     )
 
-  val fourSelectableModels: List<AiModelSpec> =
-    listOf(createHydrogenSpec(), geminiPro, geminiFlash, groqReasoning)
+  fun buildSevenSelectableModels(settings: AppSettings = AppSettings()): List<AiModelSpec> =
+    listOf(
+      createHydrogenSpec(settings.hydrogenBackingModelId),
+      createImageStudioSpec(settings.imageModelId),
+      geminiFlashLite,
+      geminiLiveAudio,
+      createGroqReasoningSpec(settings.groqReasoningModelId),
+      createGroqHelperGuardSpec(settings.groqHelperGuardModelId),
+      mousomiAuto,
+    )
+
+  val sevenSelectableModels: List<AiModelSpec> = buildSevenSelectableModels()
 
   val allModels: List<AiModelSpec> =
-    listOf(createHydrogenSpec(), geminiPro, geminiFlash, groqReasoning, groqLlama70b, groqLlama8bInstant)
+    sevenSelectableModels + listOf(groqLlama70b, groqLlama8bInstant)
+
+  fun resolveModelBySlot(slotId: String, settings: AppSettings = AppSettings()): AiModelSpec =
+    when (slotId) {
+      HYDROGEN_SLOT_ID -> createHydrogenSpec(settings.hydrogenBackingModelId)
+      IMAGE_STUDIO_SLOT_ID -> createImageStudioSpec(settings.imageModelId)
+      FLASH_LITE_SLOT_ID, "gemini_flash" -> geminiFlashLite
+      LIVE_AUDIO_SLOT_ID -> geminiLiveAudio
+      GROQ_REASONING_SLOT_ID, "groq_reasoning" -> createGroqReasoningSpec(settings.groqReasoningModelId)
+      GROQ_HELPER_GUARD_SLOT_ID -> createGroqHelperGuardSpec(settings.groqHelperGuardModelId)
+      MOUSOMI_AUTO_SLOT_ID, "auto" -> mousomiAuto
+      else -> createHydrogenSpec(settings.hydrogenBackingModelId)
+    }
 }
 
 data class RoutingDecision(
@@ -205,6 +355,8 @@ data class RoutingDecision(
   val reason: String,
   val useProxy: Boolean,
   val intelligenceIntent: IntelligenceIntent = IntelligenceIntent.NORMAL_AI,
+  val resolvedFromAuto: Boolean = false,
+  val operatingMode: OperatingMode = OperatingMode.NORMAL_CHAT,
 )
 
 @Serializable
@@ -298,11 +450,17 @@ data class AppSettings(
   val proxyBaseUrl: String = "",
   val geminiApiKey: String = "",
   val groqApiKey: String = "",
+  val cloudflareAccountId: String = "",
+  val cloudflareApiToken: String = "",
+  val strictFreeImageOnly: Boolean = true,
+  val allowPaidImageFallbackApproved: Boolean = false,
   val themeModeName: String = "DARK",
   val voicePreferences: VoicePreferences = VoicePreferences(),
-  val selectedModelOptionName: String = "GEMINI_4_HYDROGEN",
+  val selectedModelOptionName: String = "MOUSOMI_AUTO",
+  val operatingModeName: String = OperatingMode.NORMAL_CHAT.name,
   val hydrogenBackingModelId: String = VerifiedModelCatalog.DEFAULT_HYDROGEN_BACKING_MODEL_ID,
   val groqReasoningModelId: String = VerifiedModelCatalog.DEFAULT_GROQ_REASONING_MODEL_ID,
+  val groqHelperGuardModelId: String = VerifiedModelCatalog.DEFAULT_GROQ_HELPER_MODEL_ID,
   val imageModelId: String = VerifiedModelCatalog.DEFAULT_IMAGE_MODEL_ID,
   val externalSearchUrl: String = "",
   val externalSearchApiKey: String = "",

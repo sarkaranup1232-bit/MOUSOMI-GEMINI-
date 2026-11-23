@@ -81,12 +81,16 @@ class MainActivity : ComponentActivity() {
 
   private var pendingQuickActionState = mutableStateOf<OrbQuickAction?>(null)
   private var pendingPopupActionState = mutableStateOf<OrbPopupAction?>(null)
+  private var pendingAttachScreenSelectionState = mutableStateOf(false)
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     setIntent(intent)
     extractQuickAction(intent)?.let { pendingQuickActionState.value = it }
     extractPopupAction(intent)?.let { pendingPopupActionState.value = it }
+    if (intent.action == ACTION_ATTACH_SCREEN_SELECTION) {
+      pendingAttachScreenSelectionState.value = true
+    }
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -97,15 +101,18 @@ class MainActivity : ComponentActivity() {
 
     pendingQuickActionState.value = extractQuickAction(intent)
     pendingPopupActionState.value = extractPopupAction(intent)
+    pendingAttachScreenSelectionState.value = intent?.action == ACTION_ATTACH_SCREEN_SELECTION
 
     setContent {
       val authSession by
         authGateway.observeSession().collectAsStateWithLifecycle(
           initialValue = authGateway.getCurrentSession()
         )
-      val activeUid = authSession.uid.takeIf { authSession.isSignedIn && it.isNotBlank() }
+      val canEnterApp =
+        (authSession.isSignedIn && authSession.uid.isNotBlank()) || authSession.isGuest
+      val sessionKey = if (authSession.isGuest) "guest_local" else authSession.uid
 
-      if (activeUid == null) {
+      if (!canEnterApp) {
         MousomiTheme(themeMode = AppThemeMode.DARK) {
           AuthScreen(
             authGateway = authGateway,
@@ -113,8 +120,8 @@ class MainActivity : ComponentActivity() {
           )
         }
       } else {
-        key(activeUid) {
-          val viewModel: MousomiViewModel = hiltViewModel(key = activeUid)
+        key(sessionKey) {
+          val viewModel: MousomiViewModel = hiltViewModel(key = sessionKey)
           val uiState by viewModel.uiState.collectAsStateWithLifecycle()
           val navController = rememberNavController()
 
@@ -163,8 +170,50 @@ class MainActivity : ComponentActivity() {
         viewModel.onStopScreenShare()
       }
 
+      val screenSelectionConsentLauncher =
+        rememberLauncherForActivityResult(
+          contract = ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+          val data = result.data
+          if (result.resultCode == Activity.RESULT_OK && data != null) {
+            val svcIntent =
+              MediaProjectionCaptureService.buildStartIntent(
+                context = this@MainActivity,
+                resultCode = result.resultCode,
+                data = data,
+                forScreenSelection = true,
+              )
+            ContextCompat.startForegroundService(this@MainActivity, svcIntent)
+          } else {
+            viewModel.onScreenSelectionConsentCancelled()
+          }
+        }
+
+      val startScreenSelectionFlow: () -> Unit = {
+        viewModel.onStartScreenSelectionFlow {
+          val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+          if (mgr != null) {
+            screenSelectionConsentLauncher.launch(mgr.createScreenCaptureIntent())
+          } else {
+            viewModel.onScreenSelectionConsentCancelled()
+          }
+        }
+      }
+
       val activeQuickAction by pendingQuickActionState
       val activePopupAction by pendingPopupActionState
+      val activeAttachScreenSelection by pendingAttachScreenSelectionState
+
+      LaunchedEffect(activeAttachScreenSelection) {
+        if (activeAttachScreenSelection) {
+          pendingAttachScreenSelectionState.value = false
+          viewModel.onReturnedFromSystemSelection()
+          navController.navigate(MousomiRoutes.CHAT) {
+            launchSingleTop = true
+            popUpTo(MousomiRoutes.CHAT) { inclusive = false }
+          }
+        }
+      }
 
       LaunchedEffect(activeQuickAction) {
         val action = activeQuickAction ?: return@LaunchedEffect
@@ -184,6 +233,9 @@ class MainActivity : ComponentActivity() {
         viewModel.onHandleOrbPopupAction(
           action = popup,
           onRequestScreenShare = startScreenShareFlow,
+          onNavigateToLens = {
+            navController.navigate(MousomiRoutes.LENS) { launchSingleTop = true }
+          },
           onNavigateToAssistantHub = { tab ->
             viewModel.onSetRequestedHubTab(tab)
             navController.navigate(MousomiRoutes.ASSISTANT_HUB) { launchSingleTop = true }
@@ -191,12 +243,16 @@ class MainActivity : ComponentActivity() {
         )
       }
 
-      // Sync optional system-wide floating overlay service safely when explicitly allowed
+      // Sync optional system-wide floating overlay service safely when explicitly toggled in settings
+      var wasSystemOverlayEnabled by remember { mutableStateOf(uiState.edgeLightConfig.systemOverlayEnabled) }
       LaunchedEffect(uiState.edgeLightConfig.systemOverlayEnabled) {
-        if (uiState.edgeLightConfig.systemOverlayEnabled && Settings.canDrawOverlays(this@MainActivity)) {
+        val enabled = uiState.edgeLightConfig.systemOverlayEnabled
+        if (enabled && Settings.canDrawOverlays(this@MainActivity)) {
+          wasSystemOverlayEnabled = true
           val intent = Intent(this@MainActivity, MousomiOverlayService::class.java)
           ContextCompat.startForegroundService(this@MainActivity, intent)
-        } else {
+        } else if (!enabled && wasSystemOverlayEnabled) {
+          wasSystemOverlayEnabled = false
           stopService(Intent(this@MainActivity, MousomiOverlayService::class.java))
         }
       }
@@ -251,6 +307,7 @@ class MainActivity : ComponentActivity() {
                 },
                 onRequestStartScreenShare = startScreenShareFlow,
                 onStopScreenShare = stopScreenShareFlow,
+                onRequestStartScreenSelection = startScreenSelectionFlow,
                 onNavigateToAssistantHub = { tab ->
                   viewModel.onSetRequestedHubTab(tab)
                   navController.navigate(MousomiRoutes.ASSISTANT_HUB) { launchSingleTop = true }
@@ -439,6 +496,8 @@ class MainActivity : ComponentActivity() {
               notificationAlertActive = uiState.notificationPulseActive,
               isSystemPowerSave = uiState.isSystemPowerSave,
               currentHour = currentHour,
+              assistantSessionPhase = uiState.assistantSessionPhase,
+              edgeActivationSignal = uiState.edgeActivationSignal,
             )
           EdgeLightPerimeterOverlay(params = edgeParams)
         }
@@ -468,5 +527,6 @@ class MainActivity : ComponentActivity() {
   companion object {
     const val EXTRA_QUICK_ACTION = "extra_orb_quick_action"
     const val EXTRA_ORB_POPUP_ACTION = "extra_orb_popup_action"
+    const val ACTION_ATTACH_SCREEN_SELECTION = "com.example.action.ATTACH_SCREEN_SELECTION"
   }
 }

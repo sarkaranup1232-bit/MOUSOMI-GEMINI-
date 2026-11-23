@@ -67,14 +67,21 @@ class Part3IntelligenceUnitTest {
   private val sourceVerifier = SourceVerifier(securityValidator)
 
   @Test
-  fun `model catalog exposes exactly four verified selectable models without image generation`() {
-    val models = VerifiedModelCatalog.fourSelectableModels
-    assertEquals(4, models.size)
+  fun `model catalog exposes exactly seven verified selectable models`() {
+    val models = VerifiedModelCatalog.sevenSelectableModels
+    assertEquals(7, models.size)
     assertEquals(
-      listOf("Gemini 4 Hydrogen", "Gemini Pro", "Gemini Flash", "Groq Reasoning"),
+      listOf(
+        "Gemini 4 Hydrogen",
+        "Gemini Image Studio",
+        "Gemini Flash-Lite",
+        "Gemini Live Audio",
+        "Groq High-Speed Reasoning",
+        "Groq Ultra-Fast Helper & Guard",
+        "Mousomi Auto",
+      ),
       models.map { it.displayName },
     )
-    assertFalse(models.any { it.displayName.contains("Image", ignoreCase = true) })
   }
 
   @Test
@@ -108,7 +115,7 @@ class Part3IntelligenceUnitTest {
         requestedModelId = VerifiedModelCatalog.DEFAULT_GROQ_REASONING_MODEL_ID,
         settings = settings,
       ).getOrThrow()
-    assertEquals("Groq Reasoning", groqRoute.selectedModel.displayName)
+    assertEquals("Groq High-Speed Reasoning", groqRoute.selectedModel.displayName)
     assertEquals(ProviderType.GROQ, groqRoute.selectedModel.provider)
 
     // Graceful failover when Groq key is missing but user picked Groq Reasoning

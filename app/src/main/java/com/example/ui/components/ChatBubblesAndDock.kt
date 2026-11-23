@@ -115,6 +115,7 @@ fun GeminiTopBar(
   onEmergencyStop: () -> Unit = {},
   onOpenPermissions: () -> Unit = {},
   onOpenLens: () -> Unit = {},
+  resolvedAutoModelName: String? = null,
   modifier: Modifier = Modifier,
 ) {
   val colors = LocalMousomiColors.current
@@ -161,12 +162,18 @@ fun GeminiTopBar(
           maxLines = 1,
         )
         Spacer(modifier = Modifier.width(5.dp))
+        val topLabel =
+          if (selectedModel == AiModelOption.MOUSOMI_AUTO && !resolvedAutoModelName.isNullOrBlank()) {
+            "Auto • ${resolvedAutoModelName.removePrefix("Gemini ").removePrefix("Groq ")}"
+          } else {
+            selectedModel.shortLabel
+          }
         Text(
-          text = selectedModel.shortLabel,
+          text = topLabel,
           color = colors.mutedText,
           fontFamily = DisplayFontFamily,
           fontWeight = FontWeight.Normal,
-          fontSize = 16.sp,
+          fontSize = 15.sp,
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
         )

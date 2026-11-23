@@ -30,18 +30,33 @@ enum class EdgeLightVisualState(val label: String) {
 }
 
 @Serializable
+enum class EdgeLightIntensity(
+  val label: String,
+  val brightnessMultiplier: Float,
+  val glowMultiplier: Float,
+  val thicknessMultiplier: Float,
+) {
+  SUBTLE("Subtle", 0.62f, 0.78f, 0.85f),
+  NORMAL("Normal", 0.88f, 1.0f, 1.0f),
+  BRIGHT("Bright", 1.0f, 1.24f, 1.15f),
+  MAXIMUM("Maximum", 1.16f, 1.48f, 1.32f),
+}
+
+@Serializable
 data class EdgeLightConfig(
   val enabled: Boolean = true,
   val preset: EdgeLightPreset = EdgeLightPreset.GEMINI_FLOW,
-  val brightness: Float = 0.85f,
+  val intensity: EdgeLightIntensity = EdgeLightIntensity.BRIGHT,
+  val brightness: Float = 0.90f,
   val animationSpeed: Float = 1.0f,
-  val borderThicknessDp: Float = 5.5f,
+  val borderThicknessDp: Float = 6.0f,
   val cornerRadiusDp: Float = 36f,
   val primaryColorArgb: Long = 0xFF3B82F6,
   val secondaryColorArgb: Long = 0xFF06B6D4,
   val tertiaryColorArgb: Long = 0xFFA855F7,
   val quaternaryColorArgb: Long = 0xFFEC4899,
   val systemOverlayEnabled: Boolean = false,
+  val assistantEdgeGlowEnabled: Boolean = true,
   val batterySaverMode: Boolean = false,
   val reducedMotion: Boolean = false,
   val scheduleEnabled: Boolean = false,

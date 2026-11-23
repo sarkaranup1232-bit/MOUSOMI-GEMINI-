@@ -9,6 +9,8 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeUp
 import androidx.test.core.app.ApplicationProvider
 import com.example.ai.firebase.FirebaseAiLogicService
 import com.example.ai.provider.api.GeminiApiService
@@ -50,6 +52,12 @@ import com.example.domain.repository.SettingsRepository
 import com.example.research.search.SearchQueryRequest
 import com.example.research.search.SearchService
 import com.example.research.search.SearchTopic
+import com.example.analytics.parser.TabularDataParser
+import com.example.domain.model.IntelligenceIntent
+import com.example.domain.model.ResponseBlock
+import com.example.domain.model.SourceVerificationStatus
+import com.example.domain.router.RealtimeIntelligenceRouter
+import com.example.ui.components.ResponseBlockRenderer
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.MousomiLensScreenContent
 import com.example.ui.theme.AppThemeMode
@@ -196,8 +204,9 @@ class MousomiLensAndAuthTest {
   }
 
   @Test
-  fun `auth screen renders dynamic smoky background while preserving Mousomi AI logo and sign in card`() {
+  fun `auth screen renders deep space reference UI, supports guest mode, reduced motion, and privacy modal`() {
     var signInInvoked = false
+    var guestEntered = false
     val fakeAuth =
       object : OptionalAuthGateway {
         private val flow = MutableStateFlow(AuthUserSession())
@@ -208,7 +217,13 @@ class MousomiLensAndAuthTest {
           signInInvoked = true
           return GoogleSignInOutcome.Error("Test click verified")
         }
-        override suspend fun signOut() = Unit
+        override suspend fun enterGuestMode() {
+          guestEntered = true
+          flow.value = AuthUserSession(uid = "guest_local", isSignedIn = false, isGuest = true, displayName = "Guest User")
+        }
+        override suspend fun signOut() {
+          flow.value = AuthUserSession()
+        }
         override fun registerBeforeSignOutHook(hook: () -> Unit) = Unit
       }
 
@@ -218,11 +233,23 @@ class MousomiLensAndAuthTest {
       }
     }
 
-    composeRule.onNodeWithTag("gemini_smoky_ambient_background").assertIsDisplayed()
+    composeRule.onNodeWithTag("deep_space_neon_background").assertIsDisplayed()
     composeRule.onNodeWithTag("auth_screen_card").assertIsDisplayed()
     composeRule.onNodeWithText("Mousomi AI").assertIsDisplayed()
-    composeRule.onNodeWithTag("google_sign_in_button").assertIsDisplayed().performClick()
+    composeRule.onNodeWithText("App Check & Firebase Private Workspace").performScrollTo().assertIsDisplayed()
+
+    composeRule.onNodeWithTag("auth_reduced_motion_toggle").assertIsDisplayed().performClick()
+
+    composeRule.onNodeWithTag("auth_privacy_terms_footer").assertIsDisplayed().performClick()
+    composeRule.onNodeWithTag("privacy_terms_dialog").assertIsDisplayed()
+    composeRule.onNodeWithText("Close").performClick()
+
+    composeRule.onNodeWithTag("google_sign_in_button").performScrollTo().assertIsDisplayed().performClick()
     assertTrue(signInInvoked)
+
+    composeRule.onNodeWithTag("continue_without_sign_in_button").performScrollTo().assertIsDisplayed().performClick()
+    assertTrue(guestEntered)
+    assertTrue(fakeAuth.getCurrentSession().isGuest)
   }
 
   @Test
@@ -383,10 +410,13 @@ class MousomiLensAndAuthTest {
     assertEquals("comp_2", selectedId)
 
     composeRule.onNodeWithTag("lens_identified_name").performScrollTo().assertIsDisplayed()
-    composeRule.onNodeWithTag("lens_continue_in_chat_button").assertIsDisplayed().performClick()
+    composeRule.onNodeWithTag("lens_continue_in_chat_button").performScrollTo().assertIsDisplayed().performClick()
     assertEquals("cap_99", continuedResult?.captureId)
 
     composeRule.onNodeWithText("Web Reference Images (External Sources)").performScrollTo().assertIsDisplayed()
+    composeRule.onNodeWithTag("lens_visual_response_panel").performTouchInput {
+      swipeUp(startY = centerY, endY = (centerY - 180f).coerceAtLeast(0f))
+    }
     composeRule.onNodeWithTag("lens_web_ref_card").assertIsDisplayed()
     composeRule.onNodeWithText("Web Reference").assertIsDisplayed()
   }
@@ -429,6 +459,61 @@ class MousomiLensAndAuthTest {
       assertTrue(msgs[1].text.contains("Monstera deliciosa"))
       assertTrue(msgs[1].text.contains("Bright indirect light is ideal."))
     }
+
+  @Test
+  fun `source citations card displays publisher, domain, publication date, verification, and Open Original Source`() {
+    val sources =
+      listOf(
+        SearchResultItem(
+          id = "src_1",
+          title = "Quantum Error Correction Milestone",
+          url = "https://research.google/blog/quantum-milestone/",
+          publisher = "Google Research",
+          snippet = "Independent evaluation demonstrates below-threshold error suppression.",
+          publishedTimestamp = "2026-02-14",
+          retrievedTimestampMs = 1_700_000_000_000L,
+          verificationStatus = SourceVerificationStatus.VERIFIED_HTTPS,
+          sourceDomain = "research.google",
+          faviconUrl = "https://research.google/favicon.ico",
+        )
+      )
+
+    composeRule.setContent {
+      MousomiTheme(themeMode = AppThemeMode.DARK) {
+        ResponseBlockRenderer(
+          block = ResponseBlock.SourceCitations(sources),
+        )
+      }
+    }
+
+    composeRule.onNodeWithTag("source_citations_list").assertIsDisplayed()
+    composeRule.onNodeWithTag("source_citation_card_0").assertIsDisplayed()
+    composeRule.onNodeWithText("Google Research").assertIsDisplayed()
+    composeRule.onNodeWithText("Quantum Error Correction Milestone").assertIsDisplayed()
+    composeRule.onNodeWithText("research.google • 2026-02-14 • Verified HTTPS").assertIsDisplayed()
+    composeRule.onNodeWithText("Open Original Source").assertIsDisplayed()
+  }
+
+  @Test
+  fun `gemini model resolution preserves gemini-3_1-flash-lite and router handles banglish and typos`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val aiLogic = FirebaseAiLogicService(context, SecurityValidator())
+    assertEquals("gemini-3.1-flash-lite", aiLogic.resolveTextModel("gemini-3.1-flash-lite"))
+    assertEquals("gemini-4-carbon", aiLogic.resolveTextModel("gemini-4-carbon"))
+    assertEquals("gemini-4-hydrogen", aiLogic.resolveTextModel("gemini-4-hydrogen"))
+    assertEquals("gemini-4-neon", aiLogic.resolveTextModel("gemini-4-neon"))
+    assertEquals("gemini-3.8-flash", aiLogic.resolveTextModel("gemini-3.8-flash"))
+
+    val router = RealtimeIntelligenceRouter(TabularDataParser(Json { ignoreUnknownKeys = true }))
+    assertEquals(
+      IntelligenceIntent.IMAGE_GENERATION,
+      router.classifyIntent("chobi banao ekta sunset er", hasImages = false, attachments = emptyList()),
+    )
+    assertEquals(
+      IntelligenceIntent.DEEP_RESEARCH,
+      router.classifyIntent("deep reasearch on solid state batteries", hasImages = false, attachments = emptyList()),
+    )
+  }
 
   private fun createLensIntelligenceService(context: Context, json: Json): LensIntelligenceService {
     val fakeGeminiApi =

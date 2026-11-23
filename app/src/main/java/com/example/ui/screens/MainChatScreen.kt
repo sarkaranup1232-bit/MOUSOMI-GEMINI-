@@ -47,8 +47,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -57,11 +59,13 @@ import com.example.core.edge.EdgeLightStateMapper
 import com.example.domain.model.MemoryCategory
 import com.example.domain.model.ScreenShareStatus
 import com.example.ui.components.ChatMessagesList
+import com.example.ui.components.CompactImageEditorSheet
 import com.example.ui.components.DrawingAnnotationOverlay
 import com.example.ui.components.GeminiTopBar
 import com.example.ui.components.GeminiWelcomeCanvas
 import com.example.ui.components.InAppFloatingOrbOverlay
 import com.example.ui.components.NeonChatComposer
+import com.example.ui.components.ScreenSelectionOverlay
 import com.example.ui.components.geminiBackgroundGlow
 import com.example.ui.model.MousomiUiState
 import com.example.ui.model.SuggestionItem
@@ -79,6 +83,7 @@ fun MainChatScreen(
   onNavigateToPermissions: () -> Unit = {},
   onRequestStartScreenShare: () -> Unit = {},
   onStopScreenShare: () -> Unit = {},
+  onRequestStartScreenSelection: () -> Unit = {},
   onNavigateToAssistantHub: (Int) -> Unit = {},
   onNavigateToLens: () -> Unit = {},
 ) {
@@ -86,12 +91,29 @@ fun MainChatScreen(
   val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
   val coroutineScope = rememberCoroutineScope()
   val snackbarHostState = remember { SnackbarHostState() }
+  val composerFocusRequester = remember { FocusRequester() }
+  val keyboardController = LocalSoftwareKeyboardController.current
   var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
 
   LaunchedEffect(uiState.pendingNavigateToLens) {
     if (uiState.pendingNavigateToLens) {
       viewModel.onConsumeNavigateToLens()
       onNavigateToLens()
+    }
+  }
+
+  LaunchedEffect(uiState.pendingStartScreenSelection) {
+    if (uiState.pendingStartScreenSelection) {
+      viewModel.onConsumePendingStartScreenSelection()
+      onRequestStartScreenSelection()
+    }
+  }
+
+  LaunchedEffect(uiState.shouldRequestComposerFocus) {
+    if (uiState.shouldRequestComposerFocus) {
+      runCatching { composerFocusRequester.requestFocus() }
+      keyboardController?.show()
+      viewModel.onConsumeComposerFocusRequest()
     }
   }
 
@@ -210,11 +232,17 @@ fun MainChatScreen(
       notificationAlertActive = uiState.notificationPulseActive,
       isSystemPowerSave = uiState.isSystemPowerSave,
       currentHour = currentHour,
+      assistantSessionPhase = uiState.assistantSessionPhase,
+      edgeActivationSignal = uiState.edgeActivationSignal,
     )
 
   ModalNavigationDrawer(
     drawerState = drawerState,
-    gesturesEnabled = !uiState.isGeminiLiveOpen && !uiState.isDrawingOverlayOpen,
+    gesturesEnabled =
+      !uiState.isGeminiLiveOpen &&
+        !uiState.isDrawingOverlayOpen &&
+        !uiState.screenSelectionState.isActive &&
+        uiState.activeImageEditState == null,
     drawerContent = {
       MousomiDrawerContent(
         conversations = uiState.conversations,
@@ -288,6 +316,7 @@ fun MainChatScreen(
             onEmergencyStop = viewModel::onTriggerEmergencyStop,
             onOpenPermissions = onNavigateToPermissions,
             onOpenLens = onNavigateToLens,
+            resolvedAutoModelName = uiState.resolvedAutoModelName,
             modifier = Modifier.widthIn(max = 760.dp),
           )
 
@@ -369,6 +398,9 @@ fun MainChatScreen(
             isGenerating = uiState.isGenerating,
             isEditingMessage = uiState.editingMessageId != null,
             showDragHandle = uiState.messages.isNotEmpty(),
+            operatingMode = uiState.operatingMode,
+            onSelectOperatingMode = viewModel::onSelectOperatingMode,
+            onOpenImageStudio = { viewModel.onSelectContextualAction("open_image_tools") },
             onSelectMode = viewModel::onSelectMode,
             onInputChanged = viewModel::onInputChanged,
             onOpenAttachments = { viewModel.onToggleAttachmentSheet(true) },
@@ -386,10 +418,23 @@ fun MainChatScreen(
                 audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
               }
             },
-            onLiveClick = { viewModel.onToggleGeminiLive(true) },
+            onLiveClick = {
+              val granted =
+                ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                  PackageManager.PERMISSION_GRANTED
+              if (granted) {
+                viewModel.onToggleGeminiLive(true)
+              } else {
+                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                viewModel.onToggleGeminiLive(true)
+              }
+            },
             onSendClick = viewModel::onSendMessage,
             onStopGeneration = viewModel::onStopGeneration,
             onContextualAction = viewModel::onSelectContextualAction,
+            attachedVisualsByUri = uiState.attachedVisualsByUri,
+            onEditImagesClick = { viewModel.onOpenCompactImageEditor() },
+            composerFocusRequester = composerFocusRequester,
             modifier = Modifier.widthIn(max = 760.dp),
           )
         }
@@ -442,6 +487,10 @@ fun MainChatScreen(
           onOpenLens = {
             viewModel.onToggleAttachmentSheet(false)
             onNavigateToLens()
+          },
+          onStartScreenSelection = {
+            viewModel.onToggleAttachmentSheet(false)
+            onRequestStartScreenSelection()
           },
           onPickFromGallery = {
             viewModel.onToggleAttachmentSheet(false)
@@ -506,6 +555,10 @@ fun MainChatScreen(
             viewModel.onToggleMoreToolsSheet(false)
             onNavigateToLens()
           },
+          onStartScreenSelection = {
+            viewModel.onToggleMoreToolsSheet(false)
+            onRequestStartScreenSelection()
+          },
           onDismiss = { viewModel.onToggleMoreToolsSheet(false) },
         )
       }
@@ -537,16 +590,23 @@ fun MainChatScreen(
         exit = fadeOut(),
       ) {
         val latestAssistantText =
-          uiState.messages.lastOrNull { !it.isUser && it.text.isNotBlank() }?.text.orEmpty()
+          uiState.liveAssistantTranscript.ifBlank {
+            uiState.messages.lastOrNull { !it.isUser && it.text.isNotBlank() }?.text.orEmpty()
+          }
         GeminiLiveOverlay(
           voiceState = uiState.voiceState,
           voiceRmsNormalized = uiState.voiceRmsNormalized,
           isThinking = uiState.isGenerating,
+          isPaused = uiState.isLiveVoicePaused,
+          isMuted = uiState.isLiveVoiceMuted,
+          selectedModelLabel = uiState.resolvedAutoModelName ?: uiState.selectedModel.displayName,
           voiceGender = uiState.voicePreferences.voiceGender,
           latestAssistantText = latestAssistantText,
           onSelectVoiceGender = viewModel::onUpdateVoiceGender,
           onStartListening = viewModel::onStartVoiceListening,
           onStopListening = viewModel::onStopVoiceListening,
+          onTogglePause = viewModel::onTogglePauseLiveVoice,
+          onToggleMute = viewModel::onToggleMuteLiveVoice,
           onSendFollowUp = viewModel::onSendLiveFollowUp,
           onOpenCamera = {
             viewModel.onToggleGeminiLiveMinimized(true)
@@ -577,9 +637,13 @@ fun MainChatScreen(
           voiceState = uiState.voiceState,
           voiceRmsNormalized = uiState.voiceRmsNormalized,
           isThinking = uiState.isGenerating,
+          isPaused = uiState.isLiveVoicePaused,
+          isMuted = uiState.isLiveVoiceMuted,
           audioMetrics = uiState.voiceAudioMetrics,
           onStartListening = viewModel::onStartVoiceListening,
           onStopListening = viewModel::onStopVoiceListening,
+          onTogglePause = viewModel::onTogglePauseLiveVoice,
+          onToggleMute = viewModel::onToggleMuteLiveVoice,
           onExpand = { viewModel.onToggleGeminiLiveMinimized(false) },
           onClose = { viewModel.onToggleGeminiLive(false) },
         )
@@ -618,10 +682,43 @@ fun MainChatScreen(
             action = popup,
             onRequestScreenShare = onRequestStartScreenShare,
             onRequestCameraCapture = onRequestCameraCapture,
+            onNavigateToLens = onNavigateToLens,
             onNavigateToAssistantHub = onNavigateToAssistantHub,
           )
         },
+        onSelectScreenRegion = onRequestStartScreenSelection,
       )
+
+      if (uiState.screenSelectionState.isActive && !uiState.screenSelectionState.isSystemOverlayMode) {
+        ScreenSelectionOverlay(
+          state = uiState.screenSelectionState,
+          geometryEngine = viewModel.geometryEngineForUi,
+          onSelectTool = viewModel::onSelectSelectionTool,
+          onStrokeStart = viewModel::onSelectionStrokeStart,
+          onStrokeMove = viewModel::onSelectionStrokeMove,
+          onStrokeEnd = viewModel::onSelectionStrokeEnd,
+          onHandleDrag = viewModel::onSelectionAdjustHandle,
+          onUndo = viewModel::onSelectionUndo,
+          onClear = viewModel::onSelectionClear,
+          onCancel = viewModel::onCancelScreenSelection,
+          onConfirmSelection = viewModel::onConfirmScreenSelection,
+          reducedMotion = uiState.edgeLightConfig.reducedMotion,
+        )
+      }
+
+      val editState = uiState.activeImageEditState
+      if (editState != null) {
+        CompactImageEditorSheet(
+          editState = editState,
+          onAdjustHandle = viewModel::onAdjustImageEditorHandle,
+          onSelectAspectPreset = viewModel::onSelectEditorAspectPreset,
+          onRotate90 = viewModel::onRotateEditor90,
+          onRetakeSelection = { viewModel.onRetakeScreenSelection(onRequestStartScreenSelection) },
+          onResetCrop = viewModel::onResetEditorCrop,
+          onCancel = viewModel::onCancelImageEditor,
+          onConfirm = viewModel::onConfirmImageEditor,
+        )
+      }
     }
   }
 }
