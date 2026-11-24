@@ -35,16 +35,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 21 (required for AGP 9.1 / Gradle 9.3 / Robolectric SDK 36 bytecode v65)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Cache Robolectric Android runtime artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2/repository/org/robolectric
           key: robolectric-m2-${{ hashFiles('gradle/libs.versions.toml') }}
@@ -52,7 +52,7 @@ jobs:
             robolectric-m2-
 
       - name: Set up Gradle cache
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Validate Gradle Wrapper and build config files
         run: |
@@ -90,7 +90,7 @@ jobs:
 
       - name: Upload unit test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: unit-test-reports
           path: |
@@ -104,18 +104,18 @@ jobs:
     timeout-minutes: 35
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Set up Gradle cache
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
-      - name: Restore stable debug keystore
+      - name: Restore or generate debug keystore
         env:
           DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
@@ -125,11 +125,17 @@ jobs:
           elif [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
             tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore
             echo "Restored debug.keystore from repository debug.keystore.base64."
-          fi
-
-          if [ ! -f debug.keystore ]; then
-            echo "::error::debug.keystore is missing and neither DEBUG_KEYSTORE_BASE64 nor debug.keystore.base64 was found."
-            exit 1
+          elif [ ! -f debug.keystore ]; then
+            echo "::warning::Neither DEBUG_KEYSTORE_BASE64 nor debug.keystore.base64 was found. Generating a standard Android debug.keystore for this CI run (SHA-1 will differ from local builds until debug.keystore.base64 is committed or DEBUG_KEYSTORE_BASE64 is configured)."
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
 
           echo "### Debug Signing Certificate Fingerprints" >> "$GITHUB_STEP_SUMMARY"
@@ -193,7 +199,7 @@ jobs:
           fi
 
       - name: Upload Debug APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Mousomi-AI-debug-apk
           path: dist/Mousomi-AI-debug.apk
@@ -211,7 +217,7 @@ jobs:
       version_name: ${{ steps.release_status.outputs.version_name }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Check Firebase and Release Signing prerequisites
         id: prereqs
@@ -250,14 +256,14 @@ jobs:
 
       - name: Set up JDK 21
         if: steps.prereqs.outputs.ready == 'true'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Set up Gradle cache
         if: steps.prereqs.outputs.ready == 'true'
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Restore google-services.json and Release Keystore
         if: steps.prereqs.outputs.ready == 'true'
@@ -346,7 +352,7 @@ jobs:
 
       - name: Upload Signed Release APK artifact
         if: steps.prereqs.outputs.ready == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Mousomi-AI-release-apk
           path: dist/Mousomi-AI-release.apk
@@ -364,7 +370,7 @@ jobs:
       contents: write
     steps:
       - name: Download verified Signed Release APK
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: Mousomi-AI-release-apk
           path: dist

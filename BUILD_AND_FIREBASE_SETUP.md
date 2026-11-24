@@ -57,7 +57,7 @@ base64 -w 0 debug.keystore
 
 ## 5. GitHub Actions Workflow (`.github/workflows/android-build.yml`)
 - **Job 1 (`validate-and-test`)**: Validates Gradle Wrapper & `.env.example`, compiles Kotlin (`:app:compileDebugKotlin`), runs `:app:testDebugUnitTest` on JDK 21, and always uploads `unit-test-reports`.
-- **Job 2 (`build-debug-apk`)**: Runs independently (not blocked by test failures), restores `debug.keystore`, builds `:app:assembleDebug`, verifies signature & package ID, and uploads **`Mousomi-AI-debug-apk`** (`Mousomi-AI-debug.apk`).
+- **Job 2 (`build-debug-apk`)**: Runs independently (not blocked by test failures), restores `debug.keystore` from `DEBUG_KEYSTORE_BASE64` or `debug.keystore.base64` (or generates a standard Android `debug.keystore` via `keytool` if neither is present), builds `:app:assembleDebug`, verifies signature & package ID, and uploads **`Mousomi-AI-debug-apk`** (`Mousomi-AI-debug.apk`).
 - **Job 3 (`build-signed-release-apk`)**: Requires `validate-and-test`, valid `google-services.json`, and release signing secrets. Builds `:app:assembleRelease`, verifies signature, package ID, and generated `default_web_client_id`, and uploads **`Mousomi-AI-release-apk`** (`Mousomi-AI-release.apk`). Skips cleanly with instructions if secrets are not configured.
 - **Job 4 (`publish-release`)**: Runs only after a verified signed Release APK build, publishing an immutable tagged release (`v<versionName>-b<versionCode>`) and safely updating `latest` with `--clobber`.
 
