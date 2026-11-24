@@ -218,11 +218,32 @@ data class AgentTaskLogItem(
 
 @Serializable
 enum class MemoryCategory(val label: String) {
-  PREFERENCE("Preference"),
+  PREFERENCE("User Preference"),
+  FAVORITE_SONG("Favorite Song"),
+  FAVORITE_ARTIST("Favorite Artist"),
+  FAVORITE_MUSIC_GENRE("Favorite Music Genre"),
+  FAVORITE_APP("Favorite App"),
+  FAVORITE_VIDEO_ENTERTAINMENT("Video & Entertainment"),
+  LANGUAGE_PREFERENCE("Language Preference"),
+  CONVERSATION_PREFERENCE("Conversation Style"),
+  HOBBY_INTEREST("Hobby & Interest"),
+  DAILY_ROUTINE("Daily Routine"),
+  FREQUENT_CONTACT("Frequent Contact"),
+  USER_REMINDER("User Reminder"),
+  IMPORTANT_INFO("Important Info"),
+  CUSTOM_PREFERENCE("Custom Preference"),
+  // Preserved legacy aliases for backward compatibility with existing Room data & unit tests
   FACT("User Fact"),
   PROJECT("Project Context"),
   QUICK_NOTE("Quick Note"),
   CONVERSATION_SUMMARY("Conversation Summary"),
+}
+
+@Serializable
+enum class MemoryConfirmationStatus(val label: String) {
+  PENDING_CONFIRMATION("Pending Confirmation"),
+  CONFIRMED("Confirmed"),
+  DECLINED("Declined"),
 }
 
 @Serializable
@@ -233,6 +254,33 @@ data class MemoryRecord(
   val keywords: List<String> = emptyList(),
   val importance: Float = 0.6f,
   val isApproved: Boolean = true,
+  val createdAtMs: Long,
+  val updatedAtMs: Long,
+  val originalStatement: String = content,
+  val tags: List<String> = emptyList(),
+  val confidence: Float = 0.85f,
+  val confirmationStatus: MemoryConfirmationStatus =
+    if (isApproved) MemoryConfirmationStatus.CONFIRMED
+    else MemoryConfirmationStatus.PENDING_CONFIRMATION,
+  val isActive: Boolean = true,
+  val lastConfirmedAtMs: Long = updatedAtMs,
+)
+
+@Serializable
+enum class TodoNoteKind(val label: String) {
+  TODO("To-Do"),
+  NOTE("Note"),
+  SCHEDULE("Daily Schedule"),
+}
+
+@Serializable
+data class TodoNoteRecord(
+  val id: String,
+  val kind: TodoNoteKind,
+  val title: String,
+  val body: String = "",
+  val scheduleTimeLabel: String = "",
+  val isCompleted: Boolean = false,
   val createdAtMs: Long,
   val updatedAtMs: Long,
 )
@@ -286,6 +334,7 @@ data class NotificationIntelligenceConfig(
 @Serializable
 data class PrivacyAndPerformanceConfig(
   val memoryEnabled: Boolean = true,
+  val proactiveMemoryQuestionsEnabled: Boolean = true,
   val encryptSensitiveMemory: Boolean = true,
   val continuousVoiceMode: Boolean = false,
   val allowVoiceInterruption: Boolean = true,

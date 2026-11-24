@@ -108,13 +108,16 @@ sealed interface PlannedAgentOutcome {
     val setReadAloudEnabled: Boolean? = null,
   ) : PlannedAgentOutcome
   data class AccessibilityHandled(val result: AccessibilityActionResult) : PlannedAgentOutcome
+  data class AgentTaskExecuted(val report: AgentExecutionReport) : PlannedAgentOutcome
+  data class ImageGenerationRequested(val prompt: String) : PlannedAgentOutcome
   data object ForwardToMultimodalAi : PlannedAgentOutcome
 }
 
 /**
  * Modular Agent Task Planner routing natural voice & text requests across Phone Control,
  * Contacts/WhatsApp/Social, Notification Read-Aloud controls, Timers, Accessibility UI nodes,
- * and Screen Capture tools before falling back to multimodal AI generation.
+ * System/Media/Music/Productivity actions, and Screen Capture tools before falling back to
+ * multimodal AI generation.
  */
 @Singleton
 class AgentTaskPlanner @Inject constructor(
@@ -124,6 +127,7 @@ class AgentTaskPlanner @Inject constructor(
   private val accessibilityController: AccessibilityAgentController,
   private val notificationEngine: NotificationIntelligenceEngine,
   private val settingsRepository: SettingsRepository,
+  private val agentOrchestrator: AgentOrchestrator? = null,
 ) {
 
   suspend fun planAndRoute(rawInput: String): PlannedAgentOutcome {
@@ -161,8 +165,20 @@ class AgentTaskPlanner @Inject constructor(
       return PlannedAgentOutcome.ConfirmSocialAction(resolved)
     }
 
-    // 5. Screen recording, sharing, selection, app launches, settings, and OS toggle disclosures
+    // 5. Screen recording, sharing, selection, app launches, settings, image generation, & structured agent tasks
     commandRouter.classify(clean)?.let { cmd ->
+      when (cmd) {
+        is AgentCommandIntent.GenerateImage -> {
+          return PlannedAgentOutcome.ImageGenerationRequested(cmd.imagePrompt)
+        }
+        is AgentCommandIntent.ExecuteAgentTask -> {
+          val report = agentOrchestrator?.executeAgentTask(cmd.rawCommand)
+          if (report != null) {
+            return PlannedAgentOutcome.AgentTaskExecuted(report)
+          }
+        }
+        else -> Unit
+      }
       return PlannedAgentOutcome.LaunchCommand(cmd)
     }
 

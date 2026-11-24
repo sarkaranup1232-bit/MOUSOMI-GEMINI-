@@ -130,7 +130,32 @@ class AssistantSessionStateManager @Inject constructor() {
 
   private var lastTriggerAtMs: Long = 0L
   private var activationTokenCounter: Long = 0L
+  private var sessionOwnerCounter: Long = 0L
+  private var activeSessionOwnerToken: Long = 0L
   private var stateBeforeDrawing: AssistantSurfaceState = AssistantSurfaceState.EXPANDED
+
+  @Synchronized
+  fun claimActiveSessionToken(): Long {
+    sessionOwnerCounter += 1L
+    activeSessionOwnerToken = sessionOwnerCounter
+    return activeSessionOwnerToken
+  }
+
+  @Synchronized
+  fun isActiveSessionToken(token: Long): Boolean = token != 0L && token == activeSessionOwnerToken
+
+  @Synchronized
+  fun dismissAssistantSessionIfOwner(
+    ownerToken: Long,
+    keepScreenShare: Boolean = false,
+  ): Boolean {
+    if (ownerToken == 0L || ownerToken != activeSessionOwnerToken) {
+      return false
+    }
+    activeSessionOwnerToken = 0L
+    dismissAssistantSession(keepScreenShare = keepScreenShare)
+    return true
+  }
 
   @Synchronized
   fun updateOrbPosition(xFraction: Float, yFraction: Float) {

@@ -24,6 +24,7 @@ import com.example.data.local.db.MemoryDao
 import com.example.data.local.db.MousomiDatabase
 import com.example.data.local.db.Part4OperationsDao
 import com.example.data.local.db.Part5Dao
+import com.example.data.local.db.TodoNoteDao
 import com.example.data.repository.ChatRepositoryImpl
 import com.example.data.repository.SettingsRepositoryImpl
 import com.example.data.auth.FirebaseAuthGateway
@@ -194,6 +195,7 @@ object NetworkAndStorageModule {
         MousomiDatabase.MIGRATION_3_4,
         MousomiDatabase.MIGRATION_4_5,
         MousomiDatabase.MIGRATION_5_6,
+        MousomiDatabase.MIGRATION_6_7,
       )
       .build()
 
@@ -215,6 +217,9 @@ object NetworkAndStorageModule {
 
   @Provides
   fun provideImageStudioDao(database: MousomiDatabase): ImageStudioDao = database.imageStudioDao()
+
+  @Provides
+  fun provideTodoNoteDao(database: MousomiDatabase): TodoNoteDao = database.todoNoteDao()
 }
 
 @Module

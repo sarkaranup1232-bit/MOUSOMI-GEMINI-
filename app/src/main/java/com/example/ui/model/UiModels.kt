@@ -9,10 +9,14 @@ import com.example.core.device.PendingSocialAction
 import com.example.core.screen.AttachedVisualItem
 import com.example.core.screen.ImageEditState
 import com.example.core.screen.ScreenSelectionUiState
+import com.example.core.voice.HotwordCapabilityReport
 import com.example.core.voice.LiveConnectionState
 import com.example.core.voice.LiveSessionPhase
 import com.example.core.voice.OrbReactiveFrame
 import com.example.core.voice.VoiceState
+import com.example.domain.memory.DiscoveryQuestionPrompt
+import com.example.domain.memory.PendingMemoryConfirmation
+import com.example.domain.model.TodoNoteRecord
 import com.example.domain.model.ActiveEditImageTarget
 import com.example.domain.model.AgentBudgetConfig
 import com.example.domain.model.AgentStepPlan
@@ -319,6 +323,10 @@ data class MousomiUiState(
   val pendingScreenRecordingServiceAction: String? = null,
   val accessibilityState: AccessibilityWorkflowState = AccessibilityWorkflowState(),
   val pendingAccessibilityAction: AccessibilityActionResult? = null,
+  val pendingMemoryConfirmation: PendingMemoryConfirmation? = null,
+  val pendingDiscoveryPrompt: DiscoveryQuestionPrompt? = null,
+  val hotwordCapabilityReport: HotwordCapabilityReport? = null,
+  val todoNotes: List<TodoNoteRecord> = emptyList(),
 ) {
   val pendingAttachment: AttachmentPreview?
     get() = pendingAttachments.firstOrNull()

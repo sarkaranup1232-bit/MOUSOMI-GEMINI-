@@ -16,8 +16,13 @@ import com.example.ai.media.VideoAndMusicGenerationService
 import com.example.ai.provider.OneTapApiActivationService
 import com.example.core.accessibility.AccessibilityActionResult
 import com.example.core.accessibility.AccessibilityAgentController
+import com.example.core.agent.AgentOrchestrator
 import com.example.core.agent.AgentTaskPlanner
 import com.example.core.agent.PlannedAgentOutcome
+import com.example.core.device.CalendarReminderService
+import com.example.core.voice.HotwordCapabilityManager
+import com.example.domain.memory.PreferenceConfirmationManager
+import com.example.domain.memory.PreferenceDiscoveryEngine
 import com.example.core.alarms.ReminderManager
 import com.example.core.alarms.TimerManager
 import com.example.core.assistant.AssistantSessionStateManager
@@ -207,6 +212,11 @@ class MousomiViewModel @Inject constructor(
   private val agentTaskPlanner: AgentTaskPlanner? = null,
   private val contactResolver: ContactResolver? = null,
   private val accessibilityAgentController: AccessibilityAgentController? = null,
+  private val systemAgentOrchestrator: AgentOrchestrator? = null,
+  private val preferenceConfirmationManager: PreferenceConfirmationManager? = null,
+  private val preferenceDiscoveryEngine: PreferenceDiscoveryEngine? = null,
+  private val hotwordCapabilityManager: HotwordCapabilityManager? = null,
+  private val calendarReminderService: CalendarReminderService? = null,
 ) : ViewModel() {
 
   constructor(
@@ -264,6 +274,11 @@ class MousomiViewModel @Inject constructor(
     agentTaskPlanner = null,
     contactResolver = null,
     accessibilityAgentController = null,
+    systemAgentOrchestrator = null,
+    preferenceConfirmationManager = null,
+    preferenceDiscoveryEngine = null,
+    hotwordCapabilityManager = null,
+    calendarReminderService = null,
   )
 
   val geometryEngineForUi: SelectionGeometryEngine by lazy {
@@ -484,7 +499,14 @@ class MousomiViewModel @Inject constructor(
   fun onRefreshPermissions() {
     val items = permissionManager?.refreshAll(_uiState.value.screenShareStatus) ?: return
     val micGranted = items.any { it.category.name == "MICROPHONE" && it.state.name == "GRANTED" }
-    _uiState.update { it.copy(permissionCategories = items, hasAudioPermission = micGranted) }
+    val hotwordReport = hotwordCapabilityManager?.inspectCapabilities()
+    _uiState.update {
+      it.copy(
+        permissionCategories = items,
+        hasAudioPermission = micGranted,
+        hotwordCapabilityReport = hotwordReport,
+      )
+    }
   }
 
   private fun observeSettings() {
@@ -688,6 +710,11 @@ class MousomiViewModel @Inject constructor(
     longTermMemoryManager?.let { mem ->
       viewModelScope.launch {
         mem.observeMemories().collectLatest { list -> _uiState.update { it.copy(memories = list) } }
+      }
+    }
+    calendarReminderService?.observeTodoNotes()?.let { todoFlow ->
+      viewModelScope.launch {
+        todoFlow.collectLatest { items -> _uiState.update { it.copy(todoNotes = items) } }
       }
     }
     notificationEngine?.let { engine ->
@@ -1551,6 +1578,20 @@ class MousomiViewModel @Inject constructor(
       return
     }
 
+    if (editTargetId == null && attachments.isEmpty() && editTarget == null && state.pendingMemoryConfirmation != null) {
+      val replyLower = trimmed.lowercase(Locale.US).trimEnd('.', '!', '?')
+      if (replyLower in setOf("yes", "yes please", "save it", "save", "remember it", "sure", "ok", "okay", "yeah", "yep")) {
+        _uiState.update { it.copy(inputText = "") }
+        onConfirmPendingMemory()
+        return
+      }
+      if (replyLower in setOf("no", "no thanks", "skip", "don't save", "dont save", "cancel", "nope")) {
+        _uiState.update { it.copy(inputText = "") }
+        onDismissPendingMemory()
+        return
+      }
+    }
+
     if (editTargetId == null && editTarget == null && trimmed.isNotEmpty() && agentTaskPlanner != null) {
       viewModelScope.launch {
         when (val outcome = agentTaskPlanner.planAndRoute(trimmed)) {
@@ -1634,6 +1675,58 @@ class MousomiViewModel @Inject constructor(
               }
               return@launch
             }
+          }
+          is PlannedAgentOutcome.AgentTaskExecuted -> {
+            if (attachments.isEmpty()) {
+              val convId = state.activeConversationId
+              val now = System.currentTimeMillis()
+              _uiState.update { it.copy(inputText = "") }
+              chatRepository.ensureConversation(convId, trimmed.take(36))
+              chatRepository.upsertMessage(
+                DomainMessage(
+                  id = "msg_${UUID.randomUUID()}",
+                  conversationId = convId,
+                  isUser = true,
+                  text = trimmed,
+                  timestampMs = now,
+                )
+              )
+              val assistantMsgId = "msg_${UUID.randomUUID()}"
+              chatRepository.upsertMessage(
+                DomainMessage(
+                  id = assistantMsgId,
+                  conversationId = convId,
+                  isUser = false,
+                  text = outcome.report.summaryText,
+                  timestampMs = now + 1,
+                  modelUsed = "Device Agent",
+                )
+              )
+              val prefs = _uiState.value.voicePreferences
+              if (prefs.autoSpeakResponses || _uiState.value.isGeminiLiveOpen) {
+                voiceController.speakResponse(assistantMsgId, outcome.report.summaryText, prefs)
+              }
+              return@launch
+            }
+          }
+          is PlannedAgentOutcome.ImageGenerationRequested -> {
+            imageAttachmentManager?.clearStagingKeepFiles()
+            _uiState.update {
+              it.copy(
+                inputText = "",
+                pendingAttachments = emptyList(),
+                activeEditTarget = null,
+              )
+            }
+            executePrompt(
+              conversationId = state.activeConversationId,
+              prompt = trimmed,
+              attachments = attachments,
+              imageGenerationRequested = true,
+              deepResearchRequested = false,
+              activeEditTarget = editTarget,
+            )
+            return@launch
           }
           is PlannedAgentOutcome.LaunchCommand -> {
             if (attachments.isEmpty() && handleRoutedAgentCommand(trimmed, outcome.intent)) {
@@ -2104,10 +2197,48 @@ class MousomiViewModel @Inject constructor(
                       if (voicePrefs.autoSpeakResponses || _uiState.value.isGeminiLiveOpen) {
                         voiceController.speakResponse(assistantMsgId, stateVal.fullText, voicePrefs)
                       }
-                      if (_uiState.value.privacyPerformanceConfig.memoryEnabled && longTermMemoryManager != null) {
+                      val privacyCfg = _uiState.value.privacyPerformanceConfig
+                      if (privacyCfg.memoryEnabled && longTermMemoryManager != null) {
                         val updatedHistory = historyBefore + assistantDomain
                         if (updatedHistory.size >= 4) {
                           longTermMemoryManager.summarizeConversationAndPersist(conversationId, updatedHistory)
+                        }
+                      }
+                      if (privacyCfg.memoryEnabled && preferenceConfirmationManager != null) {
+                        val candidatePref =
+                          preferenceConfirmationManager.inspectUserStatement(
+                            rawInput = userText,
+                            memoryEnabled = true,
+                          )
+                        if (candidatePref != null) {
+                          if (candidatePref.isExplicitSaveRequest) {
+                            val saveOutcome =
+                              preferenceConfirmationManager.confirmAndSave(
+                                pending = candidatePref,
+                                encryptAtRest = privacyCfg.encryptSensitiveMemory,
+                              )
+                            val savedNote =
+                              when (saveOutcome) {
+                                is MemoryWriteOutcome.Saved ->
+                                  "Saved to My Memory: \"${candidatePref.extractedContent}\""
+                                is MemoryWriteOutcome.BlockedSensitive -> saveOutcome.reason
+                              }
+                            _uiState.update { it.copy(statusToastMessage = savedNote) }
+                          } else {
+                            _uiState.update { it.copy(pendingMemoryConfirmation = candidatePref) }
+                          }
+                        } else if (preferenceDiscoveryEngine != null && privacyCfg.proactiveMemoryQuestionsEnabled) {
+                          val userTurns = (historyBefore.count { it.isUser } + 1)
+                          val nextDiscovery =
+                            preferenceDiscoveryEngine.maybeSuggestDiscoveryQuestion(
+                              userPrompt = userText,
+                              memoryEnabled = true,
+                              proactiveQuestionsEnabled = true,
+                              userTurnCountInConversation = userTurns,
+                            )
+                          if (nextDiscovery != null) {
+                            _uiState.update { it.copy(pendingDiscoveryPrompt = nextDiscovery) }
+                          }
                         }
                       }
                     }
@@ -2270,6 +2401,19 @@ class MousomiViewModel @Inject constructor(
           } else {
             _uiState.update { it.copy(statusToastMessage = "${acc.statusLabel}: ${acc.detail}") }
           }
+          return@launch
+        }
+        is PlannedAgentOutcome.AgentTaskExecuted -> {
+          _uiState.update { it.copy(statusToastMessage = planned.report.summaryText) }
+          return@launch
+        }
+        is PlannedAgentOutcome.ImageGenerationRequested -> {
+          executePrompt(
+            conversationId = _uiState.value.activeConversationId,
+            prompt = planned.prompt,
+            attachments = emptyList(),
+            imageGenerationRequested = true,
+          )
           return@launch
         }
         is PlannedAgentOutcome.LaunchCommand -> {
@@ -2818,6 +2962,44 @@ class MousomiViewModel @Inject constructor(
       longTermMemoryManager?.clearAllMemories()
       _uiState.update { it.copy(memoryStatusMessage = "Cleared all stored memories.") }
     }
+  }
+
+  fun onConfirmPendingMemory() {
+    val pending = _uiState.value.pendingMemoryConfirmation ?: return
+    _uiState.update { it.copy(pendingMemoryConfirmation = null) }
+    viewModelScope.launch {
+      val encrypt = _uiState.value.privacyPerformanceConfig.encryptSensitiveMemory
+      val outcome = preferenceConfirmationManager?.confirmAndSave(pending, encryptAtRest = encrypt)
+      val toast =
+        when (outcome) {
+          is MemoryWriteOutcome.Saved -> "Saved to My Memory: \"${pending.extractedContent}\""
+          is MemoryWriteOutcome.BlockedSensitive -> outcome.reason
+          null -> "Memory repository unavailable."
+        }
+      _uiState.update { it.copy(statusToastMessage = toast, memoryStatusMessage = toast) }
+    }
+  }
+
+  fun onDismissPendingMemory() {
+    _uiState.update {
+      it.copy(
+        pendingMemoryConfirmation = null,
+        statusToastMessage = "Okay, I did not save that to My Memory.",
+      )
+    }
+  }
+
+  fun onDismissDiscoveryPrompt() {
+    val prompt = _uiState.value.pendingDiscoveryPrompt ?: return
+    preferenceDiscoveryEngine?.markTopicAskedOrDeclined(prompt.topicKey)
+    _uiState.update { it.copy(pendingDiscoveryPrompt = null) }
+  }
+
+  fun onReplyDiscoveryPrompt(answerText: String) {
+    val prompt = _uiState.value.pendingDiscoveryPrompt ?: return
+    preferenceDiscoveryEngine?.markTopicAskedOrDeclined(prompt.topicKey)
+    _uiState.update { it.copy(pendingDiscoveryPrompt = null, inputText = answerText) }
+    onSendMessage()
   }
 
   fun onUpdateNotificationConfig(config: NotificationIntelligenceConfig) {
@@ -3412,6 +3594,37 @@ class MousomiViewModel @Inject constructor(
         }
         true
       }
+      is AgentCommandIntent.ExecuteAgentTask -> {
+        val convId = _uiState.value.activeConversationId
+        _uiState.update { it.copy(inputText = "") }
+        viewModelScope.launch {
+          val now = System.currentTimeMillis()
+          val report = systemAgentOrchestrator?.executeAgentTask(intent.rawCommand)
+          if (report != null) {
+            chatRepository.upsertMessage(
+              DomainMessage(
+                id = "msg_${UUID.randomUUID()}",
+                conversationId = convId,
+                isUser = true,
+                text = rawInput,
+                timestampMs = now,
+              )
+            )
+            chatRepository.upsertMessage(
+              DomainMessage(
+                id = "msg_${UUID.randomUUID()}",
+                conversationId = convId,
+                isUser = false,
+                text = report.summaryText,
+                timestampMs = now + 1,
+                modelUsed = "Device Agent",
+              )
+            )
+          }
+        }
+        true
+      }
+      is AgentCommandIntent.GenerateImage -> false
     }
   }
 

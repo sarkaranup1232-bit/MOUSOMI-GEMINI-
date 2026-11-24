@@ -19,7 +19,7 @@ data class UserPreferenceEntity(
 
 @Entity(
   tableName = "memory_items",
-  indices = [Index("category"), Index("updatedAtMs")],
+  indices = [Index("category"), Index("updatedAtMs"), Index("isActive")],
 )
 data class MemoryItemEntity(
   @PrimaryKey val id: String,
@@ -29,6 +29,27 @@ data class MemoryItemEntity(
   val importance: Float,
   val isApproved: Boolean,
   val isEncrypted: Boolean,
+  val createdAtMs: Long,
+  val updatedAtMs: Long,
+  val originalStatement: String = "",
+  val tagsCsv: String = "",
+  val confidence: Float = 0.85f,
+  val confirmationStatus: String = "CONFIRMED",
+  val isActive: Boolean = true,
+  val lastConfirmedAtMs: Long = updatedAtMs,
+)
+
+@Entity(
+  tableName = "todo_note_items",
+  indices = [Index("kind"), Index("updatedAtMs")],
+)
+data class TodoNoteEntity(
+  @PrimaryKey val id: String,
+  val kind: String,
+  val title: String,
+  val body: String,
+  val scheduleTimeLabel: String,
+  val isCompleted: Boolean,
   val createdAtMs: Long,
   val updatedAtMs: Long,
 )
@@ -105,14 +126,29 @@ interface MemoryDao {
   @Query("SELECT * FROM memory_items ORDER BY importance DESC, updatedAtMs DESC")
   fun observeAllMemories(): Flow<List<MemoryItemEntity>>
 
-  @Query("SELECT * FROM memory_items WHERE isApproved = 1 ORDER BY importance DESC, updatedAtMs DESC")
+  @Query("SELECT * FROM memory_items WHERE isApproved = 1 AND isActive = 1 ORDER BY importance DESC, updatedAtMs DESC")
   suspend fun getApprovedMemoriesSnapshot(): List<MemoryItemEntity>
+
+  @Query("SELECT * FROM memory_items ORDER BY importance DESC, updatedAtMs DESC")
+  suspend fun getAllMemoriesSnapshot(): List<MemoryItemEntity>
+
+  @Query("SELECT * FROM memory_items WHERE category = :category AND isApproved = 1 AND isActive = 1 ORDER BY updatedAtMs DESC")
+  suspend fun getActiveMemoriesByCategory(category: String): List<MemoryItemEntity>
+
+  @Query("SELECT * FROM memory_items WHERE id = :id LIMIT 1")
+  suspend fun getMemoryById(id: String): MemoryItemEntity?
 
   @Insert(onConflict = OnConflictStrategy.REPLACE)
   suspend fun upsertMemory(entity: MemoryItemEntity)
 
+  @Query("UPDATE memory_items SET isActive = :isActive, updatedAtMs = :updatedAtMs WHERE id = :id")
+  suspend fun updateActiveFlag(id: String, isActive: Boolean, updatedAtMs: Long)
+
   @Query("DELETE FROM memory_items WHERE id = :id")
   suspend fun deleteMemory(id: String)
+
+  @Query("DELETE FROM memory_items WHERE category = :category")
+  suspend fun deleteByCategory(category: String)
 
   @Query("DELETE FROM memory_items")
   suspend fun clearAllMemories()
@@ -128,6 +164,27 @@ interface MemoryDao {
 
   @Query("SELECT * FROM user_preferences")
   suspend fun getAllPreferences(): List<UserPreferenceEntity>
+}
+
+@Dao
+interface TodoNoteDao {
+  @Query("SELECT * FROM todo_note_items ORDER BY isCompleted ASC, updatedAtMs DESC")
+  fun observeAllItems(): Flow<List<TodoNoteEntity>>
+
+  @Query("SELECT * FROM todo_note_items ORDER BY isCompleted ASC, updatedAtMs DESC")
+  suspend fun getAllSnapshot(): List<TodoNoteEntity>
+
+  @Insert(onConflict = OnConflictStrategy.REPLACE)
+  suspend fun upsertItem(entity: TodoNoteEntity)
+
+  @Query("UPDATE todo_note_items SET isCompleted = :completed, updatedAtMs = :updatedAtMs WHERE id = :id")
+  suspend fun setCompleted(id: String, completed: Boolean, updatedAtMs: Long)
+
+  @Query("DELETE FROM todo_note_items WHERE id = :id")
+  suspend fun deleteItem(id: String)
+
+  @Query("DELETE FROM todo_note_items WHERE kind = :kind")
+  suspend fun deleteByKind(kind: String)
 }
 
 @Dao

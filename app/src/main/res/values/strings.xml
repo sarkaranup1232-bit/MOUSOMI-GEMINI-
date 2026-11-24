@@ -61,4 +61,6 @@
     <string name="accessibility_onboarding_title">Accessibility Assistant</string>
     <string name="notification_read_aloud_paused">Notification read-aloud paused</string>
     <string name="cropped_selection_attached">Selected region attached to Chat Bar</string>
+    <string name="my_memory_title">My Memory</string>
+    <string name="assistant_readiness_title">Assistant &amp; Wake-Word Readiness</string>
 </resources>

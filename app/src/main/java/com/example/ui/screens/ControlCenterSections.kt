@@ -22,6 +22,7 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.rounded.Add
@@ -416,6 +417,7 @@ fun AgentsAndMemorySection(
   onSaveMemory: (MemoryCategory, String) -> Unit,
   onDeleteMemory: (String) -> Unit,
   onClearMemories: () -> Unit,
+  onOpenMemoryManager: () -> Unit = {},
 ) {
   var newMemoryText by remember { mutableStateOf("") }
   var selectedCategory by remember { mutableStateOf(MemoryCategory.FACT) }
@@ -497,6 +499,15 @@ fun AgentsAndMemorySection(
         OutlinedButton(onClick = onClearMemories) {
           Text("Clear All")
         }
+      }
+
+      OutlinedButton(
+        onClick = onOpenMemoryManager,
+        modifier = Modifier.fillMaxWidth().testTag("control_center_open_my_memory_button"),
+      ) {
+        Icon(Icons.Outlined.Psychology, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(modifier = Modifier.width(8.dp))
+        Text("Open Full My Memory Manager")
       }
 
       if (!memoryStatus.isNullOrBlank()) {
@@ -815,6 +826,13 @@ fun PrivacyAndPerformanceSection(
         checked = config.encryptSensitiveMemory,
         onCheckedChange = { onUpdateConfig(config.copy(encryptSensitiveMemory = it)) },
         testTag = "encrypt_memory_switch",
+      )
+      ToggleRow(
+        title = "Proactive Preference Discovery",
+        subtitle = "Occasionally ask one gentle question to learn favorites (never saves without confirmation)",
+        checked = config.proactiveMemoryQuestionsEnabled,
+        onCheckedChange = { onUpdateConfig(config.copy(proactiveMemoryQuestionsEnabled = it)) },
+        testTag = "proactive_memory_discovery_switch",
       )
       ToggleRow(
         title = "Continuous Voice Conversation",

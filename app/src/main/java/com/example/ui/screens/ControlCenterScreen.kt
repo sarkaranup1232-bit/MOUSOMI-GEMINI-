@@ -79,6 +79,7 @@ fun ControlCenterScreen(
   onTriggerEmergencyStop: () -> Unit = {},
   onLaunchFloatingControlBar: () -> Unit = {},
   onOpenAccessibilitySetup: () -> Unit = {},
+  onOpenMemoryManager: () -> Unit = {},
 ) {
   BackHandler(onBack = onBack)
   val context = LocalContext.current
@@ -185,6 +186,7 @@ fun ControlCenterScreen(
               onSaveMemory = onSaveMemory,
               onDeleteMemory = onDeleteMemory,
               onClearMemories = onClearMemories,
+              onOpenMemoryManager = onOpenMemoryManager,
             )
           }
           2 -> {

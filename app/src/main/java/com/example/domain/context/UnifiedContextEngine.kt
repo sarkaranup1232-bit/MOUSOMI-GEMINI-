@@ -2,6 +2,8 @@ package com.example.domain.context
 
 import com.example.core.screen.ScreenShareSessionManager
 import com.example.domain.memory.LongTermMemoryManager
+import com.example.domain.memory.MemoryPrivacyManager
+import com.example.domain.memory.MemoryRetrievalEngine
 import com.example.domain.model.AiModelSpec
 import com.example.domain.model.DomainMessage
 import com.example.domain.model.MemoryRecord
@@ -20,6 +22,8 @@ data class UnifiedContextSnapshot(
 class UnifiedContextEngine @Inject constructor(
   private val memoryManager: LongTermMemoryManager,
   private val screenShareSessionManager: ScreenShareSessionManager? = null,
+  private val memoryRetrievalEngine: MemoryRetrievalEngine? = null,
+  private val privacyManager: MemoryPrivacyManager? = null,
 ) {
   suspend fun buildContext(
     query: String,
@@ -29,9 +33,21 @@ class UnifiedContextEngine @Inject constructor(
     tokenBudget: Int = 18_000,
     memoryEnabled: Boolean = true,
   ): UnifiedContextSnapshot {
+    val rawMemories =
+      if (memoryEnabled) {
+        memoryRetrievalEngine?.retrieveForPrompt(query = query, limit = 6)
+          ?: memoryManager.retrieveRelevantMemories(query = query, limit = 6)
+      } else {
+        emptyList()
+      }
     val memories =
-      if (memoryEnabled) memoryManager.retrieveRelevantMemories(query = query, limit = 5)
-      else emptyList()
+      if (privacyManager != null) {
+        rawMemories.filter {
+          it.isApproved && it.isActive && !privacyManager.containsSensitiveFinancialOrSecretData(it.content)
+        }
+      } else {
+        rawMemories.filter { it.isApproved && it.isActive }
+      }
 
     val hasActiveScreen = screenShareSessionManager?.getLatestFrame() != null
     val hasVisualInput = pendingMedia.any { it.kind.name == "PHOTO" || it.kind.name == "VIDEO" } || hasActiveScreen

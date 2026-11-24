@@ -350,4 +350,97 @@ class SystemAssistantUpgradeUnitTest {
     assertTrue(expiredState.hasTimedOut)
     assertFalse(expiredState.isActive)
   }
+
+  @Test
+  fun `stale assistant session teardown cannot close a newly invoked session`() {
+    val manager = AssistantSessionStateManager()
+
+    // Session 1 opens from bottom corner swipe
+    val session1Token = manager.claimActiveSessionToken()
+    manager.openStandardAssistant(com.example.core.assistant.EdgeActivationEdge.BOTTOM_CORNER, nowMs = 1000L)
+    assertTrue(manager.isActiveSessionToken(session1Token))
+    assertEquals(com.example.core.assistant.AssistantSurfaceState.EXPANDED, manager.surfaceState.value)
+
+    // Session 2 replaces Session 1 before Session 1's async onDestroy runs
+    val session2Token = manager.claimActiveSessionToken()
+    manager.openStandardAssistant(com.example.core.assistant.EdgeActivationEdge.BOTTOM_CORNER, nowMs = 2000L)
+    assertFalse(manager.isActiveSessionToken(session1Token))
+    assertTrue(manager.isActiveSessionToken(session2Token))
+
+    // Stale Session 1 teardown MUST NOT close Session 2
+    val dismissedByStale = manager.dismissAssistantSessionIfOwner(session1Token, keepScreenShare = false)
+    assertFalse(dismissedByStale)
+    assertEquals(com.example.core.assistant.AssistantSurfaceState.EXPANDED, manager.surfaceState.value)
+    assertTrue(manager.isSessionActive.value)
+
+    // Active Session 2 teardown succeeds cleanly
+    val dismissedByOwner = manager.dismissAssistantSessionIfOwner(session2Token, keepScreenShare = false)
+    assertTrue(dismissedByOwner)
+    assertEquals(com.example.core.assistant.AssistantSurfaceState.CLOSED, manager.surfaceState.value)
+    assertFalse(manager.isSessionActive.value)
+  }
+
+  @Test
+  fun `samsung galaxy M51 One UI 4_1 navigation compatibility covers all navigation modes honestly`() {
+    // 1. Gesture navigation (Swipe from sides & bottom) with corner gesture enabled
+    val sidesAndBottom =
+      com.example.core.assistant.AssistantRoleHelper.evaluateNavigationGestureCompatibility(
+        isDefaultAssistant = true,
+        isVoiceInteractionActiveService = true,
+        isSamsungOneUi = true,
+        navigationMode = com.example.core.assistant.SystemNavigationMode.GESTURE_SIDES_AND_BOTTOM,
+        isCornerAssistEnabledInOs = true,
+      )
+    assertTrue(sidesAndBottom.isCornerAssistGestureSupported)
+    assertEquals(true, sidesAndBottom.isCornerAssistEnabledInOs)
+    assertTrue(sidesAndBottom.primaryTriggerSummary.contains("bottom corner", ignoreCase = true))
+
+    // 2. Gesture navigation (Swipe from sides & bottom) with OS corner toggle OFF
+    val sidesAndBottomDisabled =
+      com.example.core.assistant.AssistantRoleHelper.evaluateNavigationGestureCompatibility(
+        isDefaultAssistant = true,
+        isVoiceInteractionActiveService = true,
+        isSamsungOneUi = true,
+        navigationMode = com.example.core.assistant.SystemNavigationMode.GESTURE_SIDES_AND_BOTTOM,
+        isCornerAssistEnabledInOs = false,
+      )
+    assertTrue(sidesAndBottomDisabled.isCornerAssistGestureSupported)
+    assertEquals(false, sidesAndBottomDisabled.isCornerAssistEnabledInOs)
+    assertTrue(sidesAndBottomDisabled.userActionHint?.contains("Navigation bar") == true)
+
+    // 3. Samsung 3-zone 'Swipe from bottom' -> corner-swipe unavailable, gives exact setting fix
+    val swipeFromBottom =
+      com.example.core.assistant.AssistantRoleHelper.evaluateNavigationGestureCompatibility(
+        isDefaultAssistant = true,
+        isVoiceInteractionActiveService = true,
+        isSamsungOneUi = true,
+        navigationMode = com.example.core.assistant.SystemNavigationMode.SAMSUNG_SWIPE_FROM_BOTTOM,
+        isCornerAssistEnabledInOs = false,
+      )
+    assertFalse(swipeFromBottom.isCornerAssistGestureSupported)
+    assertTrue(swipeFromBottom.userActionHint?.contains("Swipe from sides and bottom") == true)
+
+    // 4. 3-button Navigation bar -> Home long-press supported, corner swipe unavailable
+    val threeButton =
+      com.example.core.assistant.AssistantRoleHelper.evaluateNavigationGestureCompatibility(
+        isDefaultAssistant = true,
+        isVoiceInteractionActiveService = true,
+        isSamsungOneUi = true,
+        navigationMode = com.example.core.assistant.SystemNavigationMode.THREE_BUTTON,
+        isCornerAssistEnabledInOs = false,
+      )
+    assertFalse(threeButton.isCornerAssistGestureSupported)
+    assertTrue(threeButton.primaryTriggerSummary.contains("Home", ignoreCase = true))
+
+    // 5. Not selected as Default Digital Assistant yet
+    val notDefault =
+      com.example.core.assistant.AssistantRoleHelper.evaluateNavigationGestureCompatibility(
+        isDefaultAssistant = false,
+        isVoiceInteractionActiveService = false,
+        isSamsungOneUi = true,
+        navigationMode = com.example.core.assistant.SystemNavigationMode.GESTURE_SIDES_AND_BOTTOM,
+        isCornerAssistEnabledInOs = true,
+      )
+    assertTrue(notDefault.userActionHint?.contains("Digital assistant app") == true)
+  }
 }

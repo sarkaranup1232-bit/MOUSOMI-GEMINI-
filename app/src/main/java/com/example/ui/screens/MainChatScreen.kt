@@ -31,6 +31,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ScreenShare
+import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -986,6 +987,130 @@ fun MainChatScreen(
             }
           },
         )
+      }
+
+      uiState.pendingMemoryConfirmation?.let { pendingMem ->
+        AlertDialog(
+          onDismissRequest = viewModel::onDismissPendingMemory,
+          icon = {
+            Icon(
+              imageVector = Icons.Outlined.Psychology,
+              contentDescription = null,
+            )
+          },
+          title = { Text("Save to My Memory?") },
+          text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+              Text(pendingMem.promptMessage)
+              Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                modifier = Modifier.fillMaxWidth(),
+              ) {
+                Column(
+                  modifier = Modifier.padding(12.dp),
+                  verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                  Text(
+                    text = pendingMem.category.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                  )
+                  Text(
+                    text = pendingMem.extractedContent,
+                    style = MaterialTheme.typography.bodyMedium,
+                  )
+                }
+              }
+            }
+          },
+          confirmButton = {
+            Button(
+              onClick = viewModel::onConfirmPendingMemory,
+              modifier = Modifier.testTag("confirm_memory_save_button"),
+            ) {
+              Text("Save to My Memory")
+            }
+          },
+          dismissButton = {
+            OutlinedButton(
+              onClick = viewModel::onDismissPendingMemory,
+              modifier = Modifier.testTag("dismiss_memory_save_button"),
+            ) {
+              Text("Skip")
+            }
+          },
+        )
+      }
+
+      uiState.pendingDiscoveryPrompt?.let { discovery ->
+        Surface(
+          shape = RoundedCornerShape(18.dp),
+          color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
+          tonalElevation = 4.dp,
+          modifier =
+            Modifier
+              .align(Alignment.TopCenter)
+              .statusBarsPadding()
+              .padding(top = 62.dp, start = 16.dp, end = 16.dp)
+              .widthIn(max = 560.dp)
+              .testTag("memory_discovery_banner"),
+        ) {
+          Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              Icon(
+                imageVector = Icons.Outlined.Psychology,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+              )
+              Text(
+                text = "Personalize Mousomi (${discovery.targetCategory.label})",
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.weight(1f),
+              )
+              TextButton(
+                onClick = viewModel::onDismissDiscoveryPrompt,
+                modifier = Modifier.testTag("dismiss_discovery_prompt_button"),
+              ) {
+                Text("Skip")
+              }
+            }
+            Text(
+              text = discovery.questionText,
+              style = MaterialTheme.typography.bodyMedium,
+            )
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              OutlinedButton(
+                onClick = {
+                  when (discovery.targetCategory) {
+                    MemoryCategory.FAVORITE_SONG -> viewModel.onInputChanged("My favorite song is ")
+                    MemoryCategory.LANGUAGE_PREFERENCE -> viewModel.onReplyDiscoveryPrompt("I prefer bilingual English and Bengali")
+                    MemoryCategory.FAVORITE_ARTIST -> viewModel.onInputChanged("My favorite singer is ")
+                    MemoryCategory.HOBBY_INTEREST -> viewModel.onInputChanged("I enjoy ")
+                    else -> viewModel.onInputChanged("Remember my ${discovery.targetCategory.label.lowercase()}: ")
+                  }
+                  viewModel.onDismissDiscoveryPrompt()
+                },
+                modifier = Modifier.testTag("reply_discovery_prompt_button"),
+              ) {
+                Text(
+                  if (discovery.targetCategory == MemoryCategory.LANGUAGE_PREFERENCE) "English + Bengali"
+                  else "Answer in Chat"
+                )
+              }
+            }
+          }
+        }
       }
     }
   }

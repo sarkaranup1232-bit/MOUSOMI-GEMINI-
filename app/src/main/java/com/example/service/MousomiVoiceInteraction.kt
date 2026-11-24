@@ -21,8 +21,10 @@ import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
+import java.lang.ref.WeakReference
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -45,6 +47,10 @@ import com.example.core.accessibility.AccessibilityActionResult
 import com.example.core.accessibility.AccessibilityAgentController
 import com.example.core.agent.AgentTaskPlanner
 import com.example.core.agent.PlannedAgentOutcome
+import com.example.domain.memory.MemoryWriteOutcome
+import com.example.domain.memory.PendingMemoryConfirmation
+import com.example.domain.memory.PreferenceConfirmationManager
+import com.example.domain.model.ResponseBlock
 import com.example.core.alarms.TimerManager
 import com.example.core.assistant.AssistantSessionStateManager
 import com.example.core.assistant.AssistantSurfaceState
@@ -75,6 +81,9 @@ import com.example.core.screen.VisualQueryProcessor
 import com.example.core.storage.TempMediaCacheManager
 import com.example.core.voice.DictationTranscriptMerger
 import com.example.core.voice.GeminiLiveVoiceEngine
+import com.example.core.voice.HotwordCapabilityManager
+import com.example.core.voice.HotwordCapabilityReport
+import com.example.core.voice.HotwordCapabilityState
 import com.example.core.voice.LiveVoiceSessionManager
 import com.example.core.voice.LiveVoiceSessionStatus
 import com.example.core.voice.SpeechRecognizerDiagnostics
@@ -87,7 +96,6 @@ import com.example.domain.model.EdgeLightPreset
 import com.example.domain.model.NormBoundingBox
 import com.example.domain.model.NormPoint
 import com.example.domain.model.OrbQuickAction
-import com.example.domain.model.ResponseBlock
 import com.example.domain.model.ScreenShareStatus
 import com.example.domain.model.VerifiedModelCatalog
 import com.example.domain.orchestrator.AiOrchestrator
@@ -141,19 +149,56 @@ interface VoiceInteractionEntryPoint {
   fun timerManager(): TimerManager
   fun contactResolver(): ContactResolver
   fun accessibilityAgentController(): AccessibilityAgentController
+  fun hotwordCapabilityManager(): HotwordCapabilityManager
+  fun preferenceConfirmationManager(): PreferenceConfirmationManager
 }
 
 /**
  * Official Android Default Assistant Service ([VoiceInteractionService]).
  * Registered via [android.service.voice.VoiceInteractionService] & [res/xml/voice_interaction_service.xml].
+ * Keeps idle memory near zero (no Compose, Room queries, or network clients loaded in [onReady]),
+ * and evaluates real OEM/OS hotword permissions via [HotwordCapabilityManager] without claiming
+ * unsupported third-party DSP wake-word listening.
  */
 class MousomiVoiceInteractionService : VoiceInteractionService() {
+  @Volatile private var lastCapabilityReport: HotwordCapabilityReport? = null
+
   override fun onReady() {
     super.onReady()
+    activeServiceRef = WeakReference(this)
+    runCatching {
+      val ep = EntryPointAccessors.fromApplication(applicationContext, VoiceInteractionEntryPoint::class.java)
+      val report = ep.hotwordCapabilityManager().inspectCapabilities()
+      lastCapabilityReport = report
+      // On stock Android 12 / One UI 4.1, non-privileged apps do not hold CAPTURE_AUDIO_HOTWORD /
+      // MANAGE_VOICE_KEYPHRASES, so evaluateFromInputs returns DSP_HARDWARE_UNSUPPORTED /
+      // SOFTWARE_HOTWORD_RESTRICTED. Only when genuinely HOTWORD_READY would a detector be armed.
+    }
   }
 
   override fun onShutdown() {
+    if (activeServiceRef?.get() === this) {
+      activeServiceRef = null
+    }
+    lastCapabilityReport = null
     super.onShutdown()
+  }
+
+  companion object {
+    @Volatile private var activeServiceRef: WeakReference<MousomiVoiceInteractionService>? = null
+
+    fun isServiceReady(): Boolean = activeServiceRef?.get() != null
+
+    fun requestSystemAssistSession(args: Bundle? = null): Boolean {
+      val service = activeServiceRef?.get() ?: return false
+      return runCatching {
+        val flags =
+          VoiceInteractionSession.SHOW_WITH_ASSIST or
+            VoiceInteractionSession.SHOW_WITH_SCREENSHOT
+        service.showSession(args ?: Bundle(), flags)
+        true
+      }.getOrDefault(false)
+    }
   }
 }
 
@@ -301,8 +346,10 @@ class MousomiAssistantSession(
 
   private var queryJob: Job? = null
   private var voiceCollectorJob: Job? = null
+  private var revealSettlerJob: Job? = null
   private var rootContainer: FrameLayout? = null
-  private var hasShownOnce = false
+  private var hasStartedOnce = false
+  private var sessionOwnerToken: Long = 0L
 
   // Session UI state
   private var inputTextState by mutableStateOf("")
@@ -422,8 +469,8 @@ class MousomiAssistantSession(
           )
 
         val effectiveSurfaceState =
-          if (surfaceState == AssistantSurfaceState.CLOSED && hasShownOnce) {
-            if (isDrawingModeState) AssistantSurfaceState.DRAWING else AssistantSurfaceState.EXPANDED
+          if (isDrawingModeState && surfaceState != AssistantSurfaceState.CLOSED) {
+            AssistantSurfaceState.DRAWING
           } else {
             surfaceState
           }
@@ -471,9 +518,9 @@ class MousomiAssistantSession(
             onStopDictation = { stopSessionDictation() },
             onRetryDictation = { startOrResumeSessionDictation() },
             onLiveButtonClick = {
-              if (Settings.canDrawOverlays(context)) {
-                launchFloatingLiveModeFromSession()
-              } else if (visualState == AssistantVisualState.LIVE_ASSISTANT) {
+              // Keep Live Voice inside the permission-free VoiceInteractionSession window by default
+              // so Draw Over Other Apps is never required and outside taps smoothly collapse to the Orb.
+              if (visualState == AssistantVisualState.LIVE_ASSISTANT) {
                 stopLiveToStandard()
               } else {
                 startLiveAssistantMode()
@@ -596,9 +643,11 @@ class MousomiAssistantSession(
 
   override fun onShow(args: Bundle?, showFlags: Int) {
     super.onShow(args, showFlags)
-    configureSessionWindow()
-    if (!hasShownOnce) {
-      hasShownOnce = true
+    val sessionState = entryPoint.assistantSessionStateManager()
+    sessionOwnerToken = sessionState.claimActiveSessionToken()
+
+    if (!hasStartedOnce) {
+      hasStartedOnce = true
       lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
     } else if (lifecycleRegistry.currentState == Lifecycle.State.CREATED) {
       lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
@@ -616,7 +665,24 @@ class MousomiAssistantSession(
     pendingPhoneActionState = null
     pendingSocialActionState = null
     pendingAccessibilityActionState = null
-    entryPoint.assistantSessionStateManager().openStandardAssistant(EdgeActivationEdge.BOTTOM_CORNER)
+    isDrawingModeState = false
+    drawingStrokePointsState = emptyList()
+    snappedDrawingResultState = null
+
+    sessionState.openStandardAssistant(EdgeActivationEdge.BOTTOM_CORNER)
+    configureSessionWindow()
+    syncWindowForSurfaceState(sessionState.surfaceState.value)
+    requestInsetsRefresh()
+
+    revealSettlerJob?.cancel()
+    revealSettlerJob =
+      sessionScope.launch {
+        delay(560L)
+        if (sessionState.isActiveSessionToken(sessionOwnerToken)) {
+          sessionState.onActivationAnimationSettled()
+        }
+      }
+
     startVoiceCollector()
 
     // If invoked with explicit Live quick action, transition straight into Live State
@@ -630,27 +696,32 @@ class MousomiAssistantSession(
 
   override fun onHide() {
     super.onHide()
+    revealSettlerJob?.cancel()
     isDrawingModeState = false
     drawingStrokePointsState = emptyList()
     snappedDrawingResultState = null
     isOrbDraggingState = false
     cleanupVoiceAndQueries()
-    entryPoint.assistantSessionStateManager().dismissAssistantSession(
-      keepScreenShare = entryPoint.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED
+    entryPoint.assistantSessionStateManager().dismissAssistantSessionIfOwner(
+      ownerToken = sessionOwnerToken,
+      keepScreenShare = entryPoint.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED,
     )
+    syncWindowForSurfaceState(AssistantSurfaceState.CLOSED)
     if (lifecycleRegistry.currentState == Lifecycle.State.RESUMED) {
       lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
     }
   }
 
   override fun onCloseSystemDialogs() {
+    revealSettlerJob?.cancel()
     isDrawingModeState = false
     drawingStrokePointsState = emptyList()
     snappedDrawingResultState = null
     isOrbDraggingState = false
     cleanupVoiceAndQueries()
-    entryPoint.assistantSessionStateManager().dismissAssistantSession(
-      keepScreenShare = entryPoint.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED
+    entryPoint.assistantSessionStateManager().dismissAssistantSessionIfOwner(
+      ownerToken = sessionOwnerToken,
+      keepScreenShare = entryPoint.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED,
     )
     super.onCloseSystemDialogs()
   }
@@ -670,17 +741,22 @@ class MousomiAssistantSession(
       return
     }
     cleanupVoiceAndQueries()
-    sessionState.dismissAssistantSession(
-      keepScreenShare = entryPoint.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED
+    sessionState.dismissAssistantSessionIfOwner(
+      ownerToken = sessionOwnerToken,
+      keepScreenShare = entryPoint.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED,
     )
     super.onBackPressed()
   }
 
   override fun onDestroy() {
+    revealSettlerJob?.cancel()
     isDrawingModeState = false
     isOrbDraggingState = false
     cleanupVoiceAndQueries()
-    entryPoint.assistantSessionStateManager().dismissAssistantSession(keepScreenShare = false)
+    entryPoint.assistantSessionStateManager().dismissAssistantSessionIfOwner(
+      ownerToken = sessionOwnerToken,
+      keepScreenShare = false,
+    )
     val state = lifecycleRegistry.currentState
     if (state != Lifecycle.State.INITIALIZED && state != Lifecycle.State.DESTROYED) {
       lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
@@ -693,31 +769,42 @@ class MousomiAssistantSession(
   override fun onComputeInsets(outInsets: Insets) {
     super.onComputeInsets(outInsets)
     val surface = entryPoint.assistantSessionStateManager().surfaceState.value
-    if (surface == AssistantSurfaceState.COLLAPSED_ORB && !isOrbDraggingState) {
-      val activeOrbRect =
-        if (!orbTouchableRect.isEmpty) {
-          orbTouchableRect
-        } else {
-          val dm = context.resources.displayMetrics
-          val density = dm.density
-          val orbBoxPx = (96f * density).toInt()
-          val right = (dm.widthPixels - (12f * density).toInt()).coerceAtLeast(orbBoxPx)
-          val bottom = (dm.heightPixels * 0.78f).toInt().coerceAtLeast(orbBoxPx)
-          AndroidRect(right - orbBoxPx, bottom - orbBoxPx, right, bottom)
-        }
-      outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
-      outInsets.touchableRegion.set(activeOrbRect)
-      if (!orbCloseTouchableRect.isEmpty) {
-        outInsets.touchableRegion.op(orbCloseTouchableRect, Region.Op.UNION)
+    when {
+      surface == AssistantSurfaceState.CLOSED -> {
+        outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
+        outInsets.touchableRegion.setEmpty()
       }
-    } else {
-      outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_FRAME
+      surface == AssistantSurfaceState.COLLAPSED_ORB && !isOrbDraggingState -> {
+        val activeOrbRect =
+          if (!orbTouchableRect.isEmpty) {
+            orbTouchableRect
+          } else {
+            val dm = context.resources.displayMetrics
+            val density = dm.density
+            val orbBoxPx = (96f * density).toInt()
+            val right = (dm.widthPixels - (12f * density).toInt()).coerceAtLeast(orbBoxPx)
+            val bottom = (dm.heightPixels * 0.78f).toInt().coerceAtLeast(orbBoxPx)
+            AndroidRect(right - orbBoxPx, bottom - orbBoxPx, right, bottom)
+          }
+        outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
+        outInsets.touchableRegion.set(activeOrbRect)
+        if (!orbCloseTouchableRect.isEmpty) {
+          outInsets.touchableRegion.op(orbCloseTouchableRect, Region.Op.UNION)
+        }
+      }
+      else -> {
+        outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_FRAME
+      }
     }
   }
 
   private fun configureSessionWindow() {
     val win = window?.window ?: return
     win.setBackgroundDrawable(ColorDrawable(AndroidColor.TRANSPARENT))
+    win.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+    win.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
+    win.decorView.setViewTreeLifecycleOwner(this@MousomiAssistantSession)
+    win.decorView.setViewTreeSavedStateRegistryOwner(this@MousomiAssistantSession)
     syncWindowForSurfaceState(entryPoint.assistantSessionStateManager().surfaceState.value)
     win.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -731,6 +818,11 @@ class MousomiAssistantSession(
   private fun syncWindowForSurfaceState(surfaceState: AssistantSurfaceState) {
     val win = window?.window ?: return
     when (surfaceState) {
+      AssistantSurfaceState.CLOSED -> {
+        win.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        win.setDimAmount(0f)
+        win.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+      }
       AssistantSurfaceState.COLLAPSED_ORB -> {
         win.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         win.setDimAmount(0f)
@@ -745,8 +837,7 @@ class MousomiAssistantSession(
         win.setDimAmount(0f)
         win.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
       }
-      AssistantSurfaceState.EXPANDED,
-      AssistantSurfaceState.CLOSED -> {
+      AssistantSurfaceState.EXPANDED -> {
         win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         win.setDimAmount(0.22f)
         win.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
@@ -1019,6 +1110,23 @@ class MousomiAssistantSession(
             }
             return@launch
           }
+          is PlannedAgentOutcome.AgentTaskExecuted -> {
+            assistantResponseState = planned.report.summaryText
+            val settings = ep.settingsRepository().getSettingsSnapshot()
+            if (settings.voicePreferences.autoSpeakResponses ||
+              ep.assistantSessionStateManager().visualState.value == AssistantVisualState.LIVE_ASSISTANT
+            ) {
+              ep.voiceController().speakResponse(
+                messageId = "assist_agent_${System.currentTimeMillis()}",
+                text = planned.report.summaryText,
+                preferences = settings.voicePreferences,
+              )
+            }
+            return@launch
+          }
+          is PlannedAgentOutcome.ImageGenerationRequested -> {
+            // Route down to AiOrchestrator with imageGenerationRequested = true
+          }
           is PlannedAgentOutcome.LaunchCommand -> {
             when (val agentCmd = planned.intent) {
               is AgentCommandIntent.StartScreenRecording -> {
@@ -1069,6 +1177,8 @@ class MousomiAssistantSession(
                 assistantResponseState = "${res.statusLabel}: ${res.verifiedDetail}"
                 return@launch
               }
+              is AgentCommandIntent.GenerateImage,
+              is AgentCommandIntent.ExecuteAgentTask -> Unit
             }
           }
           PlannedAgentOutcome.ForwardToMultimodalAi -> Unit
@@ -1081,6 +1191,14 @@ class MousomiAssistantSession(
       assistantResponseState = ""
 
       val settings = ep.settingsRepository().getSettingsSnapshot()
+      val pendingPref =
+        if (prompt.isNotBlank()) {
+          ep.preferenceConfirmationManager().inspectUserStatement(
+            rawInput = prompt,
+            memoryEnabled = settings.privacyPerformanceConfig.memoryEnabled,
+          )
+        } else null
+      val forceImgGen = com.example.core.device.MediaFileService.extractImageGenerationPrompt(prompt) != null
       val attachmentPreviews = currentPending.map { AttachmentPreview.PickedPhotoUri(it.uriString) }
       val preparedQuery =
         if (attachmentPreviews.isNotEmpty()) {
@@ -1114,6 +1232,7 @@ class MousomiAssistantSession(
           historyMessages = emptyList(),
           currentTurnImages = payloads,
           requestedModelId = VerifiedModelCatalog.MOUSOMI_AUTO_SLOT_ID,
+          imageGenerationRequested = forceImgGen,
         )
       ep.aiOrchestrator().processMessage(req).collectLatest { event ->
         when (event) {
@@ -1123,7 +1242,22 @@ class MousomiAssistantSession(
               is AiResponseState.Streaming -> assistantResponseState = s.partialText
               is AiResponseState.Completed -> {
                 isGeneratingState = false
-                assistantResponseState = s.fullText
+                if (pendingPref != null) {
+                  val savedLabel =
+                    if (pendingPref.isExplicitSaveRequest) {
+                      ep.preferenceConfirmationManager().confirmAndSave(
+                        pendingPref,
+                        settings.privacyPerformanceConfig.encryptSensitiveMemory,
+                      )
+                      "\n\nSaved to My Memory: \"${pendingPref.extractedContent}\""
+                    } else {
+                      statusBannerState = pendingPref.promptMessage + " (Open Mousomi app to edit or manage in My Memory.)"
+                      ""
+                    }
+                  assistantResponseState = s.fullText + savedLabel
+                } else {
+                  assistantResponseState = s.fullText
+                }
                 if (ep.assistantSessionStateManager().visualState.value == AssistantVisualState.LIVE_ASSISTANT &&
                   !usingLiveSocketState
                 ) {

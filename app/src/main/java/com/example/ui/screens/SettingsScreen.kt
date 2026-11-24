@@ -37,6 +37,7 @@ import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Shield
@@ -77,8 +78,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import com.example.core.assistant.AssistantRoleHelper
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -86,6 +89,8 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
+import com.example.core.voice.HotwordCapabilityReport
+import com.example.core.voice.HotwordCapabilityState
 import com.example.domain.model.ActivationHealthStatus
 import com.example.domain.model.ConnectionMode
 import com.example.domain.model.DetectedProviderKind
@@ -147,6 +152,10 @@ fun SettingsScreen(
   onActivateOneTap: (String) -> Unit = {},
   onVerifyConnection: () -> Unit = {},
   onDeactivateCredentials: () -> Unit = {},
+  activeMemoryCount: Int = 0,
+  hotwordCapabilityReport: HotwordCapabilityReport? = null,
+  onOpenMemoryManager: () -> Unit = {},
+  onRequestAssistantRole: () -> Unit = {},
   onBack: () -> Unit,
 ) {
   BackHandler(onBack = onBack)
@@ -652,6 +661,168 @@ fun SettingsScreen(
                 onValueChange = onSpeechRateChange,
                 valueRange = 0.7f..1.5f,
               )
+            }
+          }
+        }
+
+        // My Memory & Personal Preferences
+        Surface(
+          shape = RoundedCornerShape(20.dp),
+          color = MaterialTheme.colorScheme.surface,
+          tonalElevation = 2.dp,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+          ) {
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+              Icon(
+                imageVector = Icons.Outlined.Psychology,
+                contentDescription = null,
+                tint = NeonCyan,
+              )
+              Column(modifier = Modifier.weight(1f)) {
+                Text(
+                  text = stringResource(R.string.my_memory_title),
+                  fontFamily = DisplayFontFamily,
+                  fontWeight = FontWeight.Medium,
+                  fontSize = 18.sp,
+                )
+                Text(
+                  text = "$activeMemoryCount active personal memories (favorite songs, style & preferences)",
+                  style = MaterialTheme.typography.bodySmall,
+                  color = colors.mutedText,
+                )
+              }
+            }
+            OutlinedButton(
+              onClick = onOpenMemoryManager,
+              shape = RoundedCornerShape(14.dp),
+              modifier = Modifier.fillMaxWidth().testTag("settings_open_my_memory_button"),
+            ) {
+              Icon(Icons.Outlined.Psychology, contentDescription = null, modifier = Modifier.size(18.dp))
+              Spacer(modifier = Modifier.width(8.dp))
+              Text("Manage My Memory & Favorites")
+            }
+          }
+        }
+
+        // Assistant & Wake-Word Readiness
+        Surface(
+          shape = RoundedCornerShape(20.dp),
+          color = MaterialTheme.colorScheme.surface,
+          tonalElevation = 2.dp,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+          ) {
+            Text(
+              text = stringResource(R.string.assistant_readiness_title),
+              fontFamily = DisplayFontFamily,
+              fontWeight = FontWeight.Medium,
+              fontSize = 18.sp,
+            )
+            if (hotwordCapabilityReport != null) {
+              val statusColor =
+                when (hotwordCapabilityReport.state) {
+                  HotwordCapabilityState.HOTWORD_READY,
+                  HotwordCapabilityState.DSP_HARDWARE_AVAILABLE -> NeonGreen
+                  HotwordCapabilityState.DEFAULT_ASSISTANT_NOT_SELECTED,
+                  HotwordCapabilityState.PERMISSION_REQUIRED -> WarmAmber
+                  else -> ElectricBlue
+                }
+              Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = statusColor.copy(alpha = 0.14f),
+                border = BorderStroke(1.dp, statusColor.copy(alpha = 0.4f)),
+                modifier = Modifier.fillMaxWidth(),
+              ) {
+                Column(
+                  modifier = Modifier.padding(12.dp),
+                  verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                  Text(
+                    text = hotwordCapabilityReport.state.label,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = statusColor,
+                  )
+                  Text(
+                    text = hotwordCapabilityReport.runtimeProfile.summaryLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.mutedText,
+                  )
+                  Text(
+                    text = hotwordCapabilityReport.reasonSummary,
+                    style = MaterialTheme.typography.bodySmall,
+                  )
+                  Text(
+                    text =
+                      "Role: ${if (hotwordCapabilityReport.isRoleHeld) "Held" else "Not Held"} • " +
+                        "VoiceInteraction: ${if (hotwordCapabilityReport.isVoiceInteractionActiveService) "Active" else "Inactive"} • " +
+                        "ACTION_ASSIST: ${if (hotwordCapabilityReport.isAssistActivityResolved) "Resolved" else "Unavailable"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.mutedText,
+                  )
+                  hotwordCapabilityReport.navigationDiagnostic?.let { navDiag ->
+                    Text(
+                      text = "Navigation: ${navDiag.navigationMode.displayName}",
+                      style = MaterialTheme.typography.labelSmall,
+                      color = ElectricBlue,
+                    )
+                    Text(
+                      text = navDiag.primaryTriggerSummary,
+                      style = MaterialTheme.typography.bodySmall,
+                    )
+                    navDiag.userActionHint?.let { hint ->
+                      Text(
+                        text = hint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WarmAmber,
+                      )
+                    }
+                  }
+                }
+              }
+            } else {
+              Text(
+                text = "Set Mousomi AI as your Default Digital Assistant for instant corner-swipe or power-key launch without requiring screen overlay permission.",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.mutedText,
+              )
+            }
+            Text(
+              text = "Galaxy M51 (Android 12 / One UI 4.1): Set 'Swipe from sides and bottom' and enable 'Assistant app' in Display > Navigation bar for diagonal bottom-corner swipe.",
+              style = MaterialTheme.typography.labelSmall,
+              color = colors.mutedText,
+            )
+            OutlinedButton(
+              onClick = onRequestAssistantRole,
+              shape = RoundedCornerShape(14.dp),
+              modifier = Modifier.fillMaxWidth().testTag("settings_default_assistant_button"),
+            ) {
+              Text(
+                if (hotwordCapabilityReport?.isDefaultAssistant == true) {
+                  "Default Assistant Active (Review Role)"
+                } else {
+                  "Set as Default Digital Assistant"
+                }
+              )
+            }
+            val navContext = LocalContext.current
+            OutlinedButton(
+              onClick = {
+                runCatching { navContext.startActivity(AssistantRoleHelper.createNavigationBarSettingsIntent()) }
+              },
+              shape = RoundedCornerShape(14.dp),
+              modifier = Modifier.fillMaxWidth().testTag("settings_navigation_bar_button"),
+            ) {
+              Text("Open Display & Navigation Bar Settings")
             }
           }
         }

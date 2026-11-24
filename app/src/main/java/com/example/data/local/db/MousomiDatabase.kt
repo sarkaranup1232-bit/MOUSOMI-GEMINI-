@@ -108,8 +108,9 @@ interface ChatDao {
     ImageTaskEntity::class,
     ImageAssetEntity::class,
     ImageProviderStatusEntity::class,
+    TodoNoteEntity::class,
   ],
-  version = 6,
+  version = 7,
   exportSchema = false,
 )
 abstract class MousomiDatabase : RoomDatabase() {
@@ -119,6 +120,7 @@ abstract class MousomiDatabase : RoomDatabase() {
   abstract fun part5Dao(): Part5Dao
   abstract fun addOnDao(): AddOnDao
   abstract fun imageStudioDao(): ImageStudioDao
+  abstract fun todoNoteDao(): TodoNoteDao
 
   companion object {
     val MIGRATION_1_2 =
@@ -477,6 +479,35 @@ abstract class MousomiDatabase : RoomDatabase() {
             )
             """.trimIndent()
           )
+        }
+      }
+
+    val MIGRATION_6_7 =
+      object : Migration(6, 7) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+          db.execSQL("ALTER TABLE memory_items ADD COLUMN originalStatement TEXT NOT NULL DEFAULT ''")
+          db.execSQL("ALTER TABLE memory_items ADD COLUMN tagsCsv TEXT NOT NULL DEFAULT ''")
+          db.execSQL("ALTER TABLE memory_items ADD COLUMN confidence REAL NOT NULL DEFAULT 0.85")
+          db.execSQL("ALTER TABLE memory_items ADD COLUMN confirmationStatus TEXT NOT NULL DEFAULT 'CONFIRMED'")
+          db.execSQL("ALTER TABLE memory_items ADD COLUMN isActive INTEGER NOT NULL DEFAULT 1")
+          db.execSQL("ALTER TABLE memory_items ADD COLUMN lastConfirmedAtMs INTEGER NOT NULL DEFAULT 0")
+          db.execSQL("CREATE INDEX IF NOT EXISTS index_memory_items_isActive ON memory_items(isActive)")
+          db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS todo_note_items (
+              id TEXT NOT NULL PRIMARY KEY,
+              kind TEXT NOT NULL,
+              title TEXT NOT NULL,
+              body TEXT NOT NULL,
+              scheduleTimeLabel TEXT NOT NULL,
+              isCompleted INTEGER NOT NULL,
+              createdAtMs INTEGER NOT NULL,
+              updatedAtMs INTEGER NOT NULL
+            )
+            """.trimIndent()
+          )
+          db.execSQL("CREATE INDEX IF NOT EXISTS index_todo_note_items_kind ON todo_note_items(kind)")
+          db.execSQL("CREATE INDEX IF NOT EXISTS index_todo_note_items_updatedAtMs ON todo_note_items(updatedAtMs)")
         }
       }
   }

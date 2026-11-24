@@ -18,6 +18,8 @@ sealed interface AgentCommandIntent {
     val explanation: String,
     val fallbackSettingsQuery: String?,
   ) : AgentCommandIntent
+  data class GenerateImage(val imagePrompt: String) : AgentCommandIntent
+  data class ExecuteAgentTask(val rawCommand: String) : AgentCommandIntent
 }
 
 /**
@@ -153,12 +155,94 @@ class AssistantAgentCommandRouter @Inject constructor() {
       return silentToggleMatch
     }
 
-    // 6. Verified direct app launches, settings panels, alarms, maps, clipboard
+    // 6. Voice / text AI Image Generation command
+    MediaFileService.extractImageGenerationPrompt(clean)?.let { imgPrompt ->
+      return AgentCommandIntent.GenerateImage(imgPrompt)
+    }
+
+    // 7. System Agent Commands (Volume, Media, Favorite Music, YouTube search, WhatsApp call,
+    // Call History, Contact search, Battery/Device, Location, Files, Calendar, To-Do/Notes, Hotword check)
+    if (isStructuredAgentTask(lower)) {
+      return AgentCommandIntent.ExecuteAgentTask(clean)
+    }
+
+    // 8. Verified direct app launches, settings panels, alarms, maps, clipboard
     if (isDirectDeviceAction(lower)) {
       return AgentCommandIntent.OpenTargetOrSetting(clean)
     }
 
     return null
+  }
+
+  private fun isStructuredAgentTask(lower: String): Boolean {
+    if (lower.length > 140) return false
+    return when {
+      // Hotword / Wake-word capability inquiry
+      ("wake word" in lower || "hotword" in lower || "always listening" in lower || "hey mousomi" in lower) &&
+        ("enable" in lower || "support" in lower || "work" in lower || "check" in lower || "status" in lower || "can you" in lower) -> true
+      // Volume controls
+      "volume" in lower && ("up" in lower || "down" in lower || "increase" in lower || "decrease" in lower ||
+        "raise" in lower || "lower" in lower || "set" in lower || "mute" in lower || "unmute" in lower ||
+        "check" in lower || "what is" in lower) -> true
+      lower == "mute" || lower == "unmute" -> true
+      // Media playback controls
+      matchesAny(
+        lower,
+        "pause music",
+        "pause media",
+        "pause audio",
+        "play music",
+        "resume music",
+        "resume media",
+        "next song",
+        "next track",
+        "skip track",
+        "skip song",
+        "previous song",
+        "previous track",
+        "stop music",
+        "stop media",
+      ) -> true
+      // Favorite music & playback intents (queries, play, show, remove — NOT "my favorite song is ..." statements)
+      lower.startsWith("play my fav") ||
+        lower.startsWith("play a song by my fav") ||
+        lower == "play favorite song" ||
+        lower.startsWith("show my fav") ||
+        lower.startsWith("what is my fav") ||
+        lower.startsWith("what's my fav") ||
+        lower.startsWith("who is my fav") ||
+        ((lower.startsWith("remove ") || lower.startsWith("delete ")) &&
+          ("from favorites" in lower || "from my favorites" in lower || "from favourites" in lower)) -> true
+      lower.startsWith("play ") && (" on spotify" in lower || " on youtube" in lower) -> true
+      // YouTube video search
+      lower.startsWith("search youtube") || lower.startsWith("find on youtube") ||
+        Regex("^search\\s+(?:videos?\\s+)?(?:for\\s+)?.+\\s+on\\s+youtube$").matches(lower) -> true
+      // WhatsApp voice/video call
+      "whatsapp call" in lower || "whatsapp video call" in lower ||
+        ("call " in lower && "on whatsapp" in lower) -> true
+      // Call history & Answer/End capability check
+      lower == "open call history" || lower == "show call history" || lower == "open call log" ||
+        lower == "show recent calls" || "answer the call" in lower || "end the call" in lower -> true
+      // Contact search
+      lower.startsWith("find contact ") || lower.startsWith("search contact ") ||
+        lower.startsWith("lookup contact ") -> true
+      // Battery & Device info
+      lower == "check battery" || lower == "battery level" || lower == "what is my battery" ||
+        lower == "what is my battery level" || lower == "device info" ||
+        lower == "check device info" -> true
+      // Foreground location
+      lower == "where am i" || lower == "what is my location" || lower == "check my location" -> true
+      // Files
+      lower.startsWith("find file ") || lower.startsWith("search files") || lower.startsWith("search file ") -> true
+      // Calendar & To-Do / Notes / Daily Schedule
+      lower.startsWith("create calendar event") || lower.startsWith("add calendar event") ||
+        lower.startsWith("schedule meeting") || lower.startsWith("add to-do ") ||
+        lower.startsWith("add todo ") || lower.startsWith("take a note ") ||
+        lower.startsWith("add note ") || lower.startsWith("add to my schedule ") ||
+        lower == "show my notes" || lower == "show my todos" || lower == "show my to-dos" ||
+        lower == "show my schedule" || lower == "show my daily schedule" -> true
+      else -> false
+    }
   }
 
   private fun detectUnsupportedSilentToggle(lower: String): AgentCommandIntent.UnsupportedSilentToggle? {
@@ -235,7 +319,6 @@ class AssistantAgentCommandRouter @Inject constructor() {
           .removePrefix("please ")
           .removePrefix("can you ")
           .trim()
-      // Avoid hijacking "open a new chat" / "open my mind" / "open lens" if handled specially
       if (target == "lens" || target == "open lens" || target == "open mousomi lens") return false
       if (target.startsWith("open a ") || target.startsWith("open the door") || target.startsWith("open discussion")) {
         return false

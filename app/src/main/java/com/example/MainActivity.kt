@@ -55,12 +55,14 @@ import com.example.ui.screens.AssistantHubScreen
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.ControlCenterScreen
 import com.example.ui.screens.MainChatScreen
+import com.example.ui.screens.MemoryManagementScreen
 import com.example.ui.screens.MousomiLensScreen
 import com.example.ui.screens.PermissionCenterScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.MousomiTheme
 import com.example.ui.viewmodel.LensViewModel
+import com.example.ui.viewmodel.MemoryManagementViewModel
 import com.example.ui.viewmodel.MousomiViewModel
 import dagger.hilt.android.AndroidEntryPoint
 import java.util.Calendar
@@ -74,6 +76,7 @@ object MousomiRoutes {
   const val ASSISTANT_HUB = "assistant_hub"
   const val LENS = "lens"
   const val ACCESSIBILITY = "accessibility"
+  const val MEMORY_MANAGEMENT = "my_memory"
 }
 
 @AndroidEntryPoint
@@ -501,6 +504,9 @@ class MainActivity : ComponentActivity() {
                 onOpenAccessibilitySetup = {
                   navController.navigate(MousomiRoutes.ACCESSIBILITY) { launchSingleTop = true }
                 },
+                onOpenMemoryManager = {
+                  navController.navigate(MousomiRoutes.MEMORY_MANAGEMENT) { launchSingleTop = true }
+                },
                 onTriggerEmergencyStop = viewModel::onTriggerEmergencyStop,
                 onBack = { navController.popBackStack() },
               )
@@ -588,6 +594,22 @@ class MainActivity : ComponentActivity() {
                 onActivateOneTap = viewModel::onActivateOneTapApiKey,
                 onVerifyConnection = viewModel::onVerifyCurrentConnection,
                 onDeactivateCredentials = viewModel::onDeactivateApiCredentials,
+                activeMemoryCount = uiState.memories.count { it.isActive },
+                hotwordCapabilityReport = uiState.hotwordCapabilityReport,
+                onOpenMemoryManager = {
+                  navController.navigate(MousomiRoutes.MEMORY_MANAGEMENT) { launchSingleTop = true }
+                },
+                onRequestAssistantRole = {
+                  assistantRoleLauncher.launch(AssistantRoleHelper.createRequestAssistantIntent(this@MainActivity))
+                },
+                onBack = { navController.popBackStack() },
+              )
+            }
+
+            composable(MousomiRoutes.MEMORY_MANAGEMENT) {
+              val memoryViewModel: MemoryManagementViewModel = hiltViewModel()
+              MemoryManagementScreen(
+                viewModel = memoryViewModel,
                 onBack = { navController.popBackStack() },
               )
             }

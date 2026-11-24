@@ -88,6 +88,7 @@ import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.example.MainActivity
 import com.example.R
+import com.example.core.agent.AgentOrchestrator
 import com.example.core.agent.AgentTaskPlanner
 import com.example.core.agent.PlannedAgentOutcome
 import com.example.core.alarms.TimerManager
@@ -962,6 +963,7 @@ open class MousomiOverlayService : Service() {
   @Inject lateinit var imageAttachmentManager: ImageAttachmentManager
   @Inject lateinit var tempMediaCacheManager: TempMediaCacheManager
   @Inject lateinit var agentTaskPlanner: AgentTaskPlanner
+  @Inject lateinit var agentOrchestrator: AgentOrchestrator
   @Inject lateinit var timerManager: TimerManager
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -3041,6 +3043,21 @@ open class MousomiOverlayService : Service() {
             }
           }
           return
+        }
+        is AgentCommandIntent.ExecuteAgentTask -> {
+          floatingSessionStore.updatePromptText("")
+          scope.launch {
+            val report = agentOrchestrator.executeAgentTask(cmd.rawCommand)
+            floatingSessionStore.setStatusBanner(report.summaryText)
+            val prefs = settingsRepository.getSettingsSnapshot().voicePreferences
+            if (prefs.autoSpeakResponses || isFloatingLivePopupMode.value) {
+              voiceController.speakResponse("overlay_cmd", report.summaryText, prefs)
+            }
+          }
+          return
+        }
+        is AgentCommandIntent.GenerateImage -> {
+          floatingSessionStore.setStatusBanner("Generating or routing image request…")
         }
         null -> Unit
       }

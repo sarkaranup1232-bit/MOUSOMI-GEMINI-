@@ -6,6 +6,7 @@ import com.example.data.local.db.MemoryItemEntity
 import com.example.data.local.db.MemorySummaryEntity
 import com.example.domain.model.DomainMessage
 import com.example.domain.model.MemoryCategory
+import com.example.domain.model.MemoryConfirmationStatus
 import com.example.domain.model.MemoryRecord
 import java.util.UUID
 import javax.inject.Inject
@@ -41,31 +42,47 @@ class LongTermMemoryManager @Inject constructor(
     importance: Float = 0.7f,
     isApproved: Boolean = true,
     encryptAtRest: Boolean = true,
+    originalStatement: String = rawContent,
+    tags: List<String> = emptyList(),
+    confidence: Float = 0.88f,
+    confirmationStatus: MemoryConfirmationStatus =
+      if (isApproved) MemoryConfirmationStatus.CONFIRMED
+      else MemoryConfirmationStatus.PENDING_CONFIRMATION,
+    isActive: Boolean = true,
   ): MemoryWriteOutcome {
     val clean = rawContent.trim()
     if (clean.isBlank()) {
       return MemoryWriteOutcome.BlockedSensitive("Memory cannot be blank.")
     }
-    if (cryptoManager.containsSensitiveCredentials(clean)) {
+    if (cryptoManager.containsSensitiveCredentials(clean) ||
+      cryptoManager.containsSensitiveCredentials(originalStatement)
+    ) {
       return MemoryWriteOutcome.BlockedSensitive(
         "Blocked: OTPs, passwords, API keys, and sensitive tokens are never stored in memory."
       )
     }
 
-    val existing = memoryDao.getApprovedMemoriesSnapshot().map(::entityToRecord)
+    val existing = memoryDao.getAllMemoriesSnapshot().map(::entityToRecord)
     val duplicate = findDuplicate(clean, existing)
     val now = System.currentTimeMillis()
     val keywords = extractKeywords(clean)
+    val cleanTags = tags.map { it.trim() }.filter { it.isNotBlank() }.distinct().take(8)
 
     val record =
       if (duplicate != null) {
         duplicate.copy(
           category = category,
           content = if (clean.length >= duplicate.content.length) clean else duplicate.content,
+          originalStatement = originalStatement.trim().ifBlank { duplicate.originalStatement },
           keywords = (duplicate.keywords + keywords).distinct().take(12),
+          tags = (duplicate.tags + cleanTags).distinct().take(8),
           importance = max(duplicate.importance, importance).coerceIn(0.1f, 1.0f),
+          confidence = max(duplicate.confidence, confidence).coerceIn(0.1f, 1.0f),
           isApproved = isApproved,
+          confirmationStatus = confirmationStatus,
+          isActive = isActive,
           updatedAtMs = now,
+          lastConfirmedAtMs = if (isApproved) now else duplicate.lastConfirmedAtMs,
         )
       } else {
         MemoryRecord(
@@ -77,36 +94,78 @@ class LongTermMemoryManager @Inject constructor(
           isApproved = isApproved,
           createdAtMs = now,
           updatedAtMs = now,
+          originalStatement = originalStatement.trim().ifBlank { clean },
+          tags = cleanTags,
+          confidence = confidence.coerceIn(0.1f, 1.0f),
+          confirmationStatus = confirmationStatus,
+          isActive = isActive,
+          lastConfirmedAtMs = if (isApproved) now else 0L,
         )
       }
 
-    val encodedPayload =
-      if (encryptAtRest) cryptoManager.encryptIfSupported(record.content) else record.content
-    val isEncrypted = encodedPayload != record.content && encodedPayload.startsWith("enc_v1:")
-
-    memoryDao.upsertMemory(
-      MemoryItemEntity(
-        id = record.id,
-        category = record.category.name,
-        contentPayload = encodedPayload,
-        keywordsCsv = record.keywords.joinToString(","),
-        importance = record.importance,
-        isApproved = record.isApproved,
-        isEncrypted = isEncrypted,
-        createdAtMs = record.createdAtMs,
-        updatedAtMs = record.updatedAtMs,
-      )
-    )
+    persistRecord(record = record, encryptAtRest = encryptAtRest)
     return MemoryWriteOutcome.Saved(record = record, mergedDuplicate = duplicate != null)
+  }
+
+  suspend fun updateMemory(
+    id: String,
+    newCategory: MemoryCategory? = null,
+    newContent: String? = null,
+    newTags: List<String>? = null,
+    newImportance: Float? = null,
+    isActive: Boolean? = null,
+    encryptAtRest: Boolean = true,
+  ): MemoryWriteOutcome? {
+    val existingEntity = memoryDao.getMemoryById(id) ?: return null
+    val existing = entityToRecord(existingEntity)
+    val updatedContent = newContent?.trim()?.takeIf { it.isNotBlank() } ?: existing.content
+    if (cryptoManager.containsSensitiveCredentials(updatedContent)) {
+      return MemoryWriteOutcome.BlockedSensitive(
+        "Blocked: OTPs, passwords, API keys, and sensitive tokens are never stored in memory."
+      )
+    }
+    val now = System.currentTimeMillis()
+    val updated =
+      existing.copy(
+        category = newCategory ?: existing.category,
+        content = updatedContent,
+        keywords = extractKeywords(updatedContent),
+        tags = newTags?.map { it.trim() }?.filter { it.isNotBlank() }?.distinct() ?: existing.tags,
+        importance = newImportance?.coerceIn(0.1f, 1.0f) ?: existing.importance,
+        isActive = isActive ?: existing.isActive,
+        isApproved = true,
+        confirmationStatus = MemoryConfirmationStatus.CONFIRMED,
+        updatedAtMs = now,
+        lastConfirmedAtMs = now,
+      )
+    persistRecord(record = updated, encryptAtRest = encryptAtRest)
+    return MemoryWriteOutcome.Saved(record = updated, mergedDuplicate = false)
+  }
+
+  suspend fun setMemoryActive(id: String, isActive: Boolean) {
+    memoryDao.updateActiveFlag(id = id, isActive = isActive, updatedAtMs = System.currentTimeMillis())
   }
 
   suspend fun deleteMemory(id: String) {
     memoryDao.deleteMemory(id)
   }
 
+  suspend fun deleteByCategory(category: MemoryCategory) {
+    memoryDao.deleteByCategory(category.name)
+  }
+
   suspend fun clearAllMemories() {
     memoryDao.clearAllMemories()
   }
+
+  suspend fun getAllMemoriesSnapshot(): List<MemoryRecord> =
+    memoryDao.getAllMemoriesSnapshot().map(::entityToRecord)
+
+  suspend fun getApprovedActiveMemoriesSnapshot(): List<MemoryRecord> =
+    memoryDao.getApprovedMemoriesSnapshot().map(::entityToRecord)
+
+  suspend fun getMemoriesByCategory(category: MemoryCategory): List<MemoryRecord> =
+    memoryDao.getActiveMemoriesByCategory(category.name).map(::entityToRecord)
 
   suspend fun retrieveRelevantMemories(query: String, limit: Int = 5): List<MemoryRecord> {
     val approved = memoryDao.getApprovedMemoriesSnapshot().map(::entityToRecord)
@@ -136,17 +195,61 @@ class LongTermMemoryManager @Inject constructor(
   }
 
   suspend fun exportMemoriesAsJson(): String {
-    val all = memoryDao.getApprovedMemoriesSnapshot().map(::entityToRecord)
+    val all = memoryDao.getAllMemoriesSnapshot().map(::entityToRecord)
     return json.encodeToString(all)
+  }
+
+  private suspend fun persistRecord(record: MemoryRecord, encryptAtRest: Boolean) {
+    val encodedPayload =
+      if (encryptAtRest) cryptoManager.encryptIfSupported(record.content) else record.content
+    val isEncrypted = encodedPayload != record.content && encodedPayload.startsWith("enc_v1:")
+    val encodedOriginal =
+      if (encryptAtRest && record.originalStatement.isNotBlank()) {
+        cryptoManager.encryptIfSupported(record.originalStatement)
+      } else {
+        record.originalStatement
+      }
+
+    memoryDao.upsertMemory(
+      MemoryItemEntity(
+        id = record.id,
+        category = record.category.name,
+        contentPayload = encodedPayload,
+        keywordsCsv = record.keywords.joinToString(","),
+        importance = record.importance,
+        isApproved = record.isApproved,
+        isEncrypted = isEncrypted,
+        createdAtMs = record.createdAtMs,
+        updatedAtMs = record.updatedAtMs,
+        originalStatement = encodedOriginal,
+        tagsCsv = record.tags.joinToString(","),
+        confidence = record.confidence,
+        confirmationStatus = record.confirmationStatus.name,
+        isActive = record.isActive,
+        lastConfirmedAtMs = record.lastConfirmedAtMs,
+      )
+    )
   }
 
   private fun entityToRecord(entity: MemoryItemEntity): MemoryRecord {
     val decrypted =
       if (entity.isEncrypted) cryptoManager.decryptIfEncrypted(entity.contentPayload)
       else entity.contentPayload
+    val decryptedOriginal =
+      if (entity.originalStatement.startsWith("enc_v1:")) {
+        cryptoManager.decryptIfEncrypted(entity.originalStatement)
+      } else {
+        entity.originalStatement.ifBlank { decrypted }
+      }
     val cat =
       runCatching { MemoryCategory.valueOf(entity.category) }
         .getOrDefault(MemoryCategory.FACT)
+    val confStatus =
+      runCatching { MemoryConfirmationStatus.valueOf(entity.confirmationStatus) }
+        .getOrDefault(
+          if (entity.isApproved) MemoryConfirmationStatus.CONFIRMED
+          else MemoryConfirmationStatus.PENDING_CONFIRMATION
+        )
     return MemoryRecord(
       id = entity.id,
       category = cat,
@@ -156,6 +259,12 @@ class LongTermMemoryManager @Inject constructor(
       isApproved = entity.isApproved,
       createdAtMs = entity.createdAtMs,
       updatedAtMs = entity.updatedAtMs,
+      originalStatement = decryptedOriginal,
+      tags = entity.tagsCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() },
+      confidence = entity.confidence,
+      confirmationStatus = confStatus,
+      isActive = entity.isActive,
+      lastConfirmedAtMs = if (entity.lastConfirmedAtMs > 0L) entity.lastConfirmedAtMs else entity.updatedAtMs,
     )
   }
 
@@ -199,15 +308,20 @@ class LongTermMemoryManager @Inject constructor(
       val queryTokens = extractKeywords(query).toSet()
       val now = System.currentTimeMillis()
       return memories
-        .filter { it.isApproved }
+        .filter { it.isApproved && it.isActive }
         .map { mem ->
-          val memTokens = (mem.keywords + extractKeywords(mem.content)).toSet()
+          val memTokens = (mem.keywords + mem.tags + extractKeywords(mem.content)).toSet()
           val overlapScore =
             if (queryTokens.isEmpty()) 0f
             else queryTokens.intersect(memTokens).size.toFloat() / queryTokens.size.toFloat()
           val recencyHours = ((now - mem.updatedAtMs).coerceAtLeast(0L) / 3_600_000f)
           val recencyScore = 1f / (1f + recencyHours * 0.04f)
-          val totalScore = (overlapScore * 0.55f) + (mem.importance * 0.30f) + (recencyScore * 0.15f)
+          val categoryBoost =
+            if (mem.category == MemoryCategory.LANGUAGE_PREFERENCE ||
+              mem.category == MemoryCategory.CONVERSATION_PREFERENCE
+            ) 0.14f else 0f
+          val totalScore =
+            (overlapScore * 0.52f) + (mem.importance * 0.28f) + (recencyScore * 0.14f) + categoryBoost
           mem to totalScore
         }
         .sortedByDescending { it.second }
