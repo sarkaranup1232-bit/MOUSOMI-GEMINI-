@@ -37,11 +37,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21 (required for AGP 9.1 / Gradle 9.3 / Robolectric SDK 36 bytecode v65)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Cache Robolectric Android runtime artifacts
         uses: actions/cache@v4
@@ -54,11 +54,11 @@ jobs:
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Validate Gradle Wrapper
+      - name: Validate Gradle Wrapper and build config files
         run: |
-          for required in gradlew gradlew.bat gradle/wrapper/gradle-wrapper.jar gradle/wrapper/gradle-wrapper.properties; do
+          for required in gradlew gradlew.bat gradle/wrapper/gradle-wrapper.jar gradle/wrapper/gradle-wrapper.properties .env.example; do
             if [ ! -f "$required" ]; then
-              echo "::error::Missing Gradle wrapper file: $required"
+              echo "::error::Missing required build file: $required"
               exit 1
             fi
           done
@@ -106,11 +106,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -185,6 +185,13 @@ jobs:
           echo "$BADGING" | head -n 5
           echo "$BADGING" | grep -q "package: name='com.aistudio.mousomiai.xkmzpq'"
 
+          if [ -f app/google-services.json ]; then
+            if ! grep -q 'name="default_web_client_id"' app/build/generated/res/processDebugGoogleServices/values/values.xml; then
+              echo "::error::app/google-services.json was provided, but default_web_client_id was not generated in Debug resources."
+              exit 1
+            fi
+          fi
+
       - name: Upload Debug APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -241,12 +248,12 @@ jobs:
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         if: steps.prereqs.outputs.ready == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Set up Gradle cache
         if: steps.prereqs.outputs.ready == 'true'
@@ -257,6 +264,8 @@ jobs:
         env:
           GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
           if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
             echo "$GOOGLE_SERVICES_JSON_BASE64" | tr -d '\r\n ' | base64 -d > app/google-services.json
@@ -264,6 +273,11 @@ jobs:
           echo "$RELEASE_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > release.keystore
           chmod +x gradlew
           ./gradlew :app:validateGoogleServicesConfig --no-daemon
+
+          RESOLVED_ALIAS="${KEY_ALIAS:-upload}"
+          echo "### Release Signing Certificate Fingerprints (alias: ${RESOLVED_ALIAS})" >> "$GITHUB_STEP_SUMMARY"
+          keytool -list -v -keystore release.keystore -alias "$RESOLVED_ALIAS" -storepass "$STORE_PASSWORD" \
+            | grep -E 'SHA1:|SHA256:' >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Accept Android SDK licenses
         if: steps.prereqs.outputs.ready == 'true'
@@ -343,7 +357,7 @@ jobs:
     needs: [ build-signed-release-apk ]
     if: >-
       needs.build-signed-release-apk.outputs.release_built == 'true' &&
-      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true))
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.publish_release == true || inputs.publish_release == 'true')))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

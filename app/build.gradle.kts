@@ -145,6 +145,18 @@ val validateGoogleServicesConfig by tasks.registering {
     }
     val root = JsonSlurper().parse(googleServicesFile) as? Map<*, *>
       ?: throw GradleException("Invalid JSON in app/google-services.json.")
+    val projectInfo = root["project_info"] as? Map<*, *>
+    val projectId = projectInfo?.get("project_id")?.toString()?.trim().orEmpty()
+    if (
+      projectId.isEmpty() ||
+        projectId.equals("remixed-project-id", ignoreCase = true) ||
+        projectId.contains("placeholder", ignoreCase = true)
+    ) {
+      throw GradleException(
+        "app/google-services.json has a missing or placeholder project_info.project_id ('$projectId')."
+      )
+    }
+
     val clients = root["client"] as? List<*> ?: emptyList<Any>()
     val matchingClient = clients.filterIsInstance<Map<*, *>>().firstOrNull { client ->
       val clientInfo = client["client_info"] as? Map<*, *>
@@ -158,17 +170,22 @@ val validateGoogleServicesConfig by tasks.registering {
     val webClient = oauthClients.filterIsInstance<Map<*, *>>().firstOrNull { oauth ->
       val typeNum = (oauth["client_type"] as? Number)?.toInt()
       val clientId = oauth["client_id"]?.toString()?.trim().orEmpty()
+      val lower = clientId.lowercase()
       typeNum == 3 &&
-        clientId.isNotEmpty() &&
-        !clientId.equals("missing-google-services-json", ignoreCase = true)
+        clientId.length >= 20 &&
+        !lower.startsWith("missing-") &&
+        !lower.startsWith("your_") &&
+        !lower.contains("placeholder") &&
+        clientId.contains("-") &&
+        clientId.contains(".")
     } ?: throw GradleException(
-      "app/google-services.json client '$requiredPackage' is missing an OAuth Web Client ID " +
+      "app/google-services.json client '$requiredPackage' is missing a valid OAuth Web Client ID " +
         "(oauth_client with client_type = 3). Register SHA-1/SHA-256 and enable Google Sign-In in Firebase Console, then re-download google-services.json."
     )
 
     val webClientId = webClient["client_id"]?.toString()?.trim().orEmpty()
     logger.lifecycle(
-      "Validated app/google-services.json for package '$requiredPackage' (Web Client ID present: ${webClientId.take(12)}...)."
+      "Validated app/google-services.json for project '$projectId', package '$requiredPackage' (Web Client ID present: ${webClientId.take(12)}...)."
     )
   }
 }
