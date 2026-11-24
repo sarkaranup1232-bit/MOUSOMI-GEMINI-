@@ -73,7 +73,7 @@ class Part3RobolectricTest {
   }
 
   @Test
-  fun `model selector bottom sheet displays exactly four required models with checkmark on selected`() {
+  fun `model selector bottom sheet displays all seven supported models with checkmark on selected`() {
     var selected: AiModelOption = AiModelOption.GEMINI_4_HYDROGEN
 
     composeRule.setContent {
@@ -87,16 +87,13 @@ class Part3RobolectricTest {
     }
 
     composeRule.waitForIdle()
-    composeRule.onNodeWithText("Gemini 4 Hydrogen").performScrollTo().assertIsDisplayed()
-    composeRule.onNodeWithText("New Base Intelligence · Advanced AI Engine").performScrollTo().assertIsDisplayed()
-    composeRule.onNodeWithText("Gemini Pro").performScrollTo().assertIsDisplayed()
-    composeRule.onNodeWithText("Advanced Reasoning · Coding · Complex Analysis").performScrollTo().assertIsDisplayed()
-    composeRule.onNodeWithText("Gemini Flash").performScrollTo().assertIsDisplayed()
-    composeRule.onNodeWithText("Fast Responses · Everyday AI · Multimodal Tasks").performScrollTo().assertIsDisplayed()
-    composeRule.onNodeWithText("Groq Reasoning").performScrollTo().assertIsDisplayed()
-    composeRule.onNodeWithText("Fast Inference · Logical Reasoning · Technical Assistance").performScrollTo().assertIsDisplayed()
+    AiModelOption.entries.forEach { option ->
+      composeRule.onNodeWithTag("model_option_${option.name}").performScrollTo().assertIsDisplayed()
+      composeRule.onNodeWithText(option.displayName).performScrollTo().assertIsDisplayed()
+      composeRule.onNodeWithText(option.description).performScrollTo().assertIsDisplayed()
+    }
 
-    // Strictly 1 checkmark (on selected model) and NO Image Generation model
+    // Strictly 1 checkmark (on selected model)
     composeRule.onAllNodesWithContentDescription("Selected").assertCountEquals(1)
     assertEquals(7, AiModelOption.entries.size)
 

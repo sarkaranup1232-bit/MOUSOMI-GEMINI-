@@ -365,10 +365,13 @@ class Part5UpgradeTest {
 
     composeRule.onNodeWithTag("neon_chat_composer").assertIsDisplayed()
     composeRule.onNodeWithText("Ask Mousomi...").assertIsDisplayed()
-    composeRule.onNodeWithTag("mode_chat_button").assertIsDisplayed()
-    composeRule.onNodeWithTag("mode_task_button").assertIsDisplayed()
-    composeRule.onNodeWithTag("context_chip_generate_image").assertDoesNotExist()
-    composeRule.onNodeWithTag("context_chip_deep_research").assertDoesNotExist()
+    composeRule.onNodeWithTag("mode_normal_button").assertIsDisplayed()
+    composeRule.onNodeWithTag("mode_analysis_button").performScrollTo().assertIsDisplayed()
+    composeRule.onNodeWithTag("mode_search_button").performScrollTo().assertIsDisplayed()
+    composeRule.onNodeWithTag("mode_deep_research_button").performScrollTo().assertIsDisplayed()
+    composeRule.onNodeWithTag("mode_task_button").performScrollTo().assertIsDisplayed()
+    composeRule.onNodeWithTag("context_chip_create_image").performScrollTo().assertIsDisplayed()
+    composeRule.onNodeWithTag("context_chip_image_studio").performScrollTo().assertIsDisplayed()
   }
 
   @Test

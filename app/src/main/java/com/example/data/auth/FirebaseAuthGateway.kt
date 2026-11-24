@@ -82,6 +82,25 @@ class FirebaseAuthGateway @Inject constructor(
     }
   }
 
+  override fun isGoogleSignInConfigured(): Boolean = googleSignInConfigurationMessage() == null
+
+  override fun googleSignInConfigurationMessage(): String? {
+    if (auth == null) {
+      return "Firebase is not configured in this build (google-services.json missing). " +
+        "Google Sign-In is unavailable until built with a valid google-services.json; you can still continue without signing in."
+    }
+    val clientId = resolveWebClientId()
+    if (clientId == null) {
+      return "Google Sign-In configuration missing (default_web_client_id not generated). " +
+        "Ensure google-services.json matches com.aistudio.mousomiai.xkmzpq and includes an OAuth Web Client ID (client_type 3)."
+    }
+    if (!isValidWebClientId(clientId)) {
+      return "Google Sign-In configuration is a placeholder or invalid client ID. " +
+        "Rebuild with a real google-services.json containing an OAuth Web Client ID."
+    }
+    return null
+  }
+
   override fun observeSession(): Flow<AuthUserSession> {
     ensureListener()
     return sessionFlow.asStateFlow()
@@ -114,8 +133,7 @@ class FirebaseAuthGateway @Inject constructor(
       sessionFlow.value = firebaseAuth.currentUser.toSession()
       return true
     }
-    val clientId = resolveWebClientId() ?: return false
-    if (clientId == "missing-google-services-json") return false
+    val clientId = resolveWebClientId()?.takeIf(::isValidWebClientId) ?: return false
     val googleIdOption = GetGoogleIdOption.Builder()
       .setFilterByAuthorizedAccounts(true)
       .setServerClientId(clientId)
@@ -144,17 +162,16 @@ class FirebaseAuthGateway @Inject constructor(
 
   override suspend fun signInWithGoogle(activity: Activity): GoogleSignInOutcome {
     ensureListener()
+    val configError = googleSignInConfigurationMessage()
+    if (configError != null) {
+      return GoogleSignInOutcome.Error(configError)
+    }
     val firebaseAuth = auth
       ?: return GoogleSignInOutcome.Error("Firebase Auth is not initialized (google-services.json missing).")
-    val clientId = resolveWebClientId()
+    val clientId = resolveWebClientId()?.takeIf(::isValidWebClientId)
       ?: return GoogleSignInOutcome.Error(
-        "Google Sign-In configuration missing: default_web_client_id not found."
+        "Google Sign-In configuration missing or invalid: default_web_client_id not found."
       )
-    if (clientId == "missing-google-services-json") {
-      return GoogleSignInOutcome.Error(
-        "Add a valid google-services.json with an OAuth Web Client ID to sign in."
-      )
-    }
 
     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
     val request = GetCredentialRequest.Builder()
@@ -207,10 +224,20 @@ class FirebaseAuthGateway @Inject constructor(
   private fun resolveWebClientId(): String? =
     try {
       val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
-      if (resId != 0) context.getString(resId).takeIf { it.isNotBlank() } else null
+      if (resId != 0) context.getString(resId).trim().takeIf { it.isNotBlank() } else null
     } catch (_: Exception) {
       null
     }
+
+  internal fun isValidWebClientId(clientId: String): Boolean {
+    val normalized = clientId.trim()
+    if (normalized.length < 20) return false
+    val lower = normalized.lowercase()
+    if (lower.startsWith("missing-") || lower.startsWith("your_") || lower.contains("placeholder")) {
+      return false
+    }
+    return normalized.contains("-") && normalized.contains(".")
+  }
 
   private fun FirebaseUser?.toSession(): AuthUserSession {
     if (this == null) return AuthUserSession()

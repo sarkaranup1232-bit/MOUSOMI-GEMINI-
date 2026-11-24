@@ -29,6 +29,10 @@ sealed interface GoogleSignInOutcome {
 }
 
 interface OptionalAuthGateway {
+  fun isGoogleSignInConfigured(): Boolean = true
+
+  fun googleSignInConfigurationMessage(): String? = null
+
   fun observeSession(): Flow<AuthUserSession>
 
   fun getCurrentSession(): AuthUserSession

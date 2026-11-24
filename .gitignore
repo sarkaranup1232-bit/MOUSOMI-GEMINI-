@@ -16,4 +16,9 @@
 local.properties
 .env
 debug.keystore
+release.keystore
+*.jks
+*.keystore
+*.p12
+*.pk8
 *-debug.log

@@ -199,9 +199,10 @@ class Part4UltraRobolectricTest {
   fun `permission center lists all privacy disclosures on Android 12+ SDK 36`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val items = PermissionCenterHelper.buildDashboardItems(context, ScreenShareStatus.STOPPED)
-    assertEquals(8, items.size)
+    assertEquals(10, items.size)
     assertTrue(items.any { it.id == "media_picker" && it.isOptionalZeroPermissionNote })
-    assertTrue(items.any { it.id == "camera_note" && !it.isGranted })
+    assertTrue(items.any { it.id == "camera" && !it.isGranted })
+    assertTrue(items.any { it.id == "assistant" })
   }
 
   @Test
@@ -281,7 +282,7 @@ class Part4UltraRobolectricTest {
     composeRule.onNodeWithTag("control_tab_1").performClick()
     composeRule.onNodeWithText("5. Autonomous Multi-Agent Orchestrator").assertIsDisplayed()
     composeRule.onNodeWithTag("control_tab_2").performClick()
-    composeRule.onNodeWithText("9. Smart Notification Intelligence").assertIsDisplayed()
+    composeRule.onNodeWithText("9. Smart Notification & Read-Aloud").assertIsDisplayed()
     composeRule.onNodeWithTag("control_tab_3").performClick()
     composeRule.onNodeWithText("11. Privacy & Permission Center").assertIsDisplayed()
   }

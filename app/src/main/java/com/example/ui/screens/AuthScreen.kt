@@ -101,6 +101,8 @@ fun AuthScreen(
   var errorMessage by remember { mutableStateOf<String?>(null) }
   var showPrivacyTermsDialog by remember { mutableStateOf(false) }
   var reducedMotion by remember(initialReducedMotion) { mutableStateOf(initialReducedMotion) }
+  val isGoogleSignInConfigured = remember(authGateway) { authGateway.isGoogleSignInConfigured() }
+  val googleSignInConfigNotice = remember(authGateway) { authGateway.googleSignInConfigurationMessage() }
 
   LaunchedEffect(Unit) {
     val signedIn = authGateway.attemptSilentSignIn()
@@ -319,12 +321,28 @@ fun AuthScreen(
                 Surface(
                   shape = RoundedCornerShape(14.dp),
                   color = MaterialTheme.colorScheme.errorContainer,
-                  modifier = Modifier.fillMaxWidth(),
+                  modifier = Modifier.fillMaxWidth().testTag("auth_error_banner"),
                 ) {
                   Text(
                     text = errorMessage!!,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.padding(12.dp),
+                    textAlign = TextAlign.Center,
+                  )
+                }
+              } else if (!isGoogleSignInConfigured && !googleSignInConfigNotice.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Surface(
+                  shape = RoundedCornerShape(14.dp),
+                  color = Color(0xFF3B240C).copy(alpha = 0.85f),
+                  border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.55f)),
+                  modifier = Modifier.fillMaxWidth().testTag("auth_google_config_notice"),
+                ) {
+                  Text(
+                    text = googleSignInConfigNotice,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFFDE68A),
                     modifier = Modifier.padding(12.dp),
                     textAlign = TextAlign.Center,
                   )

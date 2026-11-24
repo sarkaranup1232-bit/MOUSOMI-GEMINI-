@@ -1351,7 +1351,7 @@ fun FloatingLivePopupCard(
         )
       }
 
-      // Honest Screen Share toggle + visible active status + Stop Screen Sharing
+      // Honest Screen Share toggle + visible active status + dedicated Stop Screen Sharing button
       Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -1399,13 +1399,28 @@ fun FloatingLivePopupCard(
               overflow = TextOverflow.Ellipsis,
               modifier = Modifier.weight(1f),
             )
-            if (isScreenShareActive) {
+          }
+        }
+        if (isScreenShareActive) {
+          Surface(
+            onClick = onToggleScreenShare,
+            shape = RoundedCornerShape(16.dp),
+            color = Color(0xFFEF4444).copy(alpha = 0.18f),
+            border = BorderStroke(1.dp, Color(0xFFFCA5A5).copy(alpha = 0.65f)),
+            modifier =
+              Modifier
+                .heightIn(min = 38.dp)
+                .testTag("floating_live_stop_share_button"),
+          ) {
+            Box(
+              modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+              contentAlignment = Alignment.Center,
+            ) {
               Text(
                 text = "Stop",
                 color = Color(0xFFFCA5A5),
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.testTag("floating_live_stop_share_button"),
               )
             }
           }
