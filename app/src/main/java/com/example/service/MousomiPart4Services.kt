@@ -8,6 +8,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -19,15 +20,22 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioManager
 import android.media.ImageReader
+import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.os.PowerManager
+import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -80,24 +88,50 @@ import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.example.MainActivity
 import com.example.R
+import com.example.core.agent.AgentTaskPlanner
+import com.example.core.agent.PlannedAgentOutcome
+import com.example.core.alarms.TimerManager
 import com.example.core.assistant.AssistantSessionPhase
 import com.example.core.assistant.AssistantSessionStateManager
+import com.example.core.assistant.AssistantSurfaceState
 import com.example.core.assistant.EdgeActivationEdge
 import com.example.core.display.DisplayGeometry
 import com.example.core.display.DisplayGeometryManager
 import com.example.core.edge.BorderLightController
 import com.example.core.edge.EdgeLightStateMapper
 import com.example.core.notifications.NotificationIntelligenceEngine
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import com.example.core.device.AgentCommandIntent
+import com.example.core.device.AssistantAgentCommandRouter
+import com.example.core.device.DeviceActionExecutor
 import com.example.core.overlay.FloatingAssistantSessionStore
 import com.example.core.overlay.FloatingControlBarGeometry
 import com.example.core.overlay.OrbPositionHelper
 import com.example.core.permissions.EmergencyStopController
+import com.example.core.screen.CircleSelectionProcessor
+import com.example.core.screen.FreehandPathProcessor
+import com.example.core.screen.ImageAttachmentManager
 import com.example.core.screen.MediaProjectionManager as AppMediaProjectionManager
+import com.example.core.screen.RectangleSelectionProcessor
+import com.example.core.screen.ScreenRecordingManager
+import com.example.core.screen.ScreenRecordingPhase
 import com.example.core.screen.ScreenSelectionManager
 import com.example.core.screen.ScreenShareSessionManager
 import com.example.core.screen.ScreenshotCaptureManager
+import com.example.core.screen.SelectionGeometryEngine
+import com.example.core.screen.SelectionGeometryResult
 import com.example.core.screen.SelectionStage
+import com.example.core.screen.SelectionToolMode
+import com.example.core.screen.SmartCropEngine
 import com.example.core.screen.VisualQueryProcessor
+import com.example.core.storage.TempMediaCacheManager
 import com.example.core.voice.AudioSmokeAnalyzer
 import com.example.core.voice.GeminiLiveVoiceEngine
 import com.example.core.voice.LiveSessionPhase
@@ -108,6 +142,8 @@ import com.example.core.voice.VoiceState
 import com.example.domain.model.AiResponseState
 import com.example.domain.model.DomainMessage
 import com.example.domain.model.EdgeLightConfig
+import com.example.domain.model.NormBoundingBox
+import com.example.domain.model.NormPoint
 import com.example.domain.model.OrbPopupAction
 import com.example.domain.model.OrbQuickAction
 import com.example.domain.model.OrbVisualMode
@@ -120,16 +156,23 @@ import com.example.domain.repository.SettingsRepository
 import com.example.ui.components.EdgeLightPerimeterOverlay
 import com.example.ui.components.FloatingChatPanelCard
 import com.example.ui.components.FloatingControlBar
+import com.example.ui.components.FloatingLivePopupCard
 import com.example.ui.components.FloatingOrbitPopup
 import com.example.ui.components.FloatingProfileQuickMenu
 import com.example.ui.components.OrbitDismissScrim
 import com.example.ui.components.OrbitalSmokeOrb
+import com.example.ui.components.SelectionHighlightRenderer
 import com.example.ui.model.AttachmentPreview
 import com.example.ui.overlay.OverlayMediaPickerActivity
 import com.example.ui.overlay.ScreenCaptureConsentActivity
 import com.example.ui.theme.MousomiTheme
+import com.example.ui.theme.NeonCyan
 import dagger.hilt.android.AndroidEntryPoint
+import java.io.File
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -154,23 +197,35 @@ class MediaProjectionCaptureService : Service() {
   @Inject lateinit var appMediaProjectionManager: AppMediaProjectionManager
   @Inject lateinit var screenshotCaptureManager: ScreenshotCaptureManager
   @Inject lateinit var screenSelectionManager: ScreenSelectionManager
+  @Inject lateinit var screenRecordingManager: ScreenRecordingManager
 
   private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private var captureJob: Job? = null
+  private var recordingTimerJob: Job? = null
   private var mediaProjection: MediaProjection? = null
   private var virtualDisplay: VirtualDisplay? = null
   private var imageReader: ImageReader? = null
+  private var mediaRecorder: MediaRecorder? = null
+  private var recordingPfd: ParcelFileDescriptor? = null
+  private var recordingMediaStoreUri: Uri? = null
+  private var recordingDirectFile: File? = null
+  private var recordingDisplayPath: String = ""
+  private var isRecordingSession: Boolean = false
   private var isSelectionModeSession: Boolean = false
   private val handler = Handler(Looper.getMainLooper())
 
   private val projectionCallback =
     object : MediaProjection.Callback() {
       override fun onStop() {
-        stopCaptureAndSelf("System or user ended screen sharing.")
+        if (isRecordingSession) {
+          stopAndSaveScreenRecording()
+        } else {
+          stopCaptureAndSelf("System or user ended screen sharing.")
+        }
       }
 
       override fun onCapturedContentResize(width: Int, height: Int) {
-        if (width > 0 && height > 0) {
+        if (!isRecordingSession && width > 0 && height > 0) {
           recreateSurfaceForSize(width.coerceAtMost(1440), height.coerceAtMost(2880))
         }
       }
@@ -179,9 +234,23 @@ class MediaProjectionCaptureService : Service() {
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    if (intent?.action == ACTION_STOP) {
-      stopCaptureAndSelf("Screen sharing stopped from notification.")
-      return START_NOT_STICKY
+    when (intent?.action) {
+      ACTION_STOP -> {
+        if (isRecordingSession) {
+          stopAndSaveScreenRecording()
+        } else {
+          stopCaptureAndSelf("Screen sharing stopped from notification.")
+        }
+        return START_NOT_STICKY
+      }
+      ACTION_STOP_RECORDING -> {
+        stopAndSaveScreenRecording()
+        return START_NOT_STICKY
+      }
+      ACTION_CANCEL_RECORDING -> {
+        cancelScreenRecording()
+        return START_NOT_STICKY
+      }
     }
 
     val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
@@ -193,25 +262,31 @@ class MediaProjectionCaptureService : Service() {
         @Suppress("DEPRECATION")
         intent?.getParcelableExtra(EXTRA_DATA)
       }
-    isSelectionModeSession = intent?.getBooleanExtra(EXTRA_FOR_SCREEN_SELECTION, false) == true
+    val explicitMode = intent?.getStringExtra(EXTRA_CAPTURE_MODE)
+    isSelectionModeSession =
+      explicitMode == CAPTURE_MODE_SELECTION ||
+        (explicitMode == null && intent?.getBooleanExtra(EXTRA_FOR_SCREEN_SELECTION, false) == true)
+    isRecordingSession = explicitMode == CAPTURE_MODE_SCREEN_RECORDING
 
     if (resultCode != Activity.RESULT_OK || data == null) {
-      if (isSelectionModeSession) {
-        screenSelectionManager.cancelSelection()
+      when {
+        isRecordingSession -> screenRecordingManager.markCancelled("Screen capture consent was not granted.")
+        isSelectionModeSession -> screenSelectionManager.cancelSelection()
+        else -> sessionManager.stopSession("Screen capture consent was not granted.")
       }
-      sessionManager.stopSession("Screen capture consent was not granted.")
       stopSelf()
       return START_NOT_STICKY
     }
 
-    startAsForeground()
+    startAsForeground(isRecording = isRecordingSession)
     val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
     val projection = mgr?.getMediaProjection(resultCode, data)
     if (projection == null) {
-      if (isSelectionModeSession) {
-        screenSelectionManager.reportError("Unable to initialize MediaProjection session.")
+      when {
+        isRecordingSession -> screenRecordingManager.markFailed("Unable to initialize MediaProjection session.")
+        isSelectionModeSession -> screenSelectionManager.reportError("Unable to initialize MediaProjection session.")
+        else -> sessionManager.stopSession("Unable to initialize MediaProjection session.")
       }
-      sessionManager.stopSession("Unable to initialize MediaProjection session.")
       stopSelf()
       return START_NOT_STICKY
     }
@@ -219,18 +294,20 @@ class MediaProjectionCaptureService : Service() {
     mediaProjection = projection
     projection.registerCallback(projectionCallback, handler)
     appMediaProjectionManager.attachActiveProjection(projection, alreadyHasCallback = true)
-    if (isSelectionModeSession) {
-      launchScreenSelectionWorkflow()
-    } else {
-      startCaptureLoop()
+    when {
+      isRecordingSession -> startScreenRecording(projection)
+      isSelectionModeSession -> launchScreenSelectionWorkflow()
+      else -> startCaptureLoop()
     }
     return START_NOT_STICKY
   }
 
-  private fun startAsForeground() {
+  private fun startAsForeground(isRecording: Boolean = false) {
     ensureChannel()
     val stopIntent =
-      Intent(this, MediaProjectionCaptureService::class.java).apply { action = ACTION_STOP }
+      Intent(this, MediaProjectionCaptureService::class.java).apply {
+        action = if (isRecording) ACTION_STOP_RECORDING else ACTION_STOP
+      }
     val stopPendingIntent =
       PendingIntent.getService(
         this,
@@ -239,14 +316,36 @@ class MediaProjectionCaptureService : Service() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
       )
 
-    val notification: Notification =
+    val builder =
       NotificationCompat.Builder(this, CHANNEL_ID)
-        .setContentTitle("Mousomi Screen Intelligence Active")
-        .setContentText("Periodic frame capture is active. Tap Stop to end anytime.")
+        .setContentTitle(
+          if (isRecording) "Mousomi Screen Recording Active"
+          else "Mousomi Screen Intelligence Active"
+        )
+        .setContentText(
+          if (isRecording) "Recording screen to Movies/Mousomi AI. Tap Stop to save or Cancel."
+          else "Periodic frame capture is active. Tap Stop to end anytime."
+        )
         .setSmallIcon(R.drawable.ic_launcher_foreground)
         .setOngoing(true)
-        .addAction(0, "Stop Sharing", stopPendingIntent)
-        .build()
+        .addAction(0, if (isRecording) "Stop & Save" else "Stop Sharing", stopPendingIntent)
+
+    if (isRecording) {
+      val cancelIntent =
+        Intent(this, MediaProjectionCaptureService::class.java).apply {
+          action = ACTION_CANCEL_RECORDING
+        }
+      val cancelPendingIntent =
+        PendingIntent.getService(
+          this,
+          102,
+          cancelIntent,
+          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+      builder.addAction(0, "Cancel", cancelPendingIntent)
+    }
+
+    val notification: Notification = builder.build()
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
       startForeground(
@@ -257,6 +356,210 @@ class MediaProjectionCaptureService : Service() {
     } else {
       startForeground(NOTIFICATION_ID, notification)
     }
+  }
+
+  private fun startScreenRecording(projection: MediaProjection) {
+    val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    val (rawW, rawH) =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        val b = wm.maximumWindowMetrics.bounds
+        Pair(b.width(), b.height())
+      } else {
+        Pair(resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
+      }
+    val recWidth = ((rawW / 2).coerceIn(360, 1080) / 16 * 16).coerceAtLeast(368)
+    val recHeight = ((rawH / 2).coerceIn(640, 1920) / 16 * 16).coerceAtLeast(640)
+
+    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+    val fileName = "Mousomi_Screen_${timestamp}.mp4"
+
+    try {
+      val recorder =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+          MediaRecorder(this)
+        } else {
+          @Suppress("DEPRECATION")
+          MediaRecorder()
+        }
+      recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+      recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+      recorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+      recorder.setVideoEncodingBitRate(4_000_000)
+      recorder.setVideoFrameRate(30)
+      recorder.setVideoSize(recWidth, recHeight)
+
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val values =
+          ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/Mousomi AI")
+            put(MediaStore.Video.Media.IS_PENDING, 1)
+          }
+        val uri =
+          contentResolver.insert(
+            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+            values,
+          ) ?: error("Unable to create MediaStore MP4 entry.")
+        val pfd = contentResolver.openFileDescriptor(uri, "rw")
+          ?: error("Unable to open MP4 output descriptor.")
+        recordingMediaStoreUri = uri
+        recordingPfd = pfd
+        recordingDisplayPath = "Movies/Mousomi AI/$fileName"
+        recorder.setOutputFile(pfd.fileDescriptor)
+      } else {
+        val moviesDir =
+          File(getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: File(filesDir, "Movies"), "Mousomi AI")
+        if (!moviesDir.exists()) moviesDir.mkdirs()
+        val outFile = File(moviesDir, fileName)
+        recordingDirectFile = outFile
+        recordingDisplayPath = outFile.absolutePath
+        recorder.setOutputFile(outFile.absolutePath)
+      }
+
+      recorder.prepare()
+      val surface = recorder.surface
+      virtualDisplay =
+        projection.createVirtualDisplay(
+          "MousomiScreenRecord",
+          recWidth,
+          recHeight,
+          resources.displayMetrics.densityDpi,
+          DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+          surface,
+          null,
+          handler,
+        )
+      recorder.start()
+      mediaRecorder = recorder
+      screenRecordingManager.markRecordingStarted(recordingDisplayPath)
+
+      recordingTimerJob?.cancel()
+      recordingTimerJob =
+        serviceScope.launch {
+          val startedAt = System.currentTimeMillis()
+          while (isActive) {
+            screenRecordingManager.updateElapsedSeconds((System.currentTimeMillis() - startedAt) / 1000L)
+            delay(1000L)
+          }
+        }
+    } catch (t: Throwable) {
+      cleanupPendingRecordingArtifacts()
+      releaseRecordingHardware()
+      screenRecordingManager.markFailed("Unable to start screen recording: ${t.message ?: "error"}")
+      stopCaptureAndSelf("Screen recording failed to start.")
+    }
+  }
+
+  private fun stopAndSaveScreenRecording() {
+    if (!isRecordingSession) {
+      stopCaptureAndSelf("Screen sharing ended.")
+      return
+    }
+    recordingTimerJob?.cancel()
+    recordingTimerJob = null
+    screenRecordingManager.markFinalizing()
+
+    val stopResult =
+      runCatching {
+        mediaRecorder?.stop()
+      }
+    releaseRecordingHardware()
+
+    if (stopResult.isFailure) {
+      cleanupPendingRecordingArtifacts()
+      screenRecordingManager.markFailed(
+        "Screen recording stopped too early or failed: ${stopResult.exceptionOrNull()?.message ?: "error"}"
+      )
+      isRecordingSession = false
+      stopCaptureAndSelf("Screen recording failed.")
+      return
+    }
+
+    val uri = recordingMediaStoreUri
+    val directFile = recordingDirectFile
+    val displayPath = recordingDisplayPath
+
+    var verified = false
+    var resolvedUriString: String? = null
+
+    if (uri != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      runCatching {
+        val updateValues = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+        contentResolver.update(uri, updateValues, null, null)
+      }
+      val byteSize = queryUriSizeBytes(uri)
+      if (byteSize > 0L) {
+        verified = true
+        resolvedUriString = uri.toString()
+      } else {
+        runCatching { contentResolver.delete(uri, null, null) }
+      }
+    } else if (directFile != null) {
+      if (directFile.exists() && directFile.length() > 0L) {
+        verified = true
+        resolvedUriString = Uri.fromFile(directFile).toString()
+      } else {
+        runCatching { directFile.delete() }
+      }
+    }
+
+    recordingMediaStoreUri = null
+    recordingDirectFile = null
+    isRecordingSession = false
+
+    if (verified && displayPath.isNotBlank()) {
+      screenRecordingManager.markSaved(displayPath = displayPath, savedUri = resolvedUriString)
+    } else {
+      screenRecordingManager.markFailed("Screen recording file could not be verified on storage.")
+    }
+
+    stopCaptureAndSelf("Screen recording finished.")
+  }
+
+  private fun cancelScreenRecording() {
+    recordingTimerJob?.cancel()
+    recordingTimerJob = null
+    releaseRecordingHardware()
+    cleanupPendingRecordingArtifacts()
+    isRecordingSession = false
+    screenRecordingManager.markCancelled("Screen recording cancelled.")
+    stopCaptureAndSelf("Screen recording cancelled.")
+  }
+
+  private fun releaseRecordingHardware() {
+    runCatching { mediaRecorder?.reset() }
+    runCatching { mediaRecorder?.release() }
+    mediaRecorder = null
+    runCatching { recordingPfd?.close() }
+    recordingPfd = null
+    virtualDisplay?.release()
+    virtualDisplay = null
+  }
+
+  private fun cleanupPendingRecordingArtifacts() {
+    recordingMediaStoreUri?.let { uri ->
+      runCatching { contentResolver.delete(uri, null, null) }
+    }
+    recordingMediaStoreUri = null
+    recordingDirectFile?.let { file ->
+      runCatching { if (file.exists()) file.delete() }
+    }
+    recordingDirectFile = null
+  }
+
+  private fun queryUriSizeBytes(uri: Uri): Long {
+    runCatching {
+      contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) {
+          val idx = cursor.getColumnIndex(OpenableColumns.SIZE)
+          if (idx >= 0) return cursor.getLong(idx)
+        }
+      }
+    }
+    return runCatching {
+      contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
+    }.getOrDefault(0L)
   }
 
   private fun startCaptureLoop() {
@@ -376,6 +679,8 @@ class MediaProjectionCaptureService : Service() {
 
   private fun stopCaptureAndSelf(reason: String) {
     captureJob?.cancel()
+    recordingTimerJob?.cancel()
+    releaseRecordingHardware()
     virtualDisplay?.release()
     virtualDisplay = null
     imageReader?.close()
@@ -388,7 +693,7 @@ class MediaProjectionCaptureService : Service() {
       if (screenSelectionManager.state.value.stage != SelectionStage.ATTACHED) {
         screenSelectionManager.stopAndCleanup()
       }
-    } else if (sessionManager.status.value != ScreenShareStatus.STOPPED) {
+    } else if (!isRecordingSession && sessionManager.status.value != ScreenShareStatus.STOPPED) {
       sessionManager.stopSession(reason)
     }
     stopForeground(STOP_FOREGROUND_REMOVE)
@@ -397,7 +702,7 @@ class MediaProjectionCaptureService : Service() {
 
   override fun onConfigurationChanged(newConfig: Configuration) {
     super.onConfigurationChanged(newConfig)
-    if (mediaProjection == null) return
+    if (mediaProjection == null || isRecordingSession) return
     if (isSelectionModeSession) {
       val (w, h, _) = appMediaProjectionManager.queryFullDisplayMetrics()
       appMediaProjectionManager.recreateSurface(w, h)
@@ -432,6 +737,8 @@ class MediaProjectionCaptureService : Service() {
   override fun onDestroy() {
     super.onDestroy()
     captureJob?.cancel()
+    recordingTimerJob?.cancel()
+    releaseRecordingHardware()
     virtualDisplay?.release()
     imageReader?.close()
     mediaProjection?.unregisterCallback(projectionCallback)
@@ -444,26 +751,46 @@ class MediaProjectionCaptureService : Service() {
     const val NOTIFICATION_ID = 4401
     const val ACTION_START = "com.example.action.START_PROJECTION"
     const val ACTION_STOP = "com.example.action.STOP_PROJECTION"
+    const val ACTION_STOP_RECORDING = "com.example.action.STOP_SCREEN_RECORDING"
+    const val ACTION_CANCEL_RECORDING = "com.example.action.CANCEL_SCREEN_RECORDING"
     const val EXTRA_RESULT_CODE = "extra_result_code"
     const val EXTRA_DATA = "extra_data"
     const val EXTRA_FOR_SCREEN_SELECTION = "extra_for_screen_selection"
+    const val EXTRA_CAPTURE_MODE = "extra_capture_mode"
+    const val CAPTURE_MODE_SELECTION = "SELECTION"
+    const val CAPTURE_MODE_SCREEN_SHARE = "SCREEN_SHARE"
+    const val CAPTURE_MODE_SCREEN_RECORDING = "SCREEN_RECORDING"
 
     fun buildStartIntent(
       context: Context,
       resultCode: Int,
       data: Intent,
       forScreenSelection: Boolean = false,
+      captureMode: String? = null,
     ): Intent =
       Intent(context, MediaProjectionCaptureService::class.java).apply {
         action = ACTION_START
         putExtra(EXTRA_RESULT_CODE, resultCode)
         putExtra(EXTRA_DATA, data)
         putExtra(EXTRA_FOR_SCREEN_SELECTION, forScreenSelection)
+        if (!captureMode.isNullOrBlank()) {
+          putExtra(EXTRA_CAPTURE_MODE, captureMode)
+        }
       }
 
     fun buildStopIntent(context: Context): Intent =
       Intent(context, MediaProjectionCaptureService::class.java).apply {
         action = ACTION_STOP
+      }
+
+    fun buildStopRecordingIntent(context: Context): Intent =
+      Intent(context, MediaProjectionCaptureService::class.java).apply {
+        action = ACTION_STOP_RECORDING
+      }
+
+    fun buildCancelRecordingIntent(context: Context): Intent =
+      Intent(context, MediaProjectionCaptureService::class.java).apply {
+        action = ACTION_CANCEL_RECORDING
       }
   }
 }
@@ -492,7 +819,7 @@ private class OverlayLifecycleOwner : LifecycleOwner, SavedStateRegistryOwner {
 private class BackAwareOverlayContainer(
   context: Context,
   private val onBackAction: () -> Boolean,
-  private val onOutsideTouch: () -> Unit = {},
+  private val onOutsideTouch: (rawX: Float, rawY: Float) -> Unit = { _, _ -> },
   private val onInsideTouchDown: () -> Unit = {},
 ) : FrameLayout(context) {
 
@@ -501,7 +828,7 @@ private class BackAwareOverlayContainer(
   override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
     when (ev.actionMasked) {
       MotionEvent.ACTION_OUTSIDE -> {
-        onOutsideTouch()
+        onOutsideTouch(ev.rawX, ev.rawY)
         return false
       }
       MotionEvent.ACTION_DOWN -> {
@@ -626,6 +953,16 @@ open class MousomiOverlayService : Service() {
   @Inject lateinit var screenShareSessionManager: ScreenShareSessionManager
   @Inject lateinit var floatingSessionStore: FloatingAssistantSessionStore
   @Inject lateinit var visualQueryProcessor: VisualQueryProcessor
+  @Inject lateinit var screenRecordingManager: ScreenRecordingManager
+  @Inject lateinit var agentCommandRouter: AssistantAgentCommandRouter
+  @Inject lateinit var deviceActionExecutor: DeviceActionExecutor
+  @Inject lateinit var screenshotCaptureManager: ScreenshotCaptureManager
+  @Inject lateinit var selectionGeometryEngine: SelectionGeometryEngine
+  @Inject lateinit var smartCropEngine: SmartCropEngine
+  @Inject lateinit var imageAttachmentManager: ImageAttachmentManager
+  @Inject lateinit var tempMediaCacheManager: TempMediaCacheManager
+  @Inject lateinit var agentTaskPlanner: AgentTaskPlanner
+  @Inject lateinit var timerManager: TimerManager
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private var windowManager: WindowManager? = null
@@ -634,6 +971,11 @@ open class MousomiOverlayService : Service() {
   private var controlBarContainer: DraggableOverlayFrameLayout? = null
   private var controlBarParams: WindowManager.LayoutParams? = null
   private var controlBarLifecycle: OverlayLifecycleOwner? = null
+  private var floatingLiveContainer: DraggableOverlayFrameLayout? = null
+  private var floatingLiveParams: WindowManager.LayoutParams? = null
+  private var floatingLiveLifecycle: OverlayLifecycleOwner? = null
+  private var drawingSelectionView: ComposeView? = null
+  private var drawingSelectionLifecycle: OverlayLifecycleOwner? = null
   private var profileMenuView: ComposeView? = null
   private var profileMenuParams: WindowManager.LayoutParams? = null
   private var profileMenuLifecycle: OverlayLifecycleOwner? = null
@@ -650,6 +992,9 @@ open class MousomiOverlayService : Service() {
   private var orbSizePx: Int = 152
 
   private val isOverlayPaused = MutableStateFlow(false)
+  private val isOverlayMuted = MutableStateFlow(false)
+  private val isFloatingLivePopupMode = MutableStateFlow(false)
+  private val overlayConfirmedSelectionBox = MutableStateFlow<NormBoundingBox?>(null)
   private val isHoveringDismissTarget = MutableStateFlow(false)
   private val overlayResponseState = MutableStateFlow<AiResponseState>(AiResponseState.Idle)
   private val panelMaxHeightDpState = mutableIntStateOf(360)
@@ -663,6 +1008,8 @@ open class MousomiOverlayService : Service() {
   private var imeHidePendingJob: Job? = null
   private var overlayChannelCreated = false
   private var isPowerReceiverRegistered = false
+  private var livePopupXFraction = 0.08f
+  private var livePopupYFraction = 0.14f
 
   private val powerStateReceiver =
     object : BroadcastReceiver() {
@@ -713,6 +1060,7 @@ open class MousomiOverlayService : Service() {
       ACTION_HIDE_FOR_SELECTION -> {
         detachControlBar()
         detachProfileQuickMenu()
+        detachFloatingLivePopupWindow()
         collapsePanelToBubble()
         dismissPopupWindow()
         startForegroundOverlayNotification()
@@ -734,12 +1082,38 @@ open class MousomiOverlayService : Service() {
         sessionStateManager.onPausedChanged(false)
         startForegroundOverlayNotification()
         attachEdgeLightWindow()
-        attachControlBar()
+        if (isFloatingLivePopupMode.value) {
+          attachFloatingLivePopupWindow()
+        } else {
+          attachControlBar()
+        }
         maybeAttachSystemOrbFromSettings()
+        return START_STICKY
+      }
+      ACTION_START_FLOATING_LIVE -> {
+        isOverlayPaused.value = false
+        isOverlayMuted.value = false
+        isFloatingLivePopupMode.value = true
+        sessionStateManager.onPausedChanged(false)
+        sessionStateManager.activateFromTrigger(edge = EdgeActivationEdge.BOTTOM, expandPanel = false)
+        // Consolidate windows: hide full Assistant panel & Control Bar so ONLY Border Light + Compact Live Popup + Orb show
+        collapsePanelToBubble()
+        detachProfileQuickMenu()
+        detachControlBar()
+        dismissPopupWindow()
+        detachOverlayDrawingSelectionWindow()
+        floatingSessionStore.setControlBarVisible(false)
+        startForegroundOverlayNotification()
+        attachEdgeLightWindow()
+        attachFloatingLivePopupWindow()
+        maybeAttachSystemOrbFromSettings()
+        startOverlayVoiceListening()
         return START_STICKY
       }
       ACTION_SHOW_CONTROL_BAR -> {
         isOverlayPaused.value = false
+        isFloatingLivePopupMode.value = false
+        detachFloatingLivePopupWindow()
         sessionStateManager.onPausedChanged(false)
         floatingSessionStore.setControlBarVisible(true)
         startForegroundOverlayNotification()
@@ -753,6 +1127,8 @@ open class MousomiOverlayService : Service() {
         val edge = runCatching { EdgeActivationEdge.valueOf(edgeRaw) }.getOrDefault(EdgeActivationEdge.BOTTOM_CORNER)
         val expandPanel = intent.getBooleanExtra(EXTRA_EXPAND_PANEL, true)
         val autoVoice = intent.getBooleanExtra(EXTRA_PANEL_VOICE_AUTO, true)
+        isFloatingLivePopupMode.value = false
+        detachFloatingLivePopupWindow()
         val accepted = sessionStateManager.activateFromTrigger(edge = edge, expandPanel = expandPanel)
         isOverlayPaused.value = false
         floatingSessionStore.setControlBarVisible(true)
@@ -772,6 +1148,8 @@ open class MousomiOverlayService : Service() {
       }
       ACTION_SHOW_ASSISTANT_PANEL -> {
         isOverlayPaused.value = false
+        isFloatingLivePopupMode.value = false
+        detachFloatingLivePopupWindow()
         floatingSessionStore.setControlBarVisible(true)
         sessionStateManager.activateFromTrigger(edge = EdgeActivationEdge.BOTTOM, expandPanel = true)
         scheduleRevealSettled()
@@ -956,10 +1334,11 @@ open class MousomiOverlayService : Service() {
               if (borderState.isActive) orbFrame.reactiveAmplitude else 0f,
             ).coerceIn(0f, 1f)
 
+          val floatingLiveActive by isFloatingLivePopupMode.collectAsState()
           val baseCfg = settings?.edgeLightConfig ?: EdgeLightConfig()
           val effectiveConfig =
             baseCfg.copy(
-              enabled = screenOn && !paused && baseCfg.enabled,
+              enabled = screenOn && !paused && (baseCfg.enabled || floatingLiveActive),
               reducedMotion = baseCfg.reducedMotion || !screenOn,
               scheduleEnabled = false,
             )
@@ -1120,13 +1499,15 @@ open class MousomiOverlayService : Service() {
                 if (floatingSessionStore.state.value.isPanelOpen) {
                   collapsePanelToBubble()
                   floatingSessionStore.minimizePanel()
+                  sessionStateManager.collapseToOrb()
+                  attachSystemOrb()
                 } else {
                   floatingSessionStore.setProfileQuickMenuOpen(false)
                   detachProfileQuickMenu()
                   showAssistantPanel(autoStartVoice = false)
                 }
               },
-              onDrawClick = { launchScreenSelectionFromOverlay() },
+              onDrawClick = { attachOverlayDrawingSelectionWindow() },
               onScreenSelectionClick = {
                 launchScreenSelectionFromOverlay()
               },
@@ -1357,8 +1738,10 @@ open class MousomiOverlayService : Service() {
     val geometry = displayGeometryManager.measure(this)
     currentGeometryState.value = geometry
     orbSizePx = (56 * geometry.density).roundToInt().coerceIn(96, 196)
-    val initialX = (geometry.screenWidthPx - geometry.safeRightPx - orbSizePx - (12 * geometry.density).roundToInt())
-    val initialY = (geometry.screenHeightPx * 0.56f).roundToInt()
+    val rawMaxX = (geometry.screenWidthPx - orbSizePx).coerceAtLeast(1)
+    val rawMaxY = (geometry.screenHeightPx - orbSizePx).coerceAtLeast(1)
+    val initialX = (sessionStateManager.orbXFraction.value * rawMaxX).roundToInt()
+    val initialY = (sessionStateManager.orbYFraction.value * rawMaxY).roundToInt()
     val (clampedX, clampedY) =
       DisplayGeometryManager.clampBubbleCoordinates(initialX, initialY, orbSizePx, geometry)
 
@@ -1416,6 +1799,7 @@ open class MousomiOverlayService : Service() {
         }
       }
 
+    val orbTouchSlop = ViewConfiguration.get(this@MousomiOverlayService).scaledTouchSlop.toFloat().coerceAtLeast(12f)
     var initialPxX = 0
     var initialPxY = 0
     var initialTouchX = 0f
@@ -1428,7 +1812,7 @@ open class MousomiOverlayService : Service() {
       currentGeometryState.value = geo
       val rawMaxX = (geo.screenWidthPx - orbSizePx).coerceAtLeast(1)
       val rawMaxY = (geo.screenHeightPx - orbSizePx).coerceAtLeast(1)
-      when (event.action) {
+      when (event.actionMasked) {
         MotionEvent.ACTION_DOWN -> {
           initialPxX = params.x
           initialPxY = params.y
@@ -1441,7 +1825,7 @@ open class MousomiOverlayService : Service() {
         MotionEvent.ACTION_MOVE -> {
           val dx = event.rawX - initialTouchX
           val dy = event.rawY - initialTouchY
-          if (!isDragging && (abs(dx) > 10f || abs(dy) > 10f)) {
+          if (!isDragging && hypot(dx, dy) > orbTouchSlop) {
             isDragging = true
             showDismissTargetOverlay(geo)
           }
@@ -1470,15 +1854,19 @@ open class MousomiOverlayService : Service() {
         MotionEvent.ACTION_UP,
         MotionEvent.ACTION_CANCEL -> {
           hideDismissTargetOverlay()
-          if (!isDragging && event.action == MotionEvent.ACTION_UP) {
-            if (assistantPanelContainer != null) {
-              collapsePanelToBubble()
-              floatingSessionStore.minimizePanel()
-            } else {
-              showAssistantPanel(autoStartVoice = false)
+          if (!isDragging && event.actionMasked == MotionEvent.ACTION_UP) {
+            if (drawingSelectionView == null && !sessionStateManager.isDrawingActive.value) {
+              if (assistantPanelContainer != null) {
+                collapsePanelToBubble()
+                floatingSessionStore.minimizePanel()
+                sessionStateManager.collapseToOrb()
+              } else {
+                sessionStateManager.expandFromOrb()
+                showAssistantPanel(autoStartVoice = false)
+              }
             }
           } else if (isDragging) {
-            if (wasInsideDismiss && event.action == MotionEvent.ACTION_UP) {
+            if (wasInsideDismiss && event.actionMasked == MotionEvent.ACTION_UP) {
               dismissBubbleCompletely()
             } else {
               val snappedX = OrbPositionHelper.computeSnappedXPixel(params.x, orbSizePx, geo, snapToEdge = true)
@@ -1489,6 +1877,7 @@ open class MousomiOverlayService : Service() {
 
               val xFrac = (snappedX.toFloat() / rawMaxX).coerceIn(0f, 1f)
               val yFrac = (safeY.toFloat() / rawMaxY).coerceIn(0.08f, 0.88f)
+              sessionStateManager.updateOrbPosition(xFrac, yFrac)
               scope.launch {
                 val cur = settingsRepository.getSettingsSnapshot()
                 settingsRepository.saveSettings(
@@ -1618,7 +2007,12 @@ open class MousomiOverlayService : Service() {
 
   private fun endLiveAssistantSession(stopServiceCompletely: Boolean) {
     sessionStateManager.onBeginStopping()
+    isFloatingLivePopupMode.value = false
+    isOverlayMuted.value = false
+    overlayConfirmedSelectionBox.value = null
     hideDismissTargetOverlay()
+    detachFloatingLivePopupWindow()
+    detachOverlayDrawingSelectionWindow()
     overlayQueryJob?.cancel()
     overlayVoiceCollectorJob?.cancel()
     geminiLiveVoiceEngine.stopAndClose()
@@ -1730,6 +2124,8 @@ open class MousomiOverlayService : Service() {
   }
 
   private fun showAssistantPanel(autoStartVoice: Boolean) {
+    isFloatingLivePopupMode.value = false
+    detachFloatingLivePopupWindow()
     if (assistantPanelContainer != null) {
       floatingSessionStore.setPanelState(open = true)
       sessionStateManager.onPanelExpandedChanged(true)
@@ -1786,7 +2182,10 @@ open class MousomiOverlayService : Service() {
       BackAwareOverlayContainer(
         context = this,
         onBackAction = {
-          if (sessionStateManager.isKeyboardVisible.value) {
+          if (drawingSelectionView != null || sessionStateManager.isDrawingActive.value) {
+            detachOverlayDrawingSelectionWindow(cancelledByUser = true)
+            true
+          } else if (sessionStateManager.isKeyboardVisible.value) {
             val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
             imm?.hideSoftInputFromWindow(containerRef.windowToken, 0)
             sessionStateManager.onKeyboardVisibilityChanged(false)
@@ -1795,17 +2194,24 @@ open class MousomiOverlayService : Service() {
           } else {
             collapsePanelToBubble()
             floatingSessionStore.minimizePanel()
+            sessionStateManager.collapseToOrb()
+            attachSystemOrb()
             true
           }
         },
-        onOutsideTouch = {
-          val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-          imm?.hideSoftInputFromWindow(containerRef.windowToken, 0)
-          sessionStateManager.onKeyboardVisibilityChanged(false)
-          if ((params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) == 0) {
-            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-            runCatching { wm.updateViewLayout(containerRef, params) }
+        onOutsideTouch = { rawX, rawY ->
+          if (drawingSelectionView != null || sessionStateManager.isDrawingActive.value) {
+            return@BackAwareOverlayContainer
           }
+          if (isPointInsideOverlayView(orbView, rawX, rawY) ||
+            isPointInsideOverlayView(controlBarContainer, rawX, rawY)
+          ) {
+            return@BackAwareOverlayContainer
+          }
+          collapsePanelToBubble()
+          floatingSessionStore.minimizePanel()
+          sessionStateManager.collapseToOrb()
+          attachSystemOrb()
         },
         onInsideTouchDown = {
           if ((params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) != 0) {
@@ -1874,6 +2280,7 @@ open class MousomiOverlayService : Service() {
                 launchScreenSelectionFromOverlay()
               },
               onRemoveAttachment = { uriStr ->
+                imageAttachmentManager.removeByUri(uriStr)
                 floatingSessionStore.removePendingAttachment(uriStr)
               },
               onOpenAttachmentPreview = { item ->
@@ -1900,8 +2307,7 @@ open class MousomiOverlayService : Service() {
               },
               isScreenShareActive = screenShareStatus != ScreenShareStatus.STOPPED,
               onShareScreenWithLive = {
-                startOverlayVoiceListening()
-                launchScreenSelectionFromOverlay()
+                toggleOverlayScreenShare()
               },
               onTogglePause = { toggleOverlayPause() },
               onEndLive = { endLiveAssistantSession(stopServiceCompletely = false) },
@@ -1910,6 +2316,8 @@ open class MousomiOverlayService : Service() {
               onMinimizePanel = {
                 collapsePanelToBubble()
                 floatingSessionStore.minimizePanel()
+                sessionStateManager.collapseToOrb()
+                attachSystemOrb()
               },
             )
           }
@@ -2031,6 +2439,454 @@ open class MousomiOverlayService : Service() {
     }
   }
 
+  private fun toggleOverlayScreenShare() {
+    val active = screenShareSessionManager.status.value != ScreenShareStatus.STOPPED
+    if (active) {
+      runCatching { startService(MediaProjectionCaptureService.buildStopIntent(this)) }
+      screenShareSessionManager.stopSession("Screen sharing stopped by user.")
+      floatingSessionStore.setStatusBanner("Screen sharing stopped. Voice conversation continues.")
+    } else {
+      screenShareSessionManager.markRequestingConsent()
+      startActivity(ScreenCaptureConsentActivity.buildScreenShareIntent(this))
+    }
+  }
+
+  private fun attachFloatingLivePopupWindow() {
+    if (floatingLiveContainer != null) return
+    val wm = (windowManager ?: getSystemService(Context.WINDOW_SERVICE) as? WindowManager) ?: return
+    windowManager = wm
+    val geo = displayGeometryManager.measure(this)
+    currentGeometryState.value = geo
+
+    val popupWidthPx = (316f * geo.density).roundToInt().coerceAtMost(geo.usableWidthPx - (20f * geo.density).roundToInt())
+    val approxPopupHeightPx = (240f * geo.density).roundToInt()
+    val maxX = (geo.screenWidthPx - geo.safeRightPx - popupWidthPx).coerceAtLeast(geo.safeLeftPx + 8)
+    val maxY = (geo.screenHeightPx - geo.safeBottomWithoutImePx - approxPopupHeightPx).coerceAtLeast(geo.safeTopPx + 12)
+    val startX = (geo.safeLeftPx + livePopupXFraction * (maxX - geo.safeLeftPx)).roundToInt().coerceIn(geo.safeLeftPx, maxX)
+    val startY = (geo.safeTopPx + livePopupYFraction * (maxY - geo.safeTopPx)).roundToInt().coerceIn(geo.safeTopPx + 8, maxY)
+
+    val params =
+      WindowManager.LayoutParams(
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        overlayLayoutType(),
+        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.TRANSLUCENT,
+      ).apply {
+        gravity = Gravity.TOP or Gravity.START
+        x = startX
+        y = startY
+        softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+          layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+      }
+    floatingLiveParams = params
+
+    val owner = OverlayLifecycleOwner().also { it.onCreate() }
+    floatingLiveLifecycle = owner
+
+    lateinit var containerRef: DraggableOverlayFrameLayout
+    val container =
+      DraggableOverlayFrameLayout(
+        context = this,
+        onDragMove = { dx, dy ->
+          val curGeo = displayGeometryManager.measure(this, containerRef)
+          val w = containerRef.width.takeIf { it > 32 } ?: popupWidthPx
+          val h = containerRef.height.takeIf { it > 32 } ?: approxPopupHeightPx
+          val xLimit = (curGeo.screenWidthPx - curGeo.safeRightPx - w).coerceAtLeast(curGeo.safeLeftPx + 8)
+          val yLimit = (curGeo.screenHeightPx - curGeo.safeBottomWithoutImePx - h).coerceAtLeast(curGeo.safeTopPx + 16)
+          params.x = (params.x + dx).coerceIn(curGeo.safeLeftPx, xLimit)
+          params.y = (params.y + dy).coerceIn(curGeo.safeTopPx + 8, yLimit)
+          runCatching { wm.updateViewLayout(containerRef, params) }
+        },
+        onDragEnd = {
+          val curGeo = displayGeometryManager.measure(this, containerRef)
+          val w = containerRef.width.takeIf { it > 32 } ?: popupWidthPx
+          val h = containerRef.height.takeIf { it > 32 } ?: approxPopupHeightPx
+          val spanX = (curGeo.screenWidthPx - curGeo.safeRightPx - w - curGeo.safeLeftPx).coerceAtLeast(1)
+          val spanY = (curGeo.screenHeightPx - curGeo.safeBottomWithoutImePx - h - curGeo.safeTopPx).coerceAtLeast(1)
+          livePopupXFraction = ((params.x - curGeo.safeLeftPx).toFloat() / spanX).coerceIn(0f, 1f)
+          livePopupYFraction = ((params.y - curGeo.safeTopPx).toFloat() / spanY).coerceIn(0f, 1f)
+        },
+      )
+    containerRef = container
+
+    val composeView =
+      ComposeView(this).apply {
+        setViewTreeLifecycleOwner(owner)
+        setViewTreeSavedStateRegistryOwner(owner)
+        setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+        setContent {
+          val overlayUi by floatingSessionStore.state.collectAsState()
+          val voiceState by voiceController.voiceState.collectAsState()
+          val liveStatus by geminiLiveVoiceEngine.status.collectAsState()
+          val screenShareStatus by screenShareSessionManager.status.collectAsState()
+          val userLiveTranscript by geminiLiveVoiceEngine.userTranscript.collectAsState()
+          val aiLiveTranscript by geminiLiveVoiceEngine.assistantTranscript.collectAsState()
+          val paused by isOverlayPaused.collectAsState()
+          val muted by isOverlayMuted.collectAsState()
+          val responseState by overlayResponseState.collectAsState()
+          val audioMetrics by voiceController.audioMetrics.collectAsState()
+          val rms by voiceController.audioRmsNormalized.collectAsState()
+          val elapsed by liveVoiceSessionManager.elapsedSeconds.collectAsState()
+          val recordingState by screenRecordingManager.state.collectAsState()
+          val hasMicPermission =
+            ContextCompat.checkSelfPermission(this@MousomiOverlayService, Manifest.permission.RECORD_AUDIO) ==
+              PackageManager.PERMISSION_GRANTED
+          val isMicActive =
+            !paused &&
+              !muted &&
+              (liveStatus == LiveVoiceSessionStatus.Active ||
+                liveStatus == LiveVoiceSessionStatus.Connecting ||
+                voiceState is VoiceState.Listening)
+          val liveStatusLabel =
+            when {
+              paused -> "Paused"
+              muted -> "Muted"
+              liveStatus == LiveVoiceSessionStatus.Connecting -> "Connecting…"
+              liveStatus == LiveVoiceSessionStatus.Active -> "Live Active"
+              voiceState is VoiceState.Speaking -> "Speaking"
+              voiceState is VoiceState.Listening -> "Listening"
+              responseState is AiResponseState.Loading || responseState is AiResponseState.Streaming -> "Thinking"
+              else -> "Live Ready"
+            }
+
+          MousomiTheme {
+            FloatingLivePopupCard(
+              liveStatusLabel = liveStatusLabel,
+              isMicActive = isMicActive,
+              hasMicPermission = hasMicPermission,
+              isPaused = paused,
+              isMuted = muted,
+              isThinking = responseState is AiResponseState.Loading || responseState is AiResponseState.Streaming,
+              isScreenShareActive = screenShareStatus != ScreenShareStatus.STOPPED && screenShareStatus != ScreenShareStatus.REQUESTING_CONSENT,
+              voiceRmsNormalized = rms,
+              audioMetrics = audioMetrics,
+              elapsedSeconds = elapsed,
+              latestUserTranscript =
+                userLiveTranscript.ifBlank {
+                  (voiceState as? VoiceState.Listening)?.partialTranscript.orEmpty()
+                },
+              latestAssistantTranscript =
+                aiLiveTranscript.ifBlank {
+                  overlayUi.turns.lastOrNull { !it.isUser && it.text.isNotBlank() }?.text.orEmpty()
+                },
+              statusBanner = overlayUi.statusBanner,
+              screenRecordingState = recordingState,
+              onToggleMute = {
+                val nextMuted = !isOverlayMuted.value
+                isOverlayMuted.value = nextMuted
+                geminiLiveVoiceEngine.setMuted(nextMuted)
+                if (nextMuted) {
+                  voiceController.stopListening()
+                } else if (!isOverlayPaused.value) {
+                  startOverlayVoiceListening()
+                }
+              },
+              onTogglePause = { toggleOverlayPause() },
+              onToggleScreenShare = { toggleOverlayScreenShare() },
+              onDrawArea = { attachOverlayDrawingSelectionWindow() },
+              onSendFollowUp = { q -> submitOverlayPrompt(q) },
+              onStopLive = { endLiveAssistantSession(stopServiceCompletely = true) },
+              onClosePopup = { endLiveAssistantSession(stopServiceCompletely = true) },
+              onExpandToFullPanel = { showAssistantPanel(autoStartVoice = false) },
+              onConfirmScreenRecording = {
+                screenRecordingManager.markAwaitingConsent()
+                startActivity(ScreenCaptureConsentActivity.buildScreenRecordingIntent(this@MousomiOverlayService))
+              },
+              onStopScreenRecording = {
+                startService(MediaProjectionCaptureService.buildStopRecordingIntent(this@MousomiOverlayService))
+              },
+              onCancelScreenRecording = {
+                startService(MediaProjectionCaptureService.buildCancelRecordingIntent(this@MousomiOverlayService))
+              },
+              onDismissScreenRecordingStatus = { screenRecordingManager.resetToIdle() },
+              onKeyboardInputFocusChanged = { needsFocus ->
+                val curWm = windowManager ?: return@FloatingLivePopupCard
+                if (needsFocus) {
+                  params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+                } else {
+                  params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                }
+                runCatching { curWm.updateViewLayout(containerRef, params) }
+              },
+            )
+          }
+        }
+      }
+
+    container.setViewTreeLifecycleOwner(owner)
+    container.setViewTreeSavedStateRegistryOwner(owner)
+    container.addView(
+      composeView,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    runCatching {
+      wm.addView(container, params)
+      floatingLiveContainer = container
+    }
+  }
+
+  private fun detachFloatingLivePopupWindow() {
+    floatingLiveContainer?.let { v -> runCatching { windowManager?.removeView(v) } }
+    floatingLiveContainer = null
+    floatingLiveParams = null
+    floatingLiveLifecycle?.onDestroy()
+    floatingLiveLifecycle = null
+  }
+
+  private fun isPointInsideOverlayView(view: View?, rawX: Float, rawY: Float): Boolean {
+    if (view == null || view.visibility != View.VISIBLE) return false
+    val loc = IntArray(2)
+    view.getLocationOnScreen(loc)
+    val left = loc[0].toFloat()
+    val top = loc[1].toFloat()
+    return rawX in left..(left + view.width) && rawY in top..(top + view.height)
+  }
+
+  private fun attachOverlayDrawingSelectionWindow() {
+    if (drawingSelectionView != null) return
+    val wm = (windowManager ?: getSystemService(Context.WINDOW_SERVICE) as? WindowManager) ?: return
+    windowManager = wm
+    dismissPopupWindow()
+    detachProfileQuickMenu()
+    floatingSessionStore.setProfileQuickMenuOpen(false)
+    sessionStateManager.enterDrawingMode()
+
+    // Isolate the drawing window cleanly so panel/controlBar/Orb never swallow touches or trigger outside-dismiss
+    assistantPanelContainer?.visibility = View.INVISIBLE
+    controlBarContainer?.visibility = View.INVISIBLE
+    floatingLiveContainer?.visibility = View.INVISIBLE
+    orbView?.visibility = View.INVISIBLE
+
+    val owner = OverlayLifecycleOwner().also { it.onCreate() }
+    drawingSelectionLifecycle = owner
+
+    val params =
+      WindowManager.LayoutParams(
+        WindowManager.LayoutParams.MATCH_PARENT,
+        WindowManager.LayoutParams.MATCH_PARENT,
+        overlayLayoutType(),
+        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.TRANSLUCENT,
+      ).apply {
+        gravity = Gravity.CENTER
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+          layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+      }
+
+    val view =
+      ComposeView(this).apply {
+        setViewTreeLifecycleOwner(owner)
+        setViewTreeSavedStateRegistryOwner(owner)
+        setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+        setContent {
+          val toolModeState = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(SelectionToolMode.SMART_LOOP) }
+          val activePointsState = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<List<NormPoint>>(emptyList()) }
+          val snappedResultState = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<SelectionGeometryResult?>(null) }
+
+          MousomiTheme {
+            Box(modifier = Modifier.fillMaxSize()) {
+              SelectionHighlightRenderer(
+                toolMode = toolModeState.value,
+                activeStrokePoints = activePointsState.value,
+                snappedResult = snappedResultState.value,
+                geometryEngine = selectionGeometryEngine,
+                onStrokeStart = { pt ->
+                  snappedResultState.value = null
+                  activePointsState.value = listOf(pt)
+                },
+                onStrokeMove = { pt ->
+                  activePointsState.value = (activePointsState.value + pt).takeLast(240)
+                },
+                onStrokeEnd = {
+                  val pts = activePointsState.value
+                  if (pts.size >= 2) {
+                    snappedResultState.value =
+                      selectionGeometryEngine.processStroke(
+                        rawPoints = pts,
+                        toolMode = toolModeState.value,
+                      )
+                  }
+                  activePointsState.value = emptyList()
+                },
+                onHandleDrag = { handle, dx, dy ->
+                  val cur = snappedResultState.value ?: return@SelectionHighlightRenderer
+                  snappedResultState.value = selectionGeometryEngine.adjustSnappedResult(cur, handle, dx, dy)
+                },
+              )
+
+              Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = Color(0xFF0A1020).copy(alpha = 0.92f),
+                border = BorderStroke(1.2.dp, NeonCyan.copy(alpha = 0.75f)),
+                modifier =
+                  Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 28.dp, start = 16.dp, end = 16.dp),
+              ) {
+                Row(
+                  modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                  TextButton(
+                    onClick = {
+                      toolModeState.value =
+                        if (toolModeState.value == SelectionToolMode.SMART_LOOP) {
+                          SelectionToolMode.RECTANGLE
+                        } else {
+                          SelectionToolMode.SMART_LOOP
+                        }
+                    }
+                  ) {
+                    Text(
+                      text = if (toolModeState.value == SelectionToolMode.SMART_LOOP) "Outline" else "Box",
+                      color = NeonCyan,
+                    )
+                  }
+                  TextButton(
+                    onClick = {
+                      snappedResultState.value = null
+                      activePointsState.value = emptyList()
+                    }
+                  ) {
+                    Text("Redraw", color = Color.White)
+                  }
+                  TextButton(onClick = { detachOverlayDrawingSelectionWindow(cancelledByUser = true) }) {
+                    Text("Cancel", color = Color.White.copy(alpha = 0.78f))
+                  }
+                  if (snappedResultState.value != null) {
+                    TextButton(
+                      onClick = {
+                        val snapped = snappedResultState.value
+                        val ovW = width
+                        val ovH = height
+                        overlayConfirmedSelectionBox.value = snapped?.boundingBox
+                        detachOverlayDrawingSelectionWindow(cancelledByUser = false)
+                        if (snapped != null) {
+                          attachOverlayConfirmedSelection(snapped, ovW, ovH)
+                        }
+                      }
+                    ) {
+                      Text("Confirm", color = Color(0xFF34D399))
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+    runCatching {
+      wm.addView(view, params)
+      drawingSelectionView = view
+    }
+  }
+
+  private fun detachOverlayDrawingSelectionWindow(cancelledByUser: Boolean = false) {
+    drawingSelectionView?.let { v -> runCatching { windowManager?.removeView(v) } }
+    drawingSelectionView = null
+    drawingSelectionLifecycle?.onDestroy()
+    drawingSelectionLifecycle = null
+    assistantPanelContainer?.visibility = View.VISIBLE
+    controlBarContainer?.visibility = View.VISIBLE
+    floatingLiveContainer?.visibility = View.VISIBLE
+    orbView?.visibility = View.VISIBLE
+    if (cancelledByUser) {
+      sessionStateManager.cancelDrawingMode()
+    }
+  }
+
+  private fun attachOverlayConfirmedSelection(
+    snapped: SelectionGeometryResult,
+    overlayWidthPx: Int,
+    overlayHeightPx: Int,
+  ) {
+    sessionStateManager.confirmDrawingMode()
+    val shareStatus = screenShareSessionManager.status.value
+    if (shareStatus == ScreenShareStatus.STOPPED || shareStatus == ScreenShareStatus.REQUESTING_CONSENT) {
+      floatingSessionStore.setStatusBanner(
+        "Screen sharing is disabled, so external apps cannot be captured. Tap Share Screen to grant capture access."
+      )
+      showAssistantPanel(autoStartVoice = false)
+      return
+    }
+
+    scope.launch {
+      controlBarContainer?.visibility = View.INVISIBLE
+      floatingLiveContainer?.visibility = View.INVISIBLE
+      assistantPanelContainer?.visibility = View.INVISIBLE
+      delay(95L)
+
+      val capOutcome =
+        try {
+          screenshotCaptureManager.captureAuthorizedScreenFrame(
+            overlayWidthPx = overlayWidthPx,
+            overlayHeightPx = overlayHeightPx,
+          )
+        } finally {
+          controlBarContainer?.visibility = View.VISIBLE
+          floatingLiveContainer?.visibility = View.VISIBLE
+          assistantPanelContainer?.visibility = View.VISIBLE
+        }
+
+      when (capOutcome) {
+        is ScreenshotCaptureManager.CaptureOutcome.Success -> {
+          val cropped =
+            smartCropEngine.cropSelectionToFile(
+              sourceFilePath = capOutcome.filePath,
+              snappedResult = snapped,
+              metadata = capOutcome.metadata,
+              prefix = "sel_ovl_crop_",
+            )
+          cropped.onSuccess { out ->
+            val attached =
+              imageAttachmentManager.attachCroppedVisual(
+                croppedFile = out.file,
+                sourceFrameFilePath = capOutcome.filePath,
+                captureMetadata = capOutcome.metadata,
+                normCropRect = out.normBoxUsed,
+                detectedShape = snapped.detectedShape,
+                isSettling = false,
+              )
+            floatingSessionStore.attachVisualFromScreenSelection(attached)
+            floatingSessionStore.setStatusBanner("Selected region cropped & attached. Ask a question or tap Send.")
+            showAssistantPanel(autoStartVoice = false)
+          }.onFailure { err ->
+            floatingSessionStore.setStatusBanner(
+              err.message ?: "Unable to crop selected area. Please redraw and try again."
+            )
+            showAssistantPanel(autoStartVoice = false)
+          }
+        }
+        ScreenshotCaptureManager.CaptureOutcome.ConsentRequired -> {
+          floatingSessionStore.setStatusBanner(
+            "Screen capture session expired. Renew consent to crop external screen content."
+          )
+          screenShareSessionManager.markRequestingConsent()
+          startActivity(ScreenCaptureConsentActivity.buildScreenShareIntent(this@MousomiOverlayService))
+          showAssistantPanel(autoStartVoice = false)
+        }
+        is ScreenshotCaptureManager.CaptureOutcome.BlockedOrFailed -> {
+          floatingSessionStore.setStatusBanner(capOutcome.reason)
+          showAssistantPanel(autoStartVoice = false)
+        }
+      }
+    }
+  }
+
   private fun startOverlayFallbackStt() {
     overlayVoiceCollectorJob?.cancel()
     overlayVoiceCollectorJob =
@@ -2041,15 +2897,32 @@ open class MousomiOverlayService : Service() {
               val clean = vState.transcript.trim()
               voiceController.resetState()
               if (clean.isNotBlank()) {
-                val existing = floatingSessionStore.state.value.promptText
-                val merged =
-                  com.example.core.voice.DictationTranscriptMerger.appendFinalTurn(existing, clean)
-                floatingSessionStore.updatePromptText(merged)
                 floatingSessionStore.setStatusBanner(null)
+                if (isFloatingLivePopupMode.value) {
+                  submitOverlayPrompt(clean)
+                } else {
+                  val existing = floatingSessionStore.state.value.promptText
+                  val merged =
+                    com.example.core.voice.DictationTranscriptMerger.appendFinalTurn(existing, clean)
+                  floatingSessionStore.updatePromptText(merged)
+                }
+              } else if (isFloatingLivePopupMode.value && !isOverlayPaused.value && !isOverlayMuted.value) {
+                delay(420L)
+                val settings = settingsRepository.getSettingsSnapshot()
+                voiceController.startListening(settings.voicePreferences.preferredLanguage)
               }
             }
             is VoiceState.Error -> {
               floatingSessionStore.setStatusBanner(vState.message)
+              if (isFloatingLivePopupMode.value &&
+                vState.isRecoverableSilence &&
+                !isOverlayPaused.value &&
+                !isOverlayMuted.value
+              ) {
+                delay(520L)
+                val settings = settingsRepository.getSettingsSnapshot()
+                voiceController.startListening(settings.voicePreferences.preferredLanguage)
+              }
             }
             else -> Unit
           }
@@ -2061,12 +2934,127 @@ open class MousomiOverlayService : Service() {
     }
   }
 
-  private fun submitOverlayPrompt(rawPrompt: String) {
+  private fun submitOverlayPrompt(
+    rawPrompt: String,
+    overrideCropBox: NormBoundingBox? = null,
+  ) {
     val clean = rawPrompt.trim()
     val pendingAttachments = floatingSessionStore.state.value.pendingAttachments
     if (clean.isBlank() && pendingAttachments.isEmpty()) return
 
-    if (pendingAttachments.isEmpty() && geminiLiveVoiceEngine.status.value == LiveVoiceSessionStatus.Active) {
+    if (pendingAttachments.isEmpty() && clean.isNotBlank()) {
+      val cmd = agentCommandRouter.classify(clean)
+      if (cmd == null) {
+        val notifCtrl = AgentTaskPlanner.parseNotificationControl(clean)
+        val timerReq = AgentTaskPlanner.parseTimerRequest(clean)
+        if (notifCtrl != null || timerReq != null) {
+          floatingSessionStore.updatePromptText("")
+          scope.launch {
+            val outcome = agentTaskPlanner.planAndRoute(clean)
+            val statusMsg =
+              when (outcome) {
+                is PlannedAgentOutcome.NotificationControlHandled -> outcome.message
+                is PlannedAgentOutcome.TimerRequested -> {
+                  timerManager.startTimer(outcome.durationSeconds, outcome.label).second
+                }
+                else -> ""
+              }
+            if (statusMsg.isNotBlank()) {
+              floatingSessionStore.setStatusBanner(statusMsg)
+              val prefs = settingsRepository.getSettingsSnapshot().voicePreferences
+              if (prefs.autoSpeakResponses || isFloatingLivePopupMode.value) {
+                voiceController.speakResponse("overlay_agent", statusMsg, prefs)
+              }
+            }
+          }
+          return
+        }
+      }
+      when (cmd) {
+        is AgentCommandIntent.StartScreenRecording -> {
+          floatingSessionStore.updatePromptText("")
+          screenRecordingManager.requestConfirmation()
+          floatingSessionStore.setStatusBanner("Confirm screen recording in popup or tap Start.")
+          return
+        }
+        AgentCommandIntent.StopScreenRecording -> {
+          floatingSessionStore.updatePromptText("")
+          startService(MediaProjectionCaptureService.buildStopRecordingIntent(this))
+          return
+        }
+        AgentCommandIntent.CancelScreenRecording -> {
+          floatingSessionStore.updatePromptText("")
+          startService(MediaProjectionCaptureService.buildCancelRecordingIntent(this))
+          return
+        }
+        AgentCommandIntent.StartScreenShare -> {
+          floatingSessionStore.updatePromptText("")
+          if (screenShareSessionManager.status.value == ScreenShareStatus.STOPPED) {
+            toggleOverlayScreenShare()
+          } else {
+            floatingSessionStore.setStatusBanner("Screen sharing is already active.")
+          }
+          return
+        }
+        AgentCommandIntent.StopScreenShare -> {
+          floatingSessionStore.updatePromptText("")
+          if (screenShareSessionManager.status.value != ScreenShareStatus.STOPPED) {
+            toggleOverlayScreenShare()
+          }
+          return
+        }
+        AgentCommandIntent.StartScreenSelection -> {
+          floatingSessionStore.updatePromptText("")
+          attachOverlayDrawingSelectionWindow()
+          return
+        }
+        is AgentCommandIntent.AnalyzeCurrentScreen -> {
+          val s = screenShareSessionManager.status.value
+          if (s == ScreenShareStatus.STOPPED || s == ScreenShareStatus.REQUESTING_CONSENT) {
+            floatingSessionStore.updatePromptText("")
+            floatingSessionStore.setStatusBanner(
+              "Screen sharing is currently OFF. Tap Share Screen to analyze your screen."
+            )
+            return
+          }
+        }
+        is AgentCommandIntent.UnsupportedSilentToggle -> {
+          floatingSessionStore.updatePromptText("")
+          floatingSessionStore.setStatusBanner(cmd.explanation)
+          scope.launch {
+            cmd.fallbackSettingsQuery?.let { deviceActionExecutor.executeNaturalCommand(it) }
+            val prefs = settingsRepository.getSettingsSnapshot().voicePreferences
+            if (prefs.autoSpeakResponses || isFloatingLivePopupMode.value) {
+              voiceController.speakResponse("overlay_cmd", cmd.explanation, prefs)
+            }
+          }
+          return
+        }
+        is AgentCommandIntent.OpenTargetOrSetting -> {
+          floatingSessionStore.updatePromptText("")
+          scope.launch {
+            val res = deviceActionExecutor.executeNaturalCommand(cmd.command)
+            floatingSessionStore.setStatusBanner(res.verifiedDetail)
+            val prefs = settingsRepository.getSettingsSnapshot().voicePreferences
+            if (prefs.autoSpeakResponses || isFloatingLivePopupMode.value) {
+              voiceController.speakResponse("overlay_cmd", res.verifiedDetail, prefs)
+            }
+          }
+          return
+        }
+        null -> Unit
+      }
+    }
+
+    val isScreenShareLive =
+      screenShareSessionManager.status.value != ScreenShareStatus.STOPPED &&
+        screenShareSessionManager.status.value != ScreenShareStatus.REQUESTING_CONSENT
+
+    if (pendingAttachments.isEmpty() &&
+      !isScreenShareLive &&
+      overrideCropBox == null &&
+      geminiLiveVoiceEngine.status.value == LiveVoiceSessionStatus.Active
+    ) {
       floatingSessionStore.appendLiveTranscriptTurn(isUser = true, text = clean)
       floatingSessionStore.updatePromptText("")
       geminiLiveVoiceEngine.sendFollowUpText(clean)
@@ -2093,11 +3081,27 @@ open class MousomiOverlayService : Service() {
             )
           }
 
+        val effectivePayloads = prepared.payloads.toMutableList()
+        if (effectivePayloads.isEmpty() && isScreenShareLive) {
+          val activeBox = overrideCropBox ?: overlayConfirmedSelectionBox.value
+          val shareFrame =
+            visualQueryProcessor.prepareScreenSharePayload(
+              screenShareSessionManager = screenShareSessionManager,
+              screenshotCaptureManager = screenshotCaptureManager,
+              smartCropEngine = smartCropEngine,
+              cropBox = activeBox,
+            )
+          if (shareFrame != null) {
+            effectivePayloads.add(shareFrame.payload)
+          }
+        }
+
         val assistantTurnId =
           floatingSessionStore.appendUserTurnAndPrepareAssistantPlaceholder(
             userDisplayText = prepared.userDisplayPrompt,
             attachmentUris = attachmentUris,
           )
+        floatingSessionStore.updatePromptText("")
 
         val historyMessages =
           snapshotTurns
@@ -2122,7 +3126,7 @@ open class MousomiOverlayService : Service() {
               conversationId = "overlay_quick",
               userPrompt = prepared.modelPrompt,
               historyMessages = historyMessages,
-              currentTurnImages = prepared.payloads,
+              currentTurnImages = effectivePayloads,
               requestedModelId = VerifiedModelCatalog.MOUSOMI_AUTO_SLOT_ID,
             )
           )
@@ -2148,8 +3152,9 @@ open class MousomiOverlayService : Service() {
                       text = s.fullText,
                       modelLabel = latestModelLabel,
                     )
+                    floatingSessionStore.setStatusBanner(null)
                     val settings = settingsRepository.getSettingsSnapshot()
-                    if (settings.voicePreferences.autoSpeakResponses) {
+                    if (settings.voicePreferences.autoSpeakResponses || isFloatingLivePopupMode.value) {
                       voiceController.speakResponse("overlay_ans", s.fullText, settings.voicePreferences)
                     }
                   }
@@ -2256,6 +3261,8 @@ open class MousomiOverlayService : Service() {
     hideDismissTargetOverlay()
     dismissPopupWindow()
     detachProfileQuickMenu()
+    detachFloatingLivePopupWindow()
+    detachOverlayDrawingSelectionWindow()
     collapsePanelToBubble()
     detachControlBar()
     detachEdgeLightWindow()
@@ -2277,12 +3284,18 @@ open class MousomiOverlayService : Service() {
     const val ACTION_STOP = "com.example.action.STOP_OVERLAY_ORB"
     const val ACTION_SHOW_ASSISTANT_PANEL = "com.example.action.SHOW_OVERLAY_ASSISTANT_PANEL"
     const val ACTION_ACTIVATE_ASSISTANT = "com.example.action.ACTIVATE_FLOATING_ASSISTANT"
+    const val ACTION_START_FLOATING_LIVE = "com.example.action.START_FLOATING_LIVE"
     const val EXTRA_PANEL_VOICE_AUTO = "extra_panel_voice_auto"
     const val EXTRA_EXPAND_PANEL = "extra_expand_panel"
     const val EXTRA_ACTIVATION_EDGE = "extra_activation_edge"
 
     fun buildShowControlBarIntent(context: Context): Intent =
       Intent(context, MousomiOverlayService::class.java).apply { action = ACTION_SHOW_CONTROL_BAR }
+
+    fun buildStartFloatingLiveIntent(context: Context): Intent =
+      Intent(context, MousomiOverlayService::class.java).apply {
+        action = ACTION_START_FLOATING_LIVE
+      }
 
     fun buildActivateAssistantIntent(
       context: Context,
@@ -2304,6 +3317,7 @@ class MousomiNotificationListenerService : NotificationListenerService() {
 
   @Inject lateinit var notificationEngine: NotificationIntelligenceEngine
   @Inject lateinit var settingsRepository: SettingsRepository
+  @Inject lateinit var voiceController: VoiceController
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -2317,20 +3331,43 @@ class MousomiNotificationListenerService : NotificationListenerService() {
         ?: extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
 
     scope.launch {
-      val cfg = settingsRepository.getSettingsSnapshot().notificationConfig
+      val settings = settingsRepository.getSettingsSnapshot()
+      val cfg = settings.notificationConfig
       notificationEngine.updateConfig(cfg)
+      if (!cfg.enabled && !cfg.readAloudEnabled) return@launch
+
       val appLabel =
         runCatching {
           val info = packageManager.getApplicationInfo(sbn.packageName, 0)
           packageManager.getApplicationLabel(info).toString()
         }.getOrDefault(sbn.packageName)
 
-      notificationEngine.onNotificationPosted(
-        packageName = sbn.packageName,
-        appLabel = appLabel,
-        title = title,
-        bodyText = body,
-      )
+      val record =
+        notificationEngine.onNotificationPosted(
+          packageName = sbn.packageName,
+          appLabel = appLabel,
+          title = title,
+          bodyText = body,
+        ) ?: return@launch
+
+      val audioMgr = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+      val ringerMode = audioMgr?.ringerMode ?: AudioManager.RINGER_MODE_NORMAL
+      val isMicListening = voiceController.voiceState.value is VoiceState.Listening
+      val spoken =
+        notificationEngine.buildReadAloudAnnouncement(
+          record = record,
+          ringerMode = ringerMode,
+          isMicCurrentlyListening = isMicListening,
+        )
+      if (!spoken.isNullOrBlank()) {
+        withContext(Dispatchers.Main) {
+          voiceController.speakResponse(
+            messageId = "notif_read_${record.id}",
+            text = spoken,
+            preferences = settings.voicePreferences,
+          )
+        }
+      }
     }
   }
 

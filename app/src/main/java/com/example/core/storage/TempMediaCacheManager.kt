@@ -106,6 +106,18 @@ class TempMediaCacheManager @Inject constructor(
     return file
   }
 
+  fun saveTempPng(pngBytes: ByteArray, prefix: String = "screen_"): File {
+    val file = File(tempRootDir, "${prefix}${UUID.randomUUID()}.png")
+    file.writeBytes(pngBytes)
+    return file
+  }
+
+  fun saveTempWebp(webpBytes: ByteArray, prefix: String = "screen_"): File {
+    val file = File(tempRootDir, "${prefix}${UUID.randomUUID()}.webp")
+    file.writeBytes(webpBytes)
+    return file
+  }
+
   fun cleanupExpiredTempFiles(maxAgeMs: Long = 24L * 60L * 60L * 1000L): Int {
     val cutoff = System.currentTimeMillis() - maxAgeMs.coerceAtLeast(60_000L)
     var removed = 0

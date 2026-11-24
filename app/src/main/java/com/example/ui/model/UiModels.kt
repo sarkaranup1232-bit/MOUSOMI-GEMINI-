@@ -1,5 +1,7 @@
 package com.example.ui.model
 
+import com.example.core.accessibility.AccessibilityActionResult
+import com.example.core.accessibility.AccessibilityWorkflowState
 import com.example.core.assistant.AssistantSessionPhase
 import com.example.core.assistant.EdgeActivationSignal
 import com.example.core.device.PendingPhoneAction
@@ -311,6 +313,12 @@ data class MousomiUiState(
   val orbReactiveFrame: OrbReactiveFrame = OrbReactiveFrame.IDLE,
   val pendingPhoneAction: PendingPhoneAction? = null,
   val pendingSocialAction: PendingSocialAction? = null,
+  val screenRecordingState: com.example.core.screen.ScreenRecordingUiState =
+    com.example.core.screen.ScreenRecordingUiState(),
+  val isFloatingLiveModeActive: Boolean = false,
+  val pendingScreenRecordingServiceAction: String? = null,
+  val accessibilityState: AccessibilityWorkflowState = AccessibilityWorkflowState(),
+  val pendingAccessibilityAction: AccessibilityActionResult? = null,
 ) {
   val pendingAttachment: AttachmentPreview?
     get() = pendingAttachments.firstOrNull()
@@ -333,7 +341,8 @@ data class MousomiUiState(
         screenShareStatus != ScreenShareStatus.STOPPED ||
         screenSelectionState.isActive ||
         imageStudioState.isBusy ||
-        isBatchRunning
+        isBatchRunning ||
+        accessibilityState.isWorkflowRunning
 
   val hasImageContext: Boolean
     get() =

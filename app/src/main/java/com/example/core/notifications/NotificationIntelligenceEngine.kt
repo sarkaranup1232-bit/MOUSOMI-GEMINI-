@@ -1,5 +1,6 @@
 package com.example.core.notifications
 
+import android.media.AudioManager
 import com.example.core.security.KeystoreCryptoManager
 import com.example.domain.model.NotificationIntelligenceConfig
 import com.example.domain.model.NotificationSummaryRecord
@@ -21,10 +22,17 @@ class NotificationIntelligenceEngine @Inject constructor(
   private val _notificationPulseTick = MutableStateFlow(0L)
   val notificationPulseTick: StateFlow<Long> = _notificationPulseTick.asStateFlow()
 
+  private val _configState = MutableStateFlow(NotificationIntelligenceConfig())
+  val configState: StateFlow<NotificationIntelligenceConfig> = _configState.asStateFlow()
+
   private var config = NotificationIntelligenceConfig()
 
   fun updateConfig(newConfig: NotificationIntelligenceConfig) {
     config = newConfig
+    _configState.value = newConfig
+    if (!newConfig.enabled && !newConfig.readAloudEnabled) {
+      clearAll()
+    }
   }
 
   fun onNotificationPosted(
@@ -33,7 +41,8 @@ class NotificationIntelligenceEngine @Inject constructor(
     title: String,
     bodyText: String,
   ): NotificationSummaryRecord? {
-    if (!config.enabled) return null
+    if (!config.enabled && !config.readAloudEnabled) return null
+    if (packageName in config.excludedPackages) return null
     if (config.allowedPackages.isNotEmpty() && packageName !in config.allowedPackages) {
       return null
     }
@@ -70,9 +79,60 @@ class NotificationIntelligenceEngine @Inject constructor(
         receivedAtMs = System.currentTimeMillis(),
       )
 
-    _summaries.update { current -> (listOf(record) + current).take(25) }
-    _notificationPulseTick.value = System.currentTimeMillis()
+    if (config.enabled) {
+      _summaries.update { current -> (listOf(record) + current).take(25) }
+      _notificationPulseTick.value = System.currentTimeMillis()
+    }
     return record
+  }
+
+  /**
+   * Builds a spoken notification announcement if Read-Aloud is enabled, not paused, not in
+   * silent/vibrate mode, not excluded, and safe from OTP/credentials.
+   */
+  fun buildReadAloudAnnouncement(
+    record: NotificationSummaryRecord,
+    ringerMode: Int = AudioManager.RINGER_MODE_NORMAL,
+    isMicCurrentlyListening: Boolean = false,
+  ): String? {
+    if (!config.readAloudEnabled || config.readAloudPaused) return null
+    if (ringerMode != AudioManager.RINGER_MODE_NORMAL) return null
+    if (isMicCurrentlyListening) return null
+    if (record.packageName in config.excludedPackages) return null
+
+    val sender = record.title.replace(Regex("\\s+"), " ").trim().take(48)
+    val appName = record.appLabel.replace(Regex("\\s+"), " ").trim().take(32)
+    val isWhatsApp =
+      record.packageName == "com.whatsapp" || record.packageName == "com.whatsapp.w4b"
+
+    if (!config.readAloudContentEnabled) {
+      return if (isWhatsApp && sender.isNotBlank()) {
+        "New WhatsApp message from $sender."
+      } else if (sender.isNotBlank() && sender != appName) {
+        "New notification from $appName: $sender."
+      } else {
+        "New notification from $appName."
+      }
+    }
+
+    val combined = "${record.title} ${record.summary}"
+    if (config.redactSensitiveCodes && containsOtpOrPrivateCode(combined)) {
+      return "Sensitive message from $appName withheld for security."
+    }
+
+    val spokenBody = record.summary.take(140)
+    return if (isWhatsApp && sender.isNotBlank()) {
+      "WhatsApp from $sender: $spokenBody"
+    } else if (sender.isNotBlank() && sender != appName) {
+      "$appName from $sender: $spokenBody"
+    } else {
+      "$appName: $spokenBody"
+    }
+  }
+
+  fun setReadAloudPaused(paused: Boolean) {
+    val updated = config.copy(readAloudPaused = paused)
+    updateConfig(updated)
   }
 
   fun dismissSummary(id: String) {

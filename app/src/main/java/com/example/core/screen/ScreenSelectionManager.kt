@@ -217,9 +217,9 @@ class ScreenSelectionManager @Inject constructor(
     }
 
     val cropRes =
-      smartCropEngine.cropFromFile(
+      smartCropEngine.cropSelectionToFile(
         sourceFilePath = framePath,
-        normBox = snapped.boundingBox,
+        snappedResult = snapped,
         metadata = meta,
         prefix = "sel_crop_",
       )

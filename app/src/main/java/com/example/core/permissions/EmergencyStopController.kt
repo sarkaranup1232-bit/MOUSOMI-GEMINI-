@@ -1,6 +1,7 @@
 package com.example.core.permissions
 
 import android.content.Context
+import com.example.core.accessibility.AccessibilityAgentController
 import com.example.core.assistant.AssistantSessionStateManager
 import com.example.core.screen.ScreenRecordingManager
 import com.example.core.screen.ScreenShareSessionManager
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * - Active MediaProjection screen sharing, screen recording & temporary screen frames
  * - Central AssistantSessionStateManager active states (so Border Light fades cleanly)
  * - LiveVoiceSessionManager timer, mic lock, and output amplitude analyzer
+ * - Active Accessibility automation workflows
  * - Any ongoing AI generation / pending automation tasks (via listeners)
  * Does NOT revoke OS permissions, keeping the user cleanly in control.
  */
@@ -36,13 +38,14 @@ class EmergencyStopController @Inject constructor(
   private val assistantSessionStateManager: AssistantSessionStateManager? = null,
   private val liveVoiceSessionManager: LiveVoiceSessionManager? = null,
   private val screenRecordingManager: ScreenRecordingManager? = null,
+  private val accessibilityAgentController: AccessibilityAgentController? = null,
 ) {
   constructor(
     context: Context,
     voiceController: VoiceController,
     screenShareSessionManager: ScreenShareSessionManager,
     tempMediaCacheManager: TempMediaCacheManager,
-  ) : this(context, voiceController, screenShareSessionManager, tempMediaCacheManager, null, null, null, null)
+  ) : this(context, voiceController, screenShareSessionManager, tempMediaCacheManager, null, null, null, null, null)
 
   private val _lastEmergencyStopAtMs = MutableStateFlow<Long?>(null)
   val lastEmergencyStopAtMs: StateFlow<Long?> = _lastEmergencyStopAtMs.asStateFlow()
@@ -59,6 +62,7 @@ class EmergencyStopController @Inject constructor(
 
   fun triggerEmergencyStop(reason: String = "Emergency Stop activated by user.") {
     assistantSessionStateManager?.onBeginStopping()
+    accessibilityAgentController?.stopAllAutomation(reason)
     geminiLiveVoiceEngine?.stopAndClose(keepScreenShare = false)
     voiceController.stopListening()
     voiceController.stopSpeaking()

@@ -81,27 +81,6 @@ fun ScreenSelectionOverlay(
 
   var overlayWidthPx by remember { mutableIntStateOf(0) }
   var overlayHeightPx by remember { mutableIntStateOf(0) }
-  var localSecondsLeft by remember(state.isActive, state.snappedResult == null) {
-    mutableIntStateOf(state.remainingSeconds.coerceIn(1, 10))
-  }
-
-  // Sync external clears (Redraw) back to 10s
-  androidx.compose.runtime.LaunchedEffect(state.remainingSeconds, state.stage) {
-    if (state.stage == SelectionStage.READY_TO_DRAW && state.snappedResult == null) {
-      localSecondsLeft = state.remainingSeconds.coerceIn(0, 10)
-    }
-  }
-
-  // Visible 10-second auto-cancel timer when waiting for user to draw a region
-  androidx.compose.runtime.LaunchedEffect(state.isActive, state.stage, state.snappedResult != null) {
-    if (state.isActive && state.stage == SelectionStage.READY_TO_DRAW && state.snappedResult == null) {
-      while (localSecondsLeft > 0) {
-        kotlinx.coroutines.delay(1000L)
-        localSecondsLeft -= 1
-      }
-      onCancel()
-    }
-  }
 
   // Dynamically place toolbar at top if snapped box sits in lower half, otherwise bottom
   val snappedCenterY =
@@ -180,34 +159,12 @@ fun ScreenSelectionOverlay(
           GeminiFourPointSparkle(size = 16.dp, animated = true)
           Text(
             text =
-              if (state.snappedResult == null) "Draw region to select"
+              if (state.snappedResult == null) "Draw rectangle or outline around screen area"
               else "Adjust handles or Confirm",
             color = Color.White,
             fontSize = 12.5.sp,
             fontWeight = FontWeight.Medium,
           )
-          if (state.snappedResult == null) {
-            Surface(
-              shape = CircleShape,
-              color =
-                if (localSecondsLeft <= 3) Color(0xFFEF4444).copy(alpha = 0.25f)
-                else NeonCyan.copy(alpha = 0.20f),
-              border =
-                BorderStroke(
-                  1.dp,
-                  if (localSecondsLeft <= 3) Color(0xFFEF4444) else NeonCyan,
-                ),
-              modifier = Modifier.testTag("selection_timer_badge"),
-            ) {
-              Text(
-                text = "${localSecondsLeft}s",
-                color = if (localSecondsLeft <= 3) Color(0xFFFCA5A5) else NeonCyan,
-                fontSize = 11.5.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-              )
-            }
-          }
         }
       }
     }

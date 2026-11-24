@@ -14,6 +14,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -36,13 +37,17 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ScreenShare
+import androidx.compose.material.icons.automirrored.outlined.StopScreenShare
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.CenterFocusWeak
 import androidx.compose.material.icons.outlined.Crop
 import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Draw
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MicOff
@@ -51,6 +56,7 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Pause
@@ -69,11 +75,19 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -86,11 +100,15 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.core.overlay.FloatingAttachmentItem
 import com.example.core.overlay.FloatingChatTurn
+import com.example.core.screen.ScreenRecordingManager
+import com.example.core.screen.ScreenRecordingPhase
+import com.example.core.screen.ScreenRecordingUiState
 import com.example.core.voice.LiveVoiceSessionManager
 import com.example.core.voice.LiveVoiceSessionStatus
 import com.example.core.voice.VoiceState
 import com.example.domain.model.AiResponseState
 import com.example.domain.model.EdgeLightConfig
+import com.example.domain.model.VoiceAudioMetrics
 import com.example.ui.theme.ElectricBlue
 import com.example.ui.theme.LiquidGlassBorder
 import com.example.ui.theme.LiquidGlassDark
@@ -99,6 +117,7 @@ import com.example.ui.theme.NeonPurple
 import com.example.ui.theme.NeonViolet
 import com.example.ui.theme.WarmAmber
 import java.io.File
+import kotlin.math.sin
 
 /**
  * Compact translucent Liquid Glass Floating Control Bar rendered above other apps.
@@ -1134,3 +1153,580 @@ private fun attachmentImageModel(item: FloatingAttachmentItem): Any {
   val file = item.filePath?.let(::File)?.takeIf { it.exists() }
   return file ?: Uri.parse(item.uriString)
 }
+
+/**
+ * Compact, draggable liquid-glass Floating Live Popup shown above other apps during Secondary Live Mode.
+ * Keeps the underlying screen completely visible and interactive while supporting multi-turn voice,
+ * real Screen Share toggle + visible status, Draw / Select Area, and screen recording actions.
+ */
+@Composable
+fun FloatingLivePopupCard(
+  liveStatusLabel: String,
+  isMicActive: Boolean,
+  hasMicPermission: Boolean,
+  isPaused: Boolean,
+  isMuted: Boolean,
+  isThinking: Boolean,
+  isScreenShareActive: Boolean,
+  voiceRmsNormalized: Float,
+  audioMetrics: VoiceAudioMetrics = VoiceAudioMetrics.SILENT,
+  elapsedSeconds: Long = 0L,
+  latestUserTranscript: String = "",
+  latestAssistantTranscript: String = "",
+  statusBanner: String? = null,
+  screenRecordingState: ScreenRecordingUiState = ScreenRecordingUiState(),
+  onToggleMute: () -> Unit,
+  onTogglePause: () -> Unit,
+  onToggleScreenShare: () -> Unit,
+  onDrawArea: () -> Unit,
+  onSendFollowUp: (String) -> Unit,
+  onStopLive: () -> Unit,
+  onClosePopup: () -> Unit,
+  onExpandToFullPanel: () -> Unit = {},
+  onConfirmScreenRecording: () -> Unit = {},
+  onStopScreenRecording: () -> Unit = {},
+  onCancelScreenRecording: () -> Unit = {},
+  onDismissScreenRecordingStatus: () -> Unit = {},
+  onKeyboardInputFocusChanged: (Boolean) -> Unit = {},
+  modifier: Modifier = Modifier,
+) {
+  var showQuickInput by remember { mutableStateOf(false) }
+  var followUpDraft by remember { mutableStateOf("") }
+
+  LaunchedEffect(showQuickInput) {
+    onKeyboardInputFocusChanged(showQuickInput)
+  }
+
+  val neonBorderBrush =
+    Brush.horizontalGradient(
+      colors =
+        listOf(
+          NeonCyan,
+          ElectricBlue,
+          NeonViolet,
+          Color(0xFFEC4899),
+          Color(0xFFFBBF24),
+        )
+    )
+
+  Surface(
+    shape = RoundedCornerShape(24.dp),
+    color = Color(0xFF0A1020).copy(alpha = 0.88f),
+    border = BorderStroke(1.35.dp, neonBorderBrush),
+    shadowElevation = 20.dp,
+    modifier =
+      modifier
+        .widthIn(min = 276.dp, max = 336.dp)
+        .animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
+        .testTag("floating_live_popup_card"),
+  ) {
+    Column(
+      modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      // Header Row: Live status dot + elapsed timer + Expand & Close
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+      ) {
+        Row(
+          modifier = Modifier.weight(1f),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+          val indicatorColor =
+            when {
+              !hasMicPermission -> Color(0xFFEF4444)
+              isPaused || isMuted -> WarmAmber
+              isMicActive || isThinking -> NeonCyan
+              else -> Color(0xFF94A3B8)
+            }
+          Box(
+            modifier =
+              Modifier
+                .size(9.dp)
+                .clip(CircleShape)
+                .background(indicatorColor)
+          )
+          Text(
+            text = if (!hasMicPermission) "Mic Permission Needed" else liveStatusLabel,
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+          if (elapsedSeconds > 0L) {
+            Text(
+              text = LiveVoiceSessionManager.formatElapsedMmSs(elapsedSeconds),
+              color = NeonCyan.copy(alpha = 0.9f),
+              fontSize = 11.sp,
+              fontWeight = FontWeight.Medium,
+            )
+          }
+        }
+
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+          IconButton(
+            onClick = onExpandToFullPanel,
+            modifier =
+              Modifier
+                .minimumInteractiveComponentSize()
+                .size(34.dp)
+                .testTag("floating_live_expand_button"),
+          ) {
+            Icon(
+              imageVector = Icons.Outlined.OpenInFull,
+              contentDescription = "Open full assistant panel",
+              tint = Color.White.copy(alpha = 0.85f),
+              modifier = Modifier.size(16.dp),
+            )
+          }
+          Surface(
+            onClick = onClosePopup,
+            shape = CircleShape,
+            color = Color.White.copy(alpha = 0.1f),
+            modifier =
+              Modifier
+                .minimumInteractiveComponentSize()
+                .size(34.dp)
+                .testTag("floating_live_close_button"),
+          ) {
+            Box(contentAlignment = Alignment.Center) {
+              Icon(
+                imageVector = Icons.Rounded.Close,
+                contentDescription = "Close Live popup",
+                tint = Color.White,
+                modifier = Modifier.size(16.dp),
+              )
+            }
+          }
+        }
+      }
+
+      // Compact audio-reactive RMS bar + concise turn preview (no large Listening Card)
+      Row(
+        modifier =
+          Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color.White.copy(alpha = 0.06f))
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        CompactLiveAudioWaveform(
+          amplitude = if (isPaused || isMuted || !hasMicPermission) 0.04f else voiceRmsNormalized,
+          isActive = isMicActive && !isPaused && !isMuted && hasMicPermission,
+          audioMetrics = audioMetrics,
+          modifier =
+            Modifier
+              .width(58.dp)
+              .height(20.dp)
+              .testTag("floating_live_waveform"),
+        )
+        val previewLine =
+          when {
+            !hasMicPermission -> "Grant microphone permission to talk continuously."
+            !statusBanner.isNullOrBlank() -> statusBanner
+            latestUserTranscript.isNotBlank() -> "\"$latestUserTranscript\""
+            latestAssistantTranscript.isNotBlank() -> latestAssistantTranscript
+            isScreenShareActive -> "Sharing screen • Ask about what is visible"
+            isPaused -> "Live voice paused • Tap Resume"
+            isMuted -> "Microphone muted"
+            else -> "Listening naturally…"
+          }
+        Text(
+          text = previewLine,
+          color = Color.White.copy(alpha = 0.88f),
+          fontSize = 11.5.sp,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+          lineHeight = 15.sp,
+          modifier = Modifier.weight(1f),
+        )
+      }
+
+      // Honest Screen Share toggle + visible active status + Stop Screen Sharing
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        Surface(
+          onClick = onToggleScreenShare,
+          shape = RoundedCornerShape(16.dp),
+          color =
+            if (isScreenShareActive) NeonCyan.copy(alpha = 0.16f)
+            else Color.White.copy(alpha = 0.08f),
+          border =
+            BorderStroke(
+              width = 1.dp,
+              color =
+                if (isScreenShareActive) NeonCyan.copy(alpha = 0.78f)
+                else Color.White.copy(alpha = 0.18f),
+            ),
+          modifier =
+            Modifier
+              .weight(1f)
+              .heightIn(min = 38.dp)
+              .testTag("floating_live_screen_share_button"),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Icon(
+              imageVector =
+                if (isScreenShareActive) Icons.AutoMirrored.Outlined.StopScreenShare
+                else Icons.AutoMirrored.Outlined.ScreenShare,
+              contentDescription =
+                if (isScreenShareActive) "Stop Screen Sharing" else "Share Screen with Mousomi",
+              tint = if (isScreenShareActive) NeonCyan else Color.White.copy(alpha = 0.9f),
+              modifier = Modifier.size(16.dp),
+            )
+            Text(
+              text = if (isScreenShareActive) "Screen Sharing Active" else "Share Screen",
+              color = Color.White,
+              fontSize = 11.5.sp,
+              fontWeight = FontWeight.Medium,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.weight(1f),
+            )
+            if (isScreenShareActive) {
+              Text(
+                text = "Stop",
+                color = Color(0xFFFCA5A5),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.testTag("floating_live_stop_share_button"),
+              )
+            }
+          }
+        }
+      }
+
+      // Screen Recording confirmation / active timer / final status bar inside Floating Live Popup
+      if (screenRecordingState.phase != ScreenRecordingPhase.IDLE) {
+        Surface(
+          shape = RoundedCornerShape(14.dp),
+          color = Color(0xFF151C2E).copy(alpha = 0.95f),
+          border =
+            BorderStroke(
+              1.dp,
+              if (screenRecordingState.phase == ScreenRecordingPhase.RECORDING) Color(0xFFEF4444)
+              else NeonCyan.copy(alpha = 0.45f),
+            ),
+          modifier = Modifier.fillMaxWidth().testTag("floating_live_recording_banner"),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Icon(
+              imageVector = Icons.Outlined.Videocam,
+              contentDescription = null,
+              tint =
+                if (screenRecordingState.phase == ScreenRecordingPhase.RECORDING) Color(0xFFEF4444)
+                else NeonCyan,
+              modifier = Modifier.size(16.dp),
+            )
+            Text(
+              text =
+                when (screenRecordingState.phase) {
+                  ScreenRecordingPhase.AWAITING_CONFIRMATION -> "Record screen (MP4)?"
+                  ScreenRecordingPhase.AWAITING_CONSENT -> "Awaiting capture consent…"
+                  ScreenRecordingPhase.RECORDING ->
+                    "REC ${ScreenRecordingManager.formatElapsed(screenRecordingState.elapsedSeconds)}"
+                  ScreenRecordingPhase.FINALIZING -> "Saving MP4…"
+                  ScreenRecordingPhase.SAVED -> "Saved: ${screenRecordingState.displayPath}"
+                  ScreenRecordingPhase.CANCELLED -> "Recording cancelled"
+                  ScreenRecordingPhase.FAILED -> screenRecordingState.statusMessage ?: "Recording failed"
+                  ScreenRecordingPhase.IDLE -> ""
+                },
+              color = Color.White,
+              fontSize = 11.sp,
+              maxLines = 2,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.weight(1f),
+            )
+            when (screenRecordingState.phase) {
+              ScreenRecordingPhase.AWAITING_CONFIRMATION -> {
+                TextButton(
+                  onClick = onConfirmScreenRecording,
+                  modifier = Modifier.testTag("floating_rec_confirm"),
+                ) { Text("Start", color = NeonCyan, fontSize = 11.sp) }
+                TextButton(
+                  onClick = onCancelScreenRecording,
+                  modifier = Modifier.testTag("floating_rec_cancel"),
+                ) { Text("Cancel", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp) }
+              }
+              ScreenRecordingPhase.RECORDING -> {
+                TextButton(
+                  onClick = onStopScreenRecording,
+                  modifier = Modifier.testTag("floating_rec_stop"),
+                ) { Text("Stop & Save", color = Color(0xFFFCA5A5), fontSize = 11.sp) }
+                TextButton(
+                  onClick = onCancelScreenRecording,
+                  modifier = Modifier.testTag("floating_rec_cancel"),
+                ) { Text("Cancel", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp) }
+              }
+              ScreenRecordingPhase.SAVED,
+              ScreenRecordingPhase.CANCELLED,
+              ScreenRecordingPhase.FAILED -> {
+                TextButton(onClick = onDismissScreenRecordingStatus) {
+                  Text("Dismiss", color = NeonCyan, fontSize = 11.sp)
+                }
+              }
+              else -> Unit
+            }
+          }
+        }
+      }
+
+      // Compact controls strip: Mic/Mute | Pause/Resume | Draw Area | Type Follow-up | Stop
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+      ) {
+        Surface(
+          onClick = onToggleMute,
+          shape = CircleShape,
+          color =
+            if (!isMuted && hasMicPermission && isMicActive) ElectricBlue
+            else if (isMuted) WarmAmber.copy(alpha = 0.22f)
+            else Color.White.copy(alpha = 0.1f),
+          border = BorderStroke(0.9.dp, Color.White.copy(alpha = 0.18f)),
+          modifier =
+            Modifier
+              .minimumInteractiveComponentSize()
+              .size(40.dp)
+              .testTag("floating_live_mute_button"),
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              imageVector = if (isMuted) Icons.Outlined.MicOff else Icons.Outlined.Mic,
+              contentDescription = if (isMuted) "Unmute microphone" else "Mute microphone",
+              tint = Color.White,
+              modifier = Modifier.size(19.dp),
+            )
+          }
+        }
+
+        Surface(
+          onClick = onTogglePause,
+          shape = CircleShape,
+          color = if (isPaused) NeonCyan else Color.White.copy(alpha = 0.1f),
+          border = BorderStroke(0.9.dp, Color.White.copy(alpha = 0.18f)),
+          modifier =
+            Modifier
+              .minimumInteractiveComponentSize()
+              .size(40.dp)
+              .testTag("floating_live_pause_button"),
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              imageVector = if (isPaused) Icons.Outlined.PlayArrow else Icons.Outlined.Pause,
+              contentDescription = if (isPaused) "Resume Live voice" else "Pause Live voice",
+              tint = if (isPaused) Color.Black else Color.White,
+              modifier = Modifier.size(19.dp),
+            )
+          }
+        }
+
+        Surface(
+          onClick = onDrawArea,
+          shape = CircleShape,
+          color = Color.White.copy(alpha = 0.1f),
+          border = BorderStroke(0.9.dp, NeonCyan.copy(alpha = 0.55f)),
+          modifier =
+            Modifier
+              .minimumInteractiveComponentSize()
+              .size(40.dp)
+              .testTag("floating_live_draw_button"),
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              imageVector = Icons.Outlined.Draw,
+              contentDescription = "Draw or select screen area",
+              tint = NeonCyan,
+              modifier = Modifier.size(18.dp),
+            )
+          }
+        }
+
+        Surface(
+          onClick = { showQuickInput = !showQuickInput },
+          shape = CircleShape,
+          color = if (showQuickInput) NeonViolet.copy(alpha = 0.35f) else Color.White.copy(alpha = 0.1f),
+          border = BorderStroke(0.9.dp, Color.White.copy(alpha = 0.18f)),
+          modifier =
+            Modifier
+              .minimumInteractiveComponentSize()
+              .size(40.dp)
+              .testTag("floating_live_keyboard_button"),
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              imageVector = Icons.Outlined.Keyboard,
+              contentDescription = "Type question for Live Mousomi",
+              tint = Color.White,
+              modifier = Modifier.size(18.dp),
+            )
+          }
+        }
+
+        Surface(
+          onClick = onStopLive,
+          shape = RoundedCornerShape(18.dp),
+          color = Color(0xFFDC2626),
+          modifier =
+            Modifier
+              .minimumInteractiveComponentSize()
+              .height(38.dp)
+              .testTag("floating_live_stop_button"),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            Icon(
+              imageVector = Icons.Rounded.Stop,
+              contentDescription = "Stop Live Mode",
+              tint = Color.White,
+              modifier = Modifier.size(15.dp),
+            )
+            Text(
+              text = "Stop",
+              color = Color.White,
+              fontSize = 12.sp,
+              fontWeight = FontWeight.SemiBold,
+            )
+          }
+        }
+      }
+
+      AnimatedVisibility(
+        visible = showQuickInput,
+        enter = expandVertically() + fadeIn(),
+        exit = shrinkVertically() + fadeOut(),
+      ) {
+        Row(
+          modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          OutlinedTextField(
+            value = followUpDraft,
+            onValueChange = { followUpDraft = it },
+            placeholder = {
+              Text(
+                text = "Ask about this screen…",
+                color = Color.White.copy(alpha = 0.55f),
+                fontSize = 12.sp,
+              )
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(16.dp),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions =
+              KeyboardActions(
+                onSend = {
+                  val clean = followUpDraft.trim()
+                  if (clean.isNotEmpty()) {
+                    followUpDraft = ""
+                    showQuickInput = false
+                    onSendFollowUp(clean)
+                  }
+                }
+              ),
+            colors =
+              OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                cursorColor = NeonCyan,
+                focusedBorderColor = NeonCyan.copy(alpha = 0.7f),
+                unfocusedBorderColor = Color.White.copy(alpha = 0.22f),
+              ),
+            modifier = Modifier.weight(1f).testTag("floating_live_followup_input"),
+          )
+          Surface(
+            onClick = {
+              val clean = followUpDraft.trim()
+              if (clean.isNotEmpty()) {
+                followUpDraft = ""
+                showQuickInput = false
+                onSendFollowUp(clean)
+              }
+            },
+            shape = CircleShape,
+            color = ElectricBlue,
+            modifier = Modifier.size(40.dp).testTag("floating_live_followup_send"),
+          ) {
+            Box(contentAlignment = Alignment.Center) {
+              Icon(
+                imageVector = Icons.AutoMirrored.Rounded.Send,
+                contentDescription = "Send Live question",
+                tint = Color.White,
+                modifier = Modifier.size(18.dp),
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun CompactLiveAudioWaveform(
+  amplitude: Float,
+  isActive: Boolean,
+  audioMetrics: VoiceAudioMetrics,
+  modifier: Modifier = Modifier,
+) {
+  val bars = 9
+  Canvas(modifier = modifier) {
+    val barWidth = (size.width / (bars * 1.75f)).coerceAtLeast(2.5f)
+    val gap = (size.width - barWidth * bars) / (bars - 1).coerceAtLeast(1)
+    val midY = size.height / 2f
+    val clampedAmp = amplitude.coerceIn(0.04f, 1f)
+    for (i in 0 until bars) {
+      val bandFactor =
+        when (i % 3) {
+          0 -> audioMetrics.lowBandEnergy
+          1 -> audioMetrics.midBandEnergy
+          else -> audioMetrics.highBandEnergy
+        }.coerceIn(0f, 1f)
+      val weight =
+        if (!isActive) 0.16f
+        else (0.24f + clampedAmp * 0.58f + bandFactor * 0.35f) *
+          (0.65f + 0.35f * sin(i * 0.9f + clampedAmp * 6.2f).coerceIn(0f, 1f))
+      val barH = (size.height * weight).coerceIn(3f, size.height)
+      val left = i * (barWidth + gap)
+      val barColor =
+        when {
+          !isActive -> Color.White.copy(alpha = 0.32f)
+          i < 3 -> NeonCyan
+          i < 6 -> ElectricBlue
+          else -> NeonViolet
+        }
+      drawRoundRect(
+        color = barColor,
+        topLeft = Offset(left, midY - barH / 2f),
+        size = Size(barWidth, barH),
+        cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f),
+      )
+    }
+  }
+}
+

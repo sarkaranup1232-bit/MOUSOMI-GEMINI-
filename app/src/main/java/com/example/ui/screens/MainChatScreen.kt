@@ -1,8 +1,10 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,12 +28,15 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ScreenShare
+import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -59,9 +64,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.core.edge.EdgeLightStateMapper
+import com.example.core.screen.ScreenRecordingManager
+import com.example.core.screen.ScreenRecordingPhase
 import com.example.core.voice.VoiceState
 import com.example.domain.model.MemoryCategory
 import com.example.domain.model.ScreenShareStatus
+import com.example.service.LiveVoiceSessionService
+import com.example.service.MousomiOverlayService
 import com.example.ui.components.ChatMessagesList
 import com.example.ui.components.CompactImageEditorSheet
 import com.example.ui.components.DrawingAnnotationOverlay
@@ -73,6 +82,7 @@ import com.example.ui.components.ScreenSelectionOverlay
 import com.example.ui.components.geminiBackgroundGlow
 import com.example.ui.model.MousomiUiState
 import com.example.ui.model.SuggestionItem
+import com.example.ui.theme.WarmAmber
 import com.example.ui.viewmodel.MousomiViewModel
 import java.util.Calendar
 import kotlinx.coroutines.launch
@@ -88,6 +98,9 @@ fun MainChatScreen(
   onRequestStartScreenShare: () -> Unit = {},
   onStopScreenShare: () -> Unit = {},
   onRequestStartScreenSelection: () -> Unit = {},
+  onRequestStartScreenRecording: () -> Unit = {},
+  onStopScreenRecording: () -> Unit = {},
+  onCancelScreenRecording: () -> Unit = {},
   onNavigateToAssistantHub: (Int) -> Unit = {},
   onNavigateToLens: () -> Unit = {},
 ) {
@@ -163,6 +176,22 @@ fun MainChatScreen(
       if (uri != null) {
         viewModel.onAttachPickedAudio(uri.toString())
       }
+    }
+
+  val pickContactLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.PickContact()
+    ) { uri ->
+      if (uri != null) {
+        viewModel.onPickedContactUri(uri)
+      }
+    }
+
+  val contactsPermissionLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+      viewModel.onReResolvePendingContactAction()
     }
 
   val documentPickerLauncher =
@@ -427,7 +456,20 @@ fun MainChatScreen(
                 ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                   PackageManager.PERMISSION_GRANTED
               if (granted) {
-                viewModel.onToggleGeminiLive(true)
+                if (Settings.canDrawOverlays(context)) {
+                  ContextCompat.startForegroundService(
+                    context,
+                    MousomiOverlayService.buildStartFloatingLiveIntent(context),
+                  )
+                  ContextCompat.startForegroundService(
+                    context,
+                    LiveVoiceSessionService.buildStartIntent(context),
+                  )
+                  viewModel.onSetFloatingLiveModeActive(true)
+                  (context as? Activity)?.moveTaskToBack(true)
+                } else {
+                  viewModel.onToggleGeminiLive(true)
+                }
               } else {
                 viewModel.onRequestPendingLiveAfterPermission()
                 audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -477,6 +519,93 @@ fun MainChatScreen(
             )
             TextButton(onClick = onStopScreenShare) {
               Text("Stop", color = Color(0xFFF87171))
+            }
+          }
+        }
+      }
+
+      if (uiState.screenRecordingState.phase != ScreenRecordingPhase.IDLE) {
+        val recState = uiState.screenRecordingState
+        Surface(
+          shape = RoundedCornerShape(18.dp),
+          color = Color(0xFF10172A).copy(alpha = 0.95f),
+          border =
+            BorderStroke(
+              1.dp,
+              if (recState.phase == ScreenRecordingPhase.RECORDING) Color(0xFFEF4444)
+              else Color(0xFF38BDF8).copy(alpha = 0.6f),
+            ),
+          modifier =
+            Modifier
+              .align(Alignment.TopCenter)
+              .statusBarsPadding()
+              .padding(
+                top = if (uiState.screenShareStatus != ScreenShareStatus.STOPPED) 110.dp else 58.dp,
+                start = 16.dp,
+                end = 16.dp,
+              )
+              .testTag("main_screen_recording_banner"),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Icon(
+              imageVector = Icons.Outlined.Videocam,
+              contentDescription = null,
+              tint =
+                if (recState.phase == ScreenRecordingPhase.RECORDING) Color(0xFFEF4444)
+                else Color(0xFF38BDF8),
+            )
+            Text(
+              text =
+                when (recState.phase) {
+                  ScreenRecordingPhase.AWAITING_CONFIRMATION ->
+                    recState.statusMessage ?: "Confirm MP4 screen recording?"
+                  ScreenRecordingPhase.AWAITING_CONSENT ->
+                    "Grant screen capture consent to record…"
+                  ScreenRecordingPhase.RECORDING ->
+                    "REC ${ScreenRecordingManager.formatElapsed(recState.elapsedSeconds)} • ${recState.displayPath}"
+                  ScreenRecordingPhase.FINALIZING -> "Finalizing MP4…"
+                  ScreenRecordingPhase.SAVED -> "Saved: ${recState.displayPath}"
+                  ScreenRecordingPhase.CANCELLED -> recState.statusMessage ?: "Recording cancelled"
+                  ScreenRecordingPhase.FAILED -> recState.statusMessage ?: "Recording failed"
+                  ScreenRecordingPhase.IDLE -> ""
+                },
+              color = Color.White,
+              fontSize = 12.sp,
+              modifier = Modifier.weight(1f, fill = false),
+            )
+            when (recState.phase) {
+              ScreenRecordingPhase.AWAITING_CONFIRMATION -> {
+                TextButton(
+                  onClick = onRequestStartScreenRecording,
+                  modifier = Modifier.testTag("main_rec_confirm"),
+                ) { Text("Start", color = Color(0xFF38BDF8)) }
+                TextButton(
+                  onClick = viewModel::onDismissScreenRecording,
+                  modifier = Modifier.testTag("main_rec_cancel"),
+                ) { Text("Cancel", color = Color(0xFFF87171)) }
+              }
+              ScreenRecordingPhase.RECORDING -> {
+                TextButton(
+                  onClick = onStopScreenRecording,
+                  modifier = Modifier.testTag("main_rec_stop"),
+                ) { Text("Stop & Save", color = Color(0xFFFCA5A5)) }
+                TextButton(
+                  onClick = onCancelScreenRecording,
+                  modifier = Modifier.testTag("main_rec_cancel"),
+                ) { Text("Cancel", color = Color.White.copy(alpha = 0.78f)) }
+              }
+              ScreenRecordingPhase.SAVED,
+              ScreenRecordingPhase.CANCELLED,
+              ScreenRecordingPhase.FAILED -> {
+                TextButton(onClick = viewModel::onDismissScreenRecording) {
+                  Text("Dismiss", color = Color(0xFF38BDF8))
+                }
+              }
+              else -> Unit
             }
           }
         }
@@ -625,7 +754,12 @@ fun MainChatScreen(
           liveConnectionState = uiState.liveConnectionState,
           liveElapsedSeconds = uiState.liveElapsedSeconds,
           isScreenShareActive = uiState.screenShareStatus != ScreenShareStatus.STOPPED,
-          onShareScreenWithLive = { viewModel.onShareScreenWithLive(onRequestStartScreenShare) },
+          onShareScreenWithLive = {
+            viewModel.onShareScreenWithLive(
+              onRequestStartScreenShare = onRequestStartScreenShare,
+              onRequestStopScreenShare = onStopScreenShare,
+            )
+          },
         )
       }
 
@@ -667,6 +801,7 @@ fun MainChatScreen(
         DrawingAnnotationOverlay(
           backgroundImagePath = uiState.drawingTargetImage?.filePath,
           onAnalyzeMarkedRegion = viewModel::onAnalyzeAnnotatedRegion,
+          onAttachMarkedRegion = viewModel::onAttachAnnotatedRegion,
           onSaveDrawing = viewModel::onSaveDrawingAnnotation,
           onClose = { viewModel.onToggleDrawingOverlay(false) },
         )
@@ -731,10 +866,37 @@ fun MainChatScreen(
         AlertDialog(
           onDismissRequest = viewModel::onDismissPendingActions,
           title = { Text(phoneAction.type.title) },
-          text = { Text(phoneAction.summary) },
+          text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+              Text(phoneAction.summary)
+              if (phoneAction.candidateContacts.isNotEmpty()) {
+                phoneAction.candidateContacts.take(6).forEach { candidate ->
+                  OutlinedButton(
+                    onClick = { viewModel.onSelectAmbiguousContact(candidate) },
+                    modifier = Modifier.fillMaxWidth(),
+                  ) {
+                    Text("${candidate.displayName} • ${candidate.phoneNumber}")
+                  }
+                }
+              }
+              if (phoneAction.needsContactsPermission || phoneAction.targetNumber.isBlank()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                  if (phoneAction.needsContactsPermission) {
+                    TextButton(onClick = { contactsPermissionLauncher.launch(Manifest.permission.READ_CONTACTS) }) {
+                      Text("Allow Contacts")
+                    }
+                  }
+                  TextButton(onClick = { pickContactLauncher.launch(null) }) {
+                    Text("Pick Contact")
+                  }
+                }
+              }
+            }
+          },
           confirmButton = {
             Button(
               onClick = viewModel::onConfirmPendingPhoneAction,
+              enabled = !phoneAction.isContactAmbiguous,
               modifier = Modifier.testTag("confirm_phone_action_button"),
             ) {
               Text("Open Composer")
@@ -752,10 +914,46 @@ fun MainChatScreen(
         AlertDialog(
           onDismissRequest = viewModel::onDismissPendingActions,
           title = { Text("Confirm ${socialAction.platform.displayName}") },
-          text = { Text(socialAction.summary) },
+          text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+              Text(socialAction.summary)
+              if (socialAction.noteOrLimitation.isNotBlank()) {
+                Text(
+                  text = socialAction.noteOrLimitation,
+                  style = MaterialTheme.typography.bodySmall,
+                  color = WarmAmber,
+                )
+              }
+              if (socialAction.candidateContacts.isNotEmpty()) {
+                socialAction.candidateContacts.take(6).forEach { candidate ->
+                  OutlinedButton(
+                    onClick = { viewModel.onSelectAmbiguousContact(candidate) },
+                    modifier = Modifier.fillMaxWidth(),
+                  ) {
+                    Text("${candidate.displayName} • ${candidate.phoneNumber}")
+                  }
+                }
+              }
+              if (socialAction.needsContactsPermission ||
+                (socialAction.platform.name == "WHATSAPP" && socialAction.isContactAmbiguous)
+              ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                  if (socialAction.needsContactsPermission) {
+                    TextButton(onClick = { contactsPermissionLauncher.launch(Manifest.permission.READ_CONTACTS) }) {
+                      Text("Allow Contacts")
+                    }
+                  }
+                  TextButton(onClick = { pickContactLauncher.launch(null) }) {
+                    Text("Pick Contact")
+                  }
+                }
+              }
+            }
+          },
           confirmButton = {
             Button(
               onClick = viewModel::onConfirmPendingSocialAction,
+              enabled = !socialAction.isContactAmbiguous,
               modifier = Modifier.testTag("confirm_social_action_button"),
             ) {
               Text("Open ${socialAction.platform.displayName}")
@@ -763,6 +961,27 @@ fun MainChatScreen(
           },
           dismissButton = {
             OutlinedButton(onClick = viewModel::onDismissPendingActions) {
+              Text("Cancel")
+            }
+          },
+        )
+      }
+
+      uiState.pendingAccessibilityAction?.let { accAction ->
+        AlertDialog(
+          onDismissRequest = viewModel::onDismissPendingAccessibilityAction,
+          title = { Text(accAction.statusLabel) },
+          text = { Text(accAction.pendingActionSummary.ifBlank { accAction.detail }) },
+          confirmButton = {
+            Button(
+              onClick = viewModel::onConfirmPendingAccessibilityAction,
+              modifier = Modifier.testTag("confirm_accessibility_action_button"),
+            ) {
+              Text("Proceed")
+            }
+          },
+          dismissButton = {
+            OutlinedButton(onClick = viewModel::onDismissPendingAccessibilityAction) {
               Text("Cancel")
             }
           },

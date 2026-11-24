@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.AlarmClock
+import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.content.FileProvider
@@ -28,6 +29,9 @@ data class PendingPhoneAction(
   val messageBody: String = "",
   val displayLabel: String,
   val summary: String,
+  val candidateContacts: List<ResolvedContact> = emptyList(),
+  val isContactAmbiguous: Boolean = false,
+  val needsContactsPermission: Boolean = false,
 )
 
 /**
@@ -35,8 +39,8 @@ data class PendingPhoneAction(
  * - Uses safe zero-permission ACTION_DIAL & ACTION_SENDTO intents (never CALL_PHONE or silent SMS).
  * - External calling / messaging ALWAYS returns a [PendingPhoneAction] requiring explicit user
  *   confirmation before launching the system dialer or SMS composer.
- * - Also exposes verified intents for Settings, Wi-Fi, Bluetooth, Camera, Gallery, Maps, Navigation,
- *   Alarms, Installed Apps, and Android Sharesheet (text & FileProvider media).
+ * - Supports resolving named contacts via [ContactResolver] when READ_CONTACTS is granted, or
+ *   offering direct Android Contact Picker / phone-number fallback when permission is not granted.
  */
 @Singleton
 class PhoneActionController @Inject constructor(
@@ -44,6 +48,7 @@ class PhoneActionController @Inject constructor(
   private val appLauncherManager: AppLauncherManager,
   private val verifier: DeviceActionVerifier,
   private val addOnRepository: AddOnRepository? = null,
+  private val contactResolver: ContactResolver? = null,
 ) {
 
   fun prepareDialNumber(phoneNumber: String, contactLabel: String = ""): PendingPhoneAction {
@@ -75,6 +80,47 @@ class PhoneActionController @Inject constructor(
         "Open system SMS composer to $label" +
           if (messageBody.isNotBlank()) " with draft: \"${messageBody.trim().take(80)}\"" else ".",
     )
+  }
+
+  fun resolveAndPreparePhoneAction(initial: PendingPhoneAction): PendingPhoneAction {
+    val resolver = contactResolver ?: return initial
+    if (initial.targetNumber.isNotBlank() && ContactResolver.looksLikeDirectPhoneNumber(initial.targetNumber)) {
+      return initial
+    }
+    val query = initial.displayLabel.trim()
+    if (query.isBlank()) return initial
+
+    return when (val lookup = resolver.resolveContact(query)) {
+      is ContactLookupOutcome.UniqueMatch -> {
+        val c = lookup.contact
+        if (initial.type == PendingPhoneActionType.DIAL_PHONE) {
+          prepareDialNumber(c.phoneNumber, c.displayName)
+        } else {
+          prepareSms(c.phoneNumber, initial.messageBody, c.displayName)
+        }
+      }
+      is ContactLookupOutcome.AmbiguousMatches -> {
+        initial.copy(
+          candidateContacts = lookup.candidates,
+          isContactAmbiguous = true,
+          needsContactsPermission = false,
+          summary = "Multiple contacts match \"$query\". Choose the exact contact to continue.",
+        )
+      }
+      is ContactLookupOutcome.PermissionRequired -> {
+        initial.copy(
+          needsContactsPermission = true,
+          summary =
+            "Grant Contacts access or tap Pick Contact so Mousomi can find \"$query\" before opening ${initial.type.title}.",
+        )
+      }
+      is ContactLookupOutcome.NotFound -> {
+        initial.copy(
+          needsContactsPermission = false,
+          summary = "No contact matched \"$query\" with a phone number. Enter a number or tap Pick Contact.",
+        )
+      }
+    }
   }
 
   fun buildDialIntent(phoneNumber: String): Intent {
@@ -176,6 +222,9 @@ class PhoneActionController @Inject constructor(
     return res
   }
 
+  fun openContactsApp(): DeviceActionResult =
+    openQuickSetting(Intent(Intent.ACTION_VIEW, ContactsContract.Contacts.CONTENT_URI), "Contacts")
+
   fun openQuickSetting(actionIntent: Intent, label: String): DeviceActionResult {
     actionIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     return dispatchVerifiedIntent(
@@ -251,9 +300,10 @@ class PhoneActionController @Inject constructor(
       val clean = command.trim()
       val lower = clean.lowercase()
 
+      // 1. Numeric SMS command
       val smsMatch =
         Regex(
-          "^(?:please\\s+)?(?:send\\s+(?:an?\\s+)?(?:sms|text\\s+message)|text|sms)\\s+(?:to\\s+)?([+\\d][\\d\\s-]{2,20})(?:\\s+(?:saying|with\\s+message|:)\\s+(.+))?$",
+          "^(?:please\\s+)?(?:send\\s+(?:an?\\s+)?(?:sms|text\\s+message)|text|sms)\\s+(?:to\\s+)?([+\\d][\\d\\s()-]{2,20})(?:\\s+(?:saying|with\\s+message|:)\\s+(.+))?$",
           RegexOption.IGNORE_CASE,
         ).find(clean)
       if (smsMatch != null) {
@@ -270,7 +320,30 @@ class PhoneActionController @Inject constructor(
         }
       }
 
-      if (lower.startsWith("call ") || lower.startsWith("dial ") || lower.startsWith("phone ")) {
+      // 2. Named-contact SMS command: "Send SMS to Alice saying I will be late"
+      val namedSmsMatch =
+        Regex(
+          "^(?:please\\s+)?(?:send\\s+(?:an?\\s+)?(?:sms|text\\s+message)|text|sms)\\s+(?:to\\s+)?([A-Za-z][A-Za-z\\s.'-]{1,40}?)\\s+(?:saying|with\\s+message|:)\\s+(.+)$",
+          RegexOption.IGNORE_CASE,
+        ).find(clean)
+      if (namedSmsMatch != null) {
+        val name = namedSmsMatch.groupValues[1].trim()
+        val body = namedSmsMatch.groupValues[2].trim()
+        if (name.isNotBlank()) {
+          return PendingPhoneAction(
+            type = PendingPhoneActionType.SEND_SMS,
+            targetNumber = "",
+            messageBody = body,
+            displayLabel = name,
+            summary = "Resolve contact \"$name\" and open SMS composer (\"${body.take(70)}\").",
+          )
+        }
+      }
+
+      // 3. Numeric Dial / Call command
+      if (lower.startsWith("call ") || lower.startsWith("dial ") || lower.startsWith("phone ") ||
+        lower.startsWith("please call ") || lower.startsWith("please dial ")
+      ) {
         val token = Regex("([+\\d][\\d\\s()-]{1,20}\\d|\\d{3,})").find(clean)?.groupValues?.getOrNull(1).orEmpty()
         val digits = sanitizePhoneNumber(token)
         if (digits.length >= 3) {
@@ -279,6 +352,19 @@ class PhoneActionController @Inject constructor(
             targetNumber = digits,
             displayLabel = digits,
             summary = "Open Android Phone Dialer with $digits (you tap Call yourself).",
+          )
+        }
+        val targetName =
+          clean
+            .replace(Regex("^(?:please\\s+)?(?:call|dial|phone)\\s+", RegexOption.IGNORE_CASE), "")
+            .trim()
+            .trimEnd('.', '!', '?')
+        if (targetName.length in 2..48 && targetName.any { it.isLetter() }) {
+          return PendingPhoneAction(
+            type = PendingPhoneActionType.DIAL_PHONE,
+            targetNumber = "",
+            displayLabel = targetName,
+            summary = "Look up contact \"$targetName\" and open Android Phone Dialer (you tap Call yourself).",
           )
         }
       }

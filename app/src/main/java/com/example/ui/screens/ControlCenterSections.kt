@@ -541,14 +541,15 @@ fun NotificationsAndAutomationSection(
   onCancelAutomation: (AutomationTaskRecord) -> Unit,
   onOpenNotificationAccessSettings: () -> Unit,
   onRequestAssistantRole: () -> Unit,
+  onOpenAccessibilitySetup: () -> Unit = {},
 ) {
   var quickNoteArg by remember { mutableStateOf("") }
   var reminderTitle by remember { mutableStateOf("") }
 
   Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
     StudioCard(
-      title = "9. Smart Notification Intelligence",
-      subtitle = "User-enabled Notification Access with strict OTP & 2FA code blocking",
+      title = "9. Smart Notification & Read-Aloud",
+      subtitle = "User-enabled Notification Access with OTP blocking, ringer respect & pause control",
     ) {
       ToggleRow(
         title = "Enable Notification Summaries",
@@ -559,11 +560,76 @@ fun NotificationsAndAutomationSection(
         },
         testTag = "notification_intel_switch",
       )
+      ToggleRow(
+        title = "Read Incoming Notifications Aloud",
+        subtitle = "Announces incoming WhatsApp & app alerts when phone is not silent/vibrate",
+        checked = uiState.notificationConfig.readAloudEnabled,
+        onCheckedChange = {
+          onUpdateNotificationConfig(uiState.notificationConfig.copy(readAloudEnabled = it))
+        },
+        testTag = "notification_read_aloud_switch",
+      )
+      if (uiState.notificationConfig.readAloudEnabled) {
+        ToggleRow(
+          title = "Read Full Message Content Aloud",
+          subtitle = "Off = announces sender & app only; On = reads text (OTPs still blocked)",
+          checked = uiState.notificationConfig.readAloudContentEnabled,
+          onCheckedChange = {
+            onUpdateNotificationConfig(uiState.notificationConfig.copy(readAloudContentEnabled = it))
+          },
+          testTag = "notification_read_content_switch",
+        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          OutlinedButton(
+            onClick = {
+              onUpdateNotificationConfig(
+                uiState.notificationConfig.copy(readAloudPaused = !uiState.notificationConfig.readAloudPaused)
+              )
+            },
+            modifier = Modifier.weight(1f).testTag("notification_pause_resume_button"),
+          ) {
+            Text(
+              if (uiState.notificationConfig.readAloudPaused) "Resume Read-Aloud"
+              else "Pause Read-Aloud"
+            )
+          }
+        }
+        Text("Mute specific apps from Read-Aloud:", style = MaterialTheme.typography.labelMedium)
+        Row(
+          modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          listOf(
+            "com.whatsapp" to "WhatsApp",
+            "com.instagram.android" to "Instagram",
+            "com.google.android.gm" to "Gmail",
+          ).forEach { (pkg, label) ->
+            val excluded = pkg in uiState.notificationConfig.excludedPackages
+            FilterChip(
+              selected = excluded,
+              onClick = {
+                val next =
+                  if (excluded) uiState.notificationConfig.excludedPackages - pkg
+                  else uiState.notificationConfig.excludedPackages + pkg
+                onUpdateNotificationConfig(uiState.notificationConfig.copy(excludedPackages = next))
+              },
+              label = { Text(if (excluded) "$label (Muted)" else label) },
+              modifier = Modifier.testTag("notif_exclude_$label"),
+            )
+          }
+        }
+      }
       OutlinedButton(
         onClick = onOpenNotificationAccessSettings,
         modifier = Modifier.fillMaxWidth(),
       ) {
         Text("Manage Android Notification Access")
+      }
+      OutlinedButton(
+        onClick = onOpenAccessibilitySetup,
+        modifier = Modifier.fillMaxWidth().testTag("open_accessibility_setup_button"),
+      ) {
+        Text("Optional Accessibility Assistant Setup")
       }
       val context = LocalContext.current
       val roleStatus = remember(context) { AssistantRoleHelper.getStatus(context) }

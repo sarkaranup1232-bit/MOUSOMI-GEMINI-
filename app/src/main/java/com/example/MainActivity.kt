@@ -50,6 +50,7 @@ import com.example.service.MediaProjectionCaptureService
 import com.example.service.MousomiOverlayService
 import com.example.ui.components.EdgeLightPerimeterOverlay
 import com.example.ui.components.MousomiDesignTokens
+import com.example.ui.screens.AccessibilityOnboardingScreen
 import com.example.ui.screens.AssistantHubScreen
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.ControlCenterScreen
@@ -72,6 +73,7 @@ object MousomiRoutes {
   const val PERMISSIONS = "permissions"
   const val ASSISTANT_HUB = "assistant_hub"
   const val LENS = "lens"
+  const val ACCESSIBILITY = "accessibility"
 }
 
 @AndroidEntryPoint
@@ -209,6 +211,57 @@ class MainActivity : ComponentActivity() {
         }
       }
 
+      val screenRecordingConsentLauncher =
+        rememberLauncherForActivityResult(
+          contract = ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+          val data = result.data
+          if (result.resultCode == Activity.RESULT_OK && data != null) {
+            val svcIntent =
+              MediaProjectionCaptureService.buildStartIntent(
+                context = this@MainActivity,
+                resultCode = result.resultCode,
+                data = data,
+                forScreenSelection = false,
+                captureMode = MediaProjectionCaptureService.CAPTURE_MODE_SCREEN_RECORDING,
+              )
+            ContextCompat.startForegroundService(this@MainActivity, svcIntent)
+          } else {
+            viewModel.onScreenRecordingConsentCancelled()
+          }
+        }
+
+      val startScreenRecordingFlow: () -> Unit = {
+        viewModel.onMarkScreenRecordingAwaitingConsent()
+        val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+        if (mgr != null) {
+          screenRecordingConsentLauncher.launch(mgr.createScreenCaptureIntent())
+        } else {
+          viewModel.onScreenRecordingConsentCancelled()
+        }
+      }
+
+      val stopScreenRecordingFlow: () -> Unit = {
+        startService(MediaProjectionCaptureService.buildStopRecordingIntent(this@MainActivity))
+      }
+
+      val cancelScreenRecordingFlow: () -> Unit = {
+        startService(MediaProjectionCaptureService.buildCancelRecordingIntent(this@MainActivity))
+      }
+
+      LaunchedEffect(uiState.pendingScreenRecordingServiceAction) {
+        when (uiState.pendingScreenRecordingServiceAction) {
+          "STOP" -> {
+            stopScreenRecordingFlow()
+            viewModel.onConsumePendingScreenRecordingServiceAction()
+          }
+          "CANCEL" -> {
+            cancelScreenRecordingFlow()
+            viewModel.onConsumePendingScreenRecordingServiceAction()
+          }
+        }
+      }
+
       val activeQuickAction by pendingQuickActionState
       val activePopupAction by pendingPopupActionState
       val activeAttachScreenSelection by pendingAttachScreenSelectionState
@@ -278,9 +331,9 @@ class MainActivity : ComponentActivity() {
         }
       }
 
-      // Sync foreground microphone service during active user-initiated Live Voice sessions
-      LaunchedEffect(uiState.isGeminiLiveOpen, uiState.hasAudioPermission) {
-        if (uiState.isGeminiLiveOpen && uiState.hasAudioPermission) {
+      // Sync foreground microphone service during active user-initiated Live Voice sessions (in-app or Floating Live Mode)
+      LaunchedEffect(uiState.isGeminiLiveOpen, uiState.isFloatingLiveModeActive, uiState.hasAudioPermission) {
+        if ((uiState.isGeminiLiveOpen || uiState.isFloatingLiveModeActive) && uiState.hasAudioPermission) {
           ContextCompat.startForegroundService(
             this@MainActivity,
             LiveVoiceSessionService.buildStartIntent(this@MainActivity),
@@ -329,6 +382,9 @@ class MainActivity : ComponentActivity() {
                 onRequestStartScreenShare = startScreenShareFlow,
                 onStopScreenShare = stopScreenShareFlow,
                 onRequestStartScreenSelection = startScreenSelectionFlow,
+                onRequestStartScreenRecording = startScreenRecordingFlow,
+                onStopScreenRecording = stopScreenRecordingFlow,
+                onCancelScreenRecording = cancelScreenRecordingFlow,
                 onNavigateToAssistantHub = { tab ->
                   viewModel.onSetRequestedHubTab(tab)
                   navController.navigate(MousomiRoutes.ASSISTANT_HUB) { launchSingleTop = true }
@@ -442,6 +498,9 @@ class MainActivity : ComponentActivity() {
                 onOpenFullPermissionCenter = {
                   navController.navigate(MousomiRoutes.PERMISSIONS) { launchSingleTop = true }
                 },
+                onOpenAccessibilitySetup = {
+                  navController.navigate(MousomiRoutes.ACCESSIBILITY) { launchSingleTop = true }
+                },
                 onTriggerEmergencyStop = viewModel::onTriggerEmergencyStop,
                 onBack = { navController.popBackStack() },
               )
@@ -464,6 +523,22 @@ class MainActivity : ComponentActivity() {
                 onOpenAssistantSettings = {
                   assistantRoleLauncher.launch(AssistantRoleHelper.createRequestAssistantIntent(this@MainActivity))
                 },
+                onOpenAccessibilitySetup = {
+                  navController.navigate(MousomiRoutes.ACCESSIBILITY) { launchSingleTop = true }
+                },
+                onBack = { navController.popBackStack() },
+              )
+            }
+
+            composable(MousomiRoutes.ACCESSIBILITY) {
+              AccessibilityOnboardingScreen(
+                workflowState = uiState.accessibilityState,
+                isOsAccessibilityEnabled = PermissionCenterHelper.isAccessibilityEnabled(this@MainActivity),
+                onRefreshState = {
+                  viewModel.onRefreshAccessibilityState()
+                  viewModel.onRefreshPermissions()
+                },
+                onStopWorkflow = viewModel::onStopAccessibilityWorkflow,
                 onBack = { navController.popBackStack() },
               )
             }

@@ -4,8 +4,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -53,6 +53,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,8 +66,11 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
@@ -76,7 +80,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.core.screen.DrawingController
+import com.example.core.screen.InternalViewCaptureHelper
 import com.example.core.screen.RegionCropper
+import com.example.core.storage.TempMediaCacheManager
 import com.example.domain.model.AnnotationStroke
 import com.example.domain.model.DrawingTool
 import com.example.domain.model.NormBoundingBox
@@ -84,6 +90,7 @@ import com.example.domain.model.NormPoint
 import com.example.ui.theme.ElectricBlue
 import com.example.ui.theme.NeonCyan
 import java.io.File
+import kotlinx.coroutines.launch
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -113,6 +120,7 @@ fun DrawingAnnotationOverlay(
   backgroundImagePath: String? = null,
   backgroundImageUri: String? = null,
   onSaveDrawing: ((NormBoundingBox, List<AnnotationStroke>) -> Unit)? = null,
+  onAttachMarkedRegion: ((NormBoundingBox, List<AnnotationStroke>, File?) -> Unit)? = null,
 ) {
   val controller = remember { DrawingController() }
   val drawState by controller.state.collectAsState()
@@ -122,6 +130,9 @@ fun DrawingAnnotationOverlay(
   var textInput by remember { mutableStateOf("") }
   var showDiscardConfirmDialog by remember { mutableStateOf(false) }
   val textMeasurer = rememberTextMeasurer()
+  val localView = LocalView.current
+  val localContext = LocalContext.current
+  val scope = rememberCoroutineScope()
 
   val clearTemporarySessionState: () -> Unit = {
     controller.clear()
@@ -175,34 +186,57 @@ fun DrawingAnnotationOverlay(
         Modifier
           .fillMaxSize()
           .pointerInput(drawState.selectedTool, drawState.selectedColorArgb, drawState.strokeWidthPx, drawState.strokeAlpha) {
-            detectTapGestures { offset ->
-              val norm = NormPoint((offset.x / size.width).coerceIn(0f, 1f), (offset.y / size.height).coerceIn(0f, 1f))
-              when (drawState.selectedTool) {
-                DrawingTool.POINTER -> controller.addPointerDot(norm)
-                DrawingTool.TEXT -> {
-                  pendingTextLocation = norm
-                  textInput = ""
+            val touchSlop = viewConfiguration.touchSlop
+            awaitEachGesture {
+              val down = awaitFirstDown(requireUnconsumed = false)
+              down.consume()
+              val w = size.width.coerceAtLeast(1).toFloat()
+              val h = size.height.coerceAtLeast(1).toFloat()
+              val startNorm = NormPoint((down.position.x / w).coerceIn(0f, 1f), (down.position.y / h).coerceIn(0f, 1f))
+              val isTapTool =
+                drawState.selectedTool == DrawingTool.POINTER ||
+                  drawState.selectedTool == DrawingTool.TEXT ||
+                  drawState.selectedTool == DrawingTool.ERASER
+
+              var movedBeyondSlop = false
+              if (!isTapTool) {
+                controller.beginStroke(startNorm)
+              }
+
+              while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull() ?: break
+                if (change.changedToUpIgnoreConsumed() || !change.pressed) {
+                  change.consume()
+                  break
                 }
-                DrawingTool.ERASER -> controller.undo()
-                else -> Unit
+                val dist = hypot(change.position.x - down.position.x, change.position.y - down.position.y)
+                if (dist > touchSlop) {
+                  movedBeyondSlop = true
+                }
+                if (!isTapTool) {
+                  val pos = change.position
+                  controller.appendStrokePoint(
+                    NormPoint((pos.x / w).coerceIn(0f, 1f), (pos.y / h).coerceIn(0f, 1f))
+                  )
+                }
+                change.consume()
+              }
+
+              if (isTapTool && !movedBeyondSlop) {
+                when (drawState.selectedTool) {
+                  DrawingTool.POINTER -> controller.addPointerDot(startNorm)
+                  DrawingTool.TEXT -> {
+                    pendingTextLocation = startNorm
+                    textInput = ""
+                  }
+                  DrawingTool.ERASER -> controller.undo()
+                  else -> Unit
+                }
+              } else if (!isTapTool) {
+                controller.commitStroke()
               }
             }
-          }
-          .pointerInput(drawState.selectedTool, drawState.selectedColorArgb, drawState.strokeWidthPx, drawState.strokeAlpha) {
-            detectDragGestures(
-              onDragStart = { start ->
-                val norm = NormPoint((start.x / size.width).coerceIn(0f, 1f), (start.y / size.height).coerceIn(0f, 1f))
-                controller.beginStroke(norm)
-              },
-              onDrag = { change, _ ->
-                change.consume()
-                val pos = change.position
-                val norm = NormPoint((pos.x / size.width).coerceIn(0f, 1f), (pos.y / size.height).coerceIn(0f, 1f))
-                controller.appendStrokePoint(norm)
-              },
-              onDragEnd = { controller.commitStroke() },
-              onDragCancel = { controller.commitStroke() },
-            )
           }
     ) {
       val allToRender =
@@ -349,6 +383,34 @@ fun DrawingAnnotationOverlay(
               valueRange = 0.25f..1.0f,
               modifier = Modifier.weight(1f),
             )
+            if (onAttachMarkedRegion != null) {
+              OutlinedButton(
+                onClick = {
+                  val box = controller.computeTargetBoundingBox()
+                  val finalStrokes = drawState.strokes
+                  controller.markSaved()
+                  scope.launch {
+                    val internalCapture =
+                      if (backgroundImagePath == null && backgroundImageUri == null) {
+                        val cache = TempMediaCacheManager(localContext.applicationContext)
+                        InternalViewCaptureHelper.captureInternalRootView(
+                          rootView = localView.rootView,
+                          window = InternalViewCaptureHelper.findWindow(localView),
+                          tempMediaCacheManager = cache,
+                        )?.file
+                      } else {
+                        null
+                      }
+                    onAttachMarkedRegion(box, finalStrokes, internalCapture)
+                  }
+                },
+                enabled = drawState.strokes.isNotEmpty(),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.height(44.dp).testTag("drawing_attach_button"),
+              ) {
+                Text("Attach", color = NeonCyan, fontSize = 12.sp)
+              }
+            }
             if (onSaveDrawing != null) {
               OutlinedButton(
                 onClick = {

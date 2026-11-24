@@ -14,16 +14,24 @@ import com.example.ai.firebase.FirebaseAiLogicService
 import com.example.ai.image.ImageStorageManager
 import com.example.ai.media.VideoAndMusicGenerationService
 import com.example.ai.provider.OneTapApiActivationService
+import com.example.core.accessibility.AccessibilityActionResult
+import com.example.core.accessibility.AccessibilityAgentController
+import com.example.core.agent.AgentTaskPlanner
+import com.example.core.agent.PlannedAgentOutcome
 import com.example.core.alarms.ReminderManager
 import com.example.core.alarms.TimerManager
 import com.example.core.assistant.AssistantSessionStateManager
 import com.example.core.assistant.EdgeActivationEdge
 import com.example.core.automation.ControlledAutomationEngine
+import com.example.core.device.AgentCommandIntent
+import com.example.core.device.AssistantAgentCommandRouter
+import com.example.core.device.ContactResolver
 import com.example.core.device.DeviceActionExecutor
 import com.example.core.device.InstalledAppRepository
 import com.example.core.device.PendingPhoneAction
 import com.example.core.device.PendingSocialAction
 import com.example.core.device.PhoneActionController
+import com.example.core.device.ResolvedContact
 import com.example.core.device.SocialIntegrationManager
 import com.example.core.image.ImageProcessor
 import com.example.core.notifications.NotificationIntelligenceEngine
@@ -40,10 +48,15 @@ import com.example.core.screen.ImageAttachmentManager
 import com.example.core.screen.ImageEditingController
 import com.example.core.screen.RectangleSelectionProcessor
 import com.example.core.screen.RegionCropper
+import com.example.core.screen.ScreenRecordingManager
+import com.example.core.screen.ScreenRecordingPhase
 import com.example.core.screen.ScreenSelectionManager
 import com.example.core.screen.ScreenShareSessionManager
+import com.example.core.screen.ScreenshotCaptureManager
 import com.example.core.screen.SelectionGeometryEngine
+import com.example.core.screen.SelectionGeometryResult
 import com.example.core.screen.SelectionToolMode
+import com.example.core.screen.SmartCropEngine
 import com.example.core.screen.VisualQueryProcessor
 import com.example.core.security.SecurityValidator
 import com.example.core.storage.TempMediaCacheManager
@@ -79,6 +92,7 @@ import com.example.domain.model.CapabilityActivationBadge
 import com.example.domain.model.ConnectionMode
 import com.example.domain.model.DetectedProviderKind
 import com.example.domain.model.DomainMessage
+import com.example.domain.model.DrawingTool
 import com.example.domain.model.EdgeLightConfig
 import com.example.domain.model.FloatingOrbConfig
 import com.example.domain.model.GeneratedImageResult
@@ -186,6 +200,13 @@ class MousomiViewModel @Inject constructor(
   private val liveVoiceSessionManager: LiveVoiceSessionManager? = null,
   private val phoneActionController: PhoneActionController? = null,
   private val socialIntegrationManager: SocialIntegrationManager? = null,
+  private val screenRecordingManager: ScreenRecordingManager? = null,
+  private val agentCommandRouter: AssistantAgentCommandRouter? = null,
+  private val screenshotCaptureManager: ScreenshotCaptureManager? = null,
+  private val smartCropEngine: SmartCropEngine? = null,
+  private val agentTaskPlanner: AgentTaskPlanner? = null,
+  private val contactResolver: ContactResolver? = null,
+  private val accessibilityAgentController: AccessibilityAgentController? = null,
 ) : ViewModel() {
 
   constructor(
@@ -236,6 +257,13 @@ class MousomiViewModel @Inject constructor(
     liveVoiceSessionManager = null,
     phoneActionController = null,
     socialIntegrationManager = null,
+    screenRecordingManager = null,
+    agentCommandRouter = null,
+    screenshotCaptureManager = null,
+    smartCropEngine = null,
+    agentTaskPlanner = null,
+    contactResolver = null,
+    accessibilityAgentController = null,
   )
 
   val geometryEngineForUi: SelectionGeometryEngine by lazy {
@@ -650,6 +678,13 @@ class MousomiViewModel @Inject constructor(
         mgr.lastStatusMessage.collectLatest { msg -> _uiState.update { it.copy(screenShareStatusMessage = msg) } }
       }
     }
+    screenRecordingManager?.let { recMgr ->
+      viewModelScope.launch {
+        recMgr.state.collectLatest { recState ->
+          _uiState.update { it.copy(screenRecordingState = recState) }
+        }
+      }
+    }
     longTermMemoryManager?.let { mem ->
       viewModelScope.launch {
         mem.observeMemories().collectLatest { list -> _uiState.update { it.copy(memories = list) } }
@@ -688,6 +723,13 @@ class MousomiViewModel @Inject constructor(
     permissionManager?.let { mgr ->
       viewModelScope.launch {
         mgr.categories.collectLatest { list -> _uiState.update { it.copy(permissionCategories = list) } }
+      }
+    }
+    accessibilityAgentController?.let { acc ->
+      viewModelScope.launch {
+        acc.state.collectLatest { accState ->
+          _uiState.update { it.copy(accessibilityState = accState) }
+        }
       }
     }
   }
@@ -1509,23 +1551,141 @@ class MousomiViewModel @Inject constructor(
       return
     }
 
-    if (editTargetId == null && attachments.isEmpty() && editTarget == null) {
-      val phoneCmd = PhoneActionController.tryParseConfirmationCommand(trimmed)
-      if (phoneCmd != null) {
+    if (editTargetId == null && editTarget == null && trimmed.isNotEmpty() && agentTaskPlanner != null) {
+      viewModelScope.launch {
+        when (val outcome = agentTaskPlanner.planAndRoute(trimmed)) {
+          is PlannedAgentOutcome.ConfirmPhoneAction -> {
+            if (attachments.isEmpty()) {
+              _uiState.update {
+                it.copy(
+                  inputText = "",
+                  pendingPhoneAction = outcome.action,
+                )
+              }
+              return@launch
+            }
+          }
+          is PlannedAgentOutcome.ConfirmSocialAction -> {
+            val firstMediaPath =
+              attachments
+                .filterIsInstance<AttachmentPreview.PickedPhotoUri>()
+                .firstOrNull()
+                ?.uri
+                ?.let { rawUri -> runCatching { Uri.parse(rawUri).path }.getOrNull() }
+                ?.takeIf { path -> File(path).exists() }
+            val enrichedAction =
+              if (outcome.action.mediaFilePath == null && firstMediaPath != null) {
+                outcome.action.copy(mediaFilePath = firstMediaPath)
+              } else {
+                outcome.action
+              }
+            if (attachments.isEmpty() || firstMediaPath != null) {
+              if (firstMediaPath != null) {
+                imageAttachmentManager?.clearStagingKeepFiles()
+              }
+              _uiState.update {
+                it.copy(
+                  inputText = "",
+                  pendingAttachments = if (firstMediaPath != null) emptyList() else it.pendingAttachments,
+                  pendingSocialAction = enrichedAction,
+                )
+              }
+              return@launch
+            }
+          }
+          is PlannedAgentOutcome.TimerRequested -> {
+            if (attachments.isEmpty()) {
+              _uiState.update { it.copy(inputText = "") }
+              val res = timerManager?.startTimer(outcome.durationSeconds, outcome.label)
+              _uiState.update {
+                it.copy(statusToastMessage = res?.second ?: "Timer scheduled for ${outcome.label}.")
+              }
+              return@launch
+            }
+          }
+          is PlannedAgentOutcome.NotificationControlHandled -> {
+            if (attachments.isEmpty()) {
+              _uiState.update {
+                it.copy(
+                  inputText = "",
+                  statusToastMessage = outcome.message,
+                )
+              }
+              return@launch
+            }
+          }
+          is PlannedAgentOutcome.AccessibilityHandled -> {
+            if (attachments.isEmpty()) {
+              val acc = outcome.result
+              if (acc.requiresConfirmation) {
+                _uiState.update {
+                  it.copy(
+                    inputText = "",
+                    pendingAccessibilityAction = acc,
+                  )
+                }
+              } else {
+                _uiState.update {
+                  it.copy(
+                    inputText = "",
+                    statusToastMessage = "${acc.statusLabel}: ${acc.detail}",
+                  )
+                }
+              }
+              return@launch
+            }
+          }
+          is PlannedAgentOutcome.LaunchCommand -> {
+            if (attachments.isEmpty() && handleRoutedAgentCommand(trimmed, outcome.intent)) {
+              return@launch
+            }
+          }
+          PlannedAgentOutcome.ForwardToMultimodalAi -> Unit
+        }
+
+        imageAttachmentManager?.clearStagingKeepFiles()
         _uiState.update {
           it.copy(
             inputText = "",
-            pendingPhoneAction = phoneCmd,
+            pendingAttachments = emptyList(),
+            activeEditTarget = null,
+          )
+        }
+        executePrompt(
+          conversationId = state.activeConversationId,
+          prompt = trimmed,
+          attachments = attachments,
+          imageGenerationRequested = requestImgGen,
+          deepResearchRequested = requestDeepResearch,
+          activeEditTarget = editTarget,
+        )
+      }
+      return
+    }
+
+    if (editTargetId == null && attachments.isEmpty() && editTarget == null) {
+      val routedCmd = agentCommandRouter?.classify(trimmed)
+      if (routedCmd != null && handleRoutedAgentCommand(trimmed, routedCmd)) {
+        return
+      }
+      val phoneCmd = PhoneActionController.tryParseConfirmationCommand(trimmed)
+      if (phoneCmd != null) {
+        val resolved = phoneActionController?.resolveAndPreparePhoneAction(phoneCmd) ?: phoneCmd
+        _uiState.update {
+          it.copy(
+            inputText = "",
+            pendingPhoneAction = resolved,
           )
         }
         return
       }
       val socialCmd = SocialIntegrationManager.tryParseSocialCommand(trimmed)
       if (socialCmd != null) {
+        val resolved = socialIntegrationManager?.resolveAndPrepareSocialAction(socialCmd) ?: socialCmd
         _uiState.update {
           it.copy(
             inputText = "",
-            pendingSocialAction = socialCmd,
+            pendingSocialAction = resolved,
           )
         }
         return
@@ -1722,6 +1882,22 @@ class MousomiViewModel @Inject constructor(
           ?: activeEditTarget.uriString?.let { imageProcessor.processUri(it).getOrNull() }
       if (targetPayload != null) {
         processedImages.add(targetPayload)
+      }
+    }
+
+    if (processedImages.isEmpty() &&
+      screenShareSessionManager != null &&
+      screenShareSessionManager.status.value != ScreenShareStatus.STOPPED &&
+      screenShareSessionManager.status.value != ScreenShareStatus.REQUESTING_CONSENT
+    ) {
+      val sharedFrame =
+        visualQueryProcessor?.prepareScreenSharePayload(
+          screenShareSessionManager = screenShareSessionManager,
+          screenshotCaptureManager = screenshotCaptureManager,
+          smartCropEngine = smartCropEngine,
+        )
+      if (sharedFrame != null) {
+        processedImages.add(sharedFrame.payload)
       }
     }
 
@@ -2065,17 +2241,57 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onExecuteDeviceCommand(command: String) {
-    val phoneCmd = PhoneActionController.tryParseConfirmationCommand(command)
-    if (phoneCmd != null) {
-      _uiState.update { it.copy(pendingPhoneAction = phoneCmd) }
-      return
-    }
-    val socialCmd = SocialIntegrationManager.tryParseSocialCommand(command)
-    if (socialCmd != null) {
-      _uiState.update { it.copy(pendingSocialAction = socialCmd) }
-      return
-    }
     viewModelScope.launch {
+      val planned = agentTaskPlanner?.planAndRoute(command)
+      when (planned) {
+        is PlannedAgentOutcome.ConfirmPhoneAction -> {
+          _uiState.update { it.copy(pendingPhoneAction = planned.action) }
+          return@launch
+        }
+        is PlannedAgentOutcome.ConfirmSocialAction -> {
+          _uiState.update { it.copy(pendingSocialAction = planned.action) }
+          return@launch
+        }
+        is PlannedAgentOutcome.TimerRequested -> {
+          val res = timerManager?.startTimer(planned.durationSeconds, planned.label)
+          _uiState.update {
+            it.copy(statusToastMessage = res?.second ?: "Timer scheduled for ${planned.label}.")
+          }
+          return@launch
+        }
+        is PlannedAgentOutcome.NotificationControlHandled -> {
+          _uiState.update { it.copy(statusToastMessage = planned.message) }
+          return@launch
+        }
+        is PlannedAgentOutcome.AccessibilityHandled -> {
+          val acc = planned.result
+          if (acc.requiresConfirmation) {
+            _uiState.update { it.copy(pendingAccessibilityAction = acc) }
+          } else {
+            _uiState.update { it.copy(statusToastMessage = "${acc.statusLabel}: ${acc.detail}") }
+          }
+          return@launch
+        }
+        is PlannedAgentOutcome.LaunchCommand -> {
+          if (handleRoutedAgentCommand(command, planned.intent)) return@launch
+        }
+        PlannedAgentOutcome.ForwardToMultimodalAi,
+        null -> Unit
+      }
+
+      val phoneCmd = PhoneActionController.tryParseConfirmationCommand(command)
+      if (phoneCmd != null) {
+        val resolved = phoneActionController?.resolveAndPreparePhoneAction(phoneCmd) ?: phoneCmd
+        _uiState.update { it.copy(pendingPhoneAction = resolved) }
+        return@launch
+      }
+      val socialCmd = SocialIntegrationManager.tryParseSocialCommand(command)
+      if (socialCmd != null) {
+        val resolved = socialIntegrationManager?.resolveAndPrepareSocialAction(socialCmd) ?: socialCmd
+        _uiState.update { it.copy(pendingSocialAction = resolved) }
+        return@launch
+      }
+
       val lower = command.trim().lowercase()
       val pac = phoneActionController
       val res =
@@ -2119,8 +2335,115 @@ class MousomiViewModel @Inject constructor(
     }
   }
 
+  fun onSelectAmbiguousContact(candidate: ResolvedContact) {
+    _uiState.update { current ->
+      val updatedPhone =
+        current.pendingPhoneAction?.let { ph ->
+          val rebuilt =
+            if (ph.type == com.example.core.device.PendingPhoneActionType.DIAL_PHONE) {
+              phoneActionController?.prepareDialNumber(candidate.phoneNumber, candidate.displayName)
+                ?: ph.copy(
+                  targetNumber = candidate.phoneNumber,
+                  displayLabel = candidate.displayName,
+                  candidateContacts = emptyList(),
+                  isContactAmbiguous = false,
+                  needsContactsPermission = false,
+                  summary = "Prepare Android Dialer for ${candidate.displayName} (${candidate.phoneNumber}). You tap Call yourself.",
+                )
+            } else {
+              phoneActionController?.prepareSms(candidate.phoneNumber, ph.messageBody, candidate.displayName)
+                ?: ph.copy(
+                  targetNumber = candidate.phoneNumber,
+                  displayLabel = candidate.displayName,
+                  candidateContacts = emptyList(),
+                  isContactAmbiguous = false,
+                  needsContactsPermission = false,
+                  summary = "Open system SMS composer to ${candidate.displayName} (${candidate.phoneNumber}).",
+                )
+            }
+          rebuilt
+        }
+      val updatedSocial =
+        current.pendingSocialAction?.let { soc ->
+          socialIntegrationManager?.prepareWhatsAppMessage(
+            phoneOrName = candidate.phoneNumber,
+            messageText = soc.captionOrMessage,
+            resolvedDisplayLabel = "${candidate.displayName} (${candidate.phoneNumber})",
+          ) ?: soc.copy(
+            recipientOrHandle = candidate.phoneNumber,
+            candidateContacts = emptyList(),
+            isContactAmbiguous = false,
+            needsContactsPermission = false,
+            summary = "Open WhatsApp composer for ${candidate.displayName} (${candidate.phoneNumber}).",
+          )
+        }
+      current.copy(
+        pendingPhoneAction = updatedPhone,
+        pendingSocialAction = updatedSocial,
+      )
+    }
+  }
+
+  fun onPickedContactUri(uri: Uri) {
+    val resolved = contactResolver?.parsePickedContactUri(uri)
+    if (resolved == null) {
+      _uiState.update {
+        it.copy(statusToastMessage = "Selected contact has no phone number or Contacts permission is required for that picker URI.")
+      }
+      return
+    }
+    onSelectAmbiguousContact(resolved)
+  }
+
+  fun onReResolvePendingContactAction() {
+    onRefreshPermissions()
+    _uiState.update { current ->
+      val updatedPhone =
+        current.pendingPhoneAction?.let { ph ->
+          phoneActionController?.resolveAndPreparePhoneAction(ph) ?: ph
+        }
+      val updatedSocial =
+        current.pendingSocialAction?.let { soc ->
+          socialIntegrationManager?.resolveAndPrepareSocialAction(soc) ?: soc
+        }
+      current.copy(
+        pendingPhoneAction = updatedPhone,
+        pendingSocialAction = updatedSocial,
+      )
+    }
+  }
+
+  fun onRefreshAccessibilityState() {
+    accessibilityAgentController?.refreshVisibleNodes()
+  }
+
+  fun onStopAccessibilityWorkflow() {
+    accessibilityAgentController?.stopAllAutomation()
+    _uiState.update { it.copy(pendingAccessibilityAction = null, statusToastMessage = "Stopped Accessibility automation.") }
+  }
+
+  fun onConfirmPendingAccessibilityAction() {
+    val pending = _uiState.value.pendingAccessibilityAction ?: return
+    _uiState.update { it.copy(pendingAccessibilityAction = null) }
+    val target = pending.targetLabelToConfirm
+    if (target.isBlank()) return
+    val res = accessibilityAgentController?.performNodeClick(targetText = target, confirmedSensitiveAction = true)
+    val toast = res?.let { "${it.statusLabel}: ${it.detail}" } ?: "Accessibility Assistant unavailable."
+    _uiState.update { it.copy(statusToastMessage = toast) }
+  }
+
+  fun onDismissPendingAccessibilityAction() {
+    _uiState.update { it.copy(pendingAccessibilityAction = null) }
+  }
+
   fun onDismissPendingActions() {
-    _uiState.update { it.copy(pendingPhoneAction = null, pendingSocialAction = null) }
+    _uiState.update {
+      it.copy(
+        pendingPhoneAction = null,
+        pendingSocialAction = null,
+        pendingAccessibilityAction = null,
+      )
+    }
   }
 
   fun onLaunchInstalledApp(appName: String) {
@@ -2259,13 +2582,13 @@ class MousomiViewModel @Inject constructor(
     }
   }
 
-  fun onAnalyzeAnnotatedRegion(
+  fun onAttachAnnotatedRegion(
     box: NormBoundingBox,
     strokes: List<AnnotationStroke>,
+    internalCaptureFile: File? = null,
   ) {
     val targetImage = _uiState.value.drawingTargetImage
     _uiState.update { it.copy(isDrawingOverlayOpen = false, drawingTargetImage = null) }
-    val sourcePath = targetImage?.filePath ?: screenShareSessionManager?.getLatestFrame()?.filePath
     val notesFromLabels =
       strokes.mapNotNull { it.textLabel.takeIf { lbl -> lbl.isNotBlank() } }.joinToString(", ")
 
@@ -2277,41 +2600,155 @@ class MousomiViewModel @Inject constructor(
         promptNote = notesFromLabels,
       )
 
-      val cropUriString: String? =
-        if (sourcePath != null && tempMediaCacheManager != null) {
-          val raw = BitmapFactory.decodeFile(sourcePath)
-          val cropped = raw?.let { RegionCropper.cropBitmapToNormBox(it, box) }
-          raw?.recycle()
-          if (cropped != null) {
-            val baos = ByteArrayOutputStream()
-            cropped.compress(Bitmap.CompressFormat.JPEG, 85, baos)
-            cropped.recycle()
-            val savedFile = tempMediaCacheManager.saveTempJpeg(baos.toByteArray(), prefix = "annotated_crop_")
-            Uri.fromFile(savedFile).toString()
-          } else null
-        } else null
+      val croppedFile = cropAnnotationRegionToFile(targetImage?.filePath, internalCaptureFile, box, strokes)
+      internalCaptureFile?.let { f -> if (f.exists()) tempMediaCacheManager?.cleanupFile(f) }
+      if (croppedFile == null) {
+        val shareStatus = screenShareSessionManager?.status?.value
+        val reason =
+          if (shareStatus == null || shareStatus == ScreenShareStatus.STOPPED || shareStatus == ScreenShareStatus.REQUESTING_CONSENT) {
+            "No image source or active Screen Share frame. Turn on Share Screen to capture external content, or open an image first."
+          } else {
+            "Unable to crop the selected region cleanly. Please redraw around the target."
+          }
+        _uiState.update { it.copy(statusToastMessage = reason) }
+        return@launch
+      }
 
+      val attachMgr = imageAttachmentManager
+      val detectedShape = inferShapeFromStrokes(strokes)
+      val sourceForEdit = targetImage?.filePath ?: screenShareSessionManager?.getLatestFrame()?.filePath
+      if (attachMgr != null) {
+        attachMgr.attachCroppedVisual(
+          croppedFile = croppedFile,
+          sourceFrameFilePath = sourceForEdit,
+          captureMetadata = null,
+          normCropRect = box,
+          detectedShape = detectedShape,
+          isSettling = false,
+        )
+      } else {
+        val uriString = Uri.fromFile(croppedFile).toString()
+        _uiState.update { state ->
+          val updated = (state.pendingAttachments + AttachmentPreview.PickedPhotoUri(uriString)).distinct().take(4)
+          state.copy(pendingAttachments = updated)
+        }
+      }
+
+      _uiState.update {
+        it.copy(
+          shouldRequestComposerFocus = true,
+          inputText =
+            if (it.inputText.isBlank() && notesFromLabels.isNotBlank()) notesFromLabels else it.inputText,
+          statusToastMessage = "Cropped selection attached to Chat Bar.",
+        )
+      }
+    }
+  }
+
+  fun onAnalyzeAnnotatedRegion(
+    box: NormBoundingBox,
+    strokes: List<AnnotationStroke>,
+  ) {
+    val targetImage = _uiState.value.drawingTargetImage
+    _uiState.update { it.copy(isDrawingOverlayOpen = false, drawingTargetImage = null) }
+    val notesFromLabels =
+      strokes.mapNotNull { it.textLabel.takeIf { lbl -> lbl.isNotBlank() } }.joinToString(", ")
+
+    viewModelScope.launch {
+      part5Repository?.saveDrawingAnnotation(
+        targetMediaId = targetImage?.mediaId,
+        strokes = strokes,
+        box = box,
+        promptNote = notesFromLabels,
+      )
+
+      val croppedFile = cropAnnotationRegionToFile(targetImage?.filePath, null, box, strokes)
+      if (croppedFile == null) {
+        _uiState.update {
+          it.copy(
+            statusToastMessage =
+              "Cannot capture external screen without active Screen Share. Enable Share Screen or attach an image first."
+          )
+        }
+        return@launch
+      }
+
+      val cropUriString = Uri.fromFile(croppedFile).toString()
       val prompt =
         buildString {
           append(if (targetImage != null) "Analyze this selected region of the image" else "Analyze this annotated screen region")
           if (notesFromLabels.isNotBlank()) {
             append(" (user annotations: $notesFromLabels)")
           }
-          append(
-            " at normalized area [left=${"%.2f".format(box.left)}, top=${"%.2f".format(box.top)}, right=${"%.2f".format(box.right)}, bottom=${"%.2f".format(box.bottom)}]. Explain clearly what is shown."
-          )
+          append(". Explain clearly what is shown.")
         }
-
-      val attachments =
-        if (cropUriString != null) listOf(AttachmentPreview.PickedPhotoUri(cropUriString))
-        else listOf(AttachmentPreview.SampleInlineArtwork)
 
       executePrompt(
         conversationId = _uiState.value.activeConversationId,
         prompt = prompt,
-        attachments = attachments,
+        attachments = listOf(AttachmentPreview.PickedPhotoUri(cropUriString)),
       )
     }
+  }
+
+  private fun inferShapeFromStrokes(strokes: List<AnnotationStroke>): DetectedRegionShape {
+    val primary = strokes.lastOrNull { it.points.isNotEmpty() } ?: return DetectedRegionShape.RECTANGLE
+    return when (primary.tool) {
+      DrawingTool.CIRCLE -> DetectedRegionShape.CIRCLE
+      DrawingTool.RECTANGLE, DrawingTool.SELECTION -> DetectedRegionShape.RECTANGLE
+      DrawingTool.FREEHAND, DrawingTool.HIGHLIGHTER -> DetectedRegionShape.FREEHAND_LOOP
+      else -> DetectedRegionShape.RECTANGLE
+    }
+  }
+
+  private suspend fun cropAnnotationRegionToFile(
+    targetFilePath: String?,
+    internalCaptureFile: File?,
+    box: NormBoundingBox,
+    strokes: List<AnnotationStroke>,
+  ): File? {
+    val sourcePath =
+      targetFilePath?.takeIf { it.isNotBlank() && File(it).exists() }
+        ?: screenShareSessionManager?.getLatestFrame()?.filePath?.takeIf { it.isNotBlank() && File(it).exists() }
+        ?: internalCaptureFile?.takeIf { it.exists() && it.length() > 0L }?.absolutePath
+        ?: return null
+
+    val shape = inferShapeFromStrokes(strokes)
+    val contour =
+      strokes
+        .filter { it.points.size >= 3 }
+        .flatMap { it.points }
+        .takeIf { shape == DetectedRegionShape.FREEHAND_LOOP || shape == DetectedRegionShape.CIRCLE }
+        .orEmpty()
+
+    val cropEngine = smartCropEngine
+    if (cropEngine != null) {
+      val snapped =
+        SelectionGeometryResult(
+          boundingBox = box,
+          detectedShape = shape,
+          simplifiedContour = contour,
+        )
+      val cropped =
+        cropEngine.cropSelectionToFile(
+          sourceFilePath = sourcePath,
+          snappedResult = snapped,
+          prefix = "sel_annotated_",
+        )
+      if (cropped.isSuccess) {
+        return cropped.getOrNull()?.file
+      }
+    }
+
+    if (tempMediaCacheManager == null) return null
+    val raw = BitmapFactory.decodeFile(sourcePath) ?: return null
+    val cropped = RegionCropper.cropBitmapToNormBox(raw, box)
+    raw.recycle()
+    if (cropped == null) return null
+    val baos = ByteArrayOutputStream()
+    cropped.compress(Bitmap.CompressFormat.JPEG, 88, baos)
+    cropped.recycle()
+    return tempMediaCacheManager.saveTempJpeg(baos.toByteArray(), prefix = "sel_annotated_")
   }
 
   fun analyzeLatestScreenFrameOrPrompt(onRequestScreenShare: () -> Unit = {}) {
@@ -2787,12 +3224,194 @@ class MousomiViewModel @Inject constructor(
     pendingOpenLiveAfterPermission = true
   }
 
-  fun onShareScreenWithLive(onRequestStartScreenShare: () -> Unit) {
+  fun onShareScreenWithLive(
+    onRequestStartScreenShare: () -> Unit,
+    onRequestStopScreenShare: () -> Unit = {},
+  ) {
+    val active =
+      _uiState.value.screenShareStatus != ScreenShareStatus.STOPPED &&
+        _uiState.value.screenShareStatus != ScreenShareStatus.REQUESTING_CONSENT
+    if (active) {
+      onRequestStopScreenShare()
+      return
+    }
     if (!_uiState.value.isGeminiLiveOpen) {
       onToggleGeminiLive(true)
     }
     if (_uiState.value.screenShareStatus == ScreenShareStatus.STOPPED) {
       onRequestStartScreenShare()
+    }
+  }
+
+  fun onSetFloatingLiveModeActive(active: Boolean) {
+    _uiState.update {
+      it.copy(
+        isFloatingLiveModeActive = active,
+        isGeminiLiveOpen = if (active) false else it.isGeminiLiveOpen,
+        isGeminiLiveMinimized = false,
+      )
+    }
+  }
+
+  fun onMarkScreenRecordingAwaitingConsent() {
+    screenRecordingManager?.markAwaitingConsent()
+  }
+
+  fun onScreenRecordingConsentCancelled() {
+    screenRecordingManager?.markCancelled("Screen recording permission cancelled.")
+  }
+
+  fun onDismissScreenRecording() {
+    screenRecordingManager?.resetToIdle()
+  }
+
+  fun onConsumePendingScreenRecordingServiceAction() {
+    _uiState.update { it.copy(pendingScreenRecordingServiceAction = null) }
+  }
+
+  private fun handleRoutedAgentCommand(
+    rawInput: String,
+    intent: AgentCommandIntent,
+  ): Boolean {
+    return when (intent) {
+      is AgentCommandIntent.StartScreenRecording -> {
+        screenRecordingManager?.requestConfirmation()
+        _uiState.update {
+          it.copy(
+            inputText = "",
+            statusToastMessage = "Review screen recording prompt to grant OS capture consent.",
+          )
+        }
+        true
+      }
+      AgentCommandIntent.StopScreenRecording -> {
+        _uiState.update {
+          it.copy(
+            inputText = "",
+            pendingScreenRecordingServiceAction = "STOP",
+            statusToastMessage = "Stopping & saving screen recording…",
+          )
+        }
+        true
+      }
+      AgentCommandIntent.CancelScreenRecording -> {
+        _uiState.update {
+          it.copy(
+            inputText = "",
+            pendingScreenRecordingServiceAction = "CANCEL",
+            statusToastMessage = "Cancelling screen recording…",
+          )
+        }
+        true
+      }
+      AgentCommandIntent.StartScreenSelection -> {
+        _uiState.update {
+          it.copy(
+            inputText = "",
+            pendingStartScreenSelection = true,
+            statusToastMessage = "Starting screen area selection…",
+          )
+        }
+        true
+      }
+      AgentCommandIntent.StartScreenShare -> {
+        _uiState.update {
+          it.copy(
+            inputText = "",
+            statusToastMessage = "Tap Screen Share or Live Share pill to grant screen capture consent.",
+          )
+        }
+        true
+      }
+      AgentCommandIntent.StopScreenShare -> {
+        onStopScreenShare()
+        _uiState.update {
+          it.copy(
+            inputText = "",
+            statusToastMessage = "Screen sharing stopped.",
+          )
+        }
+        true
+      }
+      is AgentCommandIntent.AnalyzeCurrentScreen -> {
+        val active =
+          _uiState.value.screenShareStatus != ScreenShareStatus.STOPPED &&
+            _uiState.value.screenShareStatus != ScreenShareStatus.REQUESTING_CONSENT
+        if (!active) {
+          _uiState.update {
+            it.copy(
+              inputText = "",
+              statusToastMessage = "Screen sharing is OFF. Enable Share Screen first to analyze the screen.",
+            )
+          }
+          true
+        } else {
+          false
+        }
+      }
+      is AgentCommandIntent.UnsupportedSilentToggle -> {
+        val convId = _uiState.value.activeConversationId
+        _uiState.update {
+          it.copy(
+            inputText = "",
+            statusToastMessage = intent.explanation,
+          )
+        }
+        viewModelScope.launch {
+          val now = System.currentTimeMillis()
+          chatRepository.upsertMessage(
+            DomainMessage(
+              id = "msg_${UUID.randomUUID()}",
+              conversationId = convId,
+              isUser = true,
+              text = rawInput,
+              timestampMs = now,
+            )
+          )
+          intent.fallbackSettingsQuery?.let { deviceActionExecutor?.executeNaturalCommand(it) }
+          chatRepository.upsertMessage(
+            DomainMessage(
+              id = "msg_${UUID.randomUUID()}",
+              conversationId = convId,
+              isUser = false,
+              text = intent.explanation,
+              timestampMs = now + 1,
+              modelUsed = "Device Agent",
+            )
+          )
+        }
+        true
+      }
+      is AgentCommandIntent.OpenTargetOrSetting -> {
+        val convId = _uiState.value.activeConversationId
+        _uiState.update { it.copy(inputText = "") }
+        viewModelScope.launch {
+          val now = System.currentTimeMillis()
+          val res = deviceActionExecutor?.executeNaturalCommand(intent.command)
+          chatRepository.upsertMessage(
+            DomainMessage(
+              id = "msg_${UUID.randomUUID()}",
+              conversationId = convId,
+              isUser = true,
+              text = rawInput,
+              timestampMs = now,
+            )
+          )
+          if (res != null) {
+            chatRepository.upsertMessage(
+              DomainMessage(
+                id = "msg_${UUID.randomUUID()}",
+                conversationId = convId,
+                isUser = false,
+                text = res.verifiedDetail,
+                timestampMs = now + 1,
+                modelUsed = "Device Agent",
+              )
+            )
+          }
+        }
+        true
+      }
     }
   }
 
@@ -2962,7 +3581,14 @@ class MousomiViewModel @Inject constructor(
     val clean = promptText.trim()
     if (clean.isEmpty()) return
     liveSessionTurnsCount += 1
-    if (_uiState.value.isUsingGeminiLiveSocket && geminiLiveVoiceEngine != null) {
+    val cmd = agentCommandRouter?.classify(clean)
+    if (cmd != null && handleRoutedAgentCommand(clean, cmd)) {
+      return
+    }
+    val screenShareActive =
+      _uiState.value.screenShareStatus != ScreenShareStatus.STOPPED &&
+        _uiState.value.screenShareStatus != ScreenShareStatus.REQUESTING_CONSENT
+    if (!screenShareActive && _uiState.value.isUsingGeminiLiveSocket && geminiLiveVoiceEngine != null) {
       geminiLiveVoiceEngine.sendFollowUpText(clean)
       return
     }

@@ -159,7 +159,11 @@ class VisualQueryProcessor @Inject constructor(
       ProcessedImagePayload(
         uriString = uriString,
         mimeType =
-          if (filePath.endsWith(".png", ignoreCase = true)) "image/png" else "image/jpeg",
+          when {
+            filePath.endsWith(".png", ignoreCase = true) -> "image/png"
+            filePath.endsWith(".webp", ignoreCase = true) -> "image/webp"
+            else -> "image/jpeg"
+          },
         base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP),
         width = opts.outWidth.coerceAtLeast(1),
         height = opts.outHeight.coerceAtLeast(1),

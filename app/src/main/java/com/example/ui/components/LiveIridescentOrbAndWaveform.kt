@@ -13,11 +13,13 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import android.graphics.Rect as AndroidRect
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -50,10 +52,14 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -770,9 +776,17 @@ fun DraggableLiveOrbStage(
   onOrbTap: () -> Unit,
   onDismissLive: () -> Unit,
   modifier: Modifier = Modifier,
+  persistedXFraction: Float? = null,
+  persistedYFraction: Float? = null,
+  onPositionChanged: (xFraction: Float, yFraction: Float) -> Unit = { _, _ -> },
+  onDragStateChanged: (Boolean) -> Unit = {},
 ) {
   val density = LocalDensity.current
   val haptic = LocalHapticFeedback.current
+  val latestOnOrbTap by rememberUpdatedState(onOrbTap)
+  val latestOnDismissLive by rememberUpdatedState(onDismissLive)
+  val latestOnPositionChanged by rememberUpdatedState(onPositionChanged)
+  val latestOnDragStateChanged by rememberUpdatedState(onDragStateChanged)
 
   BoxWithConstraints(modifier = modifier.fillMaxSize()) {
     val maxWidthPx = with(density) { maxWidth.toPx() }
@@ -782,21 +796,34 @@ fun DraggableLiveOrbStage(
     val marginPx = with(density) { 12.dp.toPx() }
     val bottomDockReservedPx = with(density) { 104.dp.toPx() }
 
-    val defaultX = (maxWidthPx - stageWidthPx - marginPx).coerceAtLeast(marginPx)
-    val defaultY = (maxHeightPx - stageHeightPx - bottomDockReservedPx).coerceAtLeast(marginPx)
+    val minX = marginPx
+    val maxX = (maxWidthPx - stageWidthPx - marginPx).coerceAtLeast(minX + 1f)
+    val minY = marginPx
+    val maxY = (maxHeightPx - stageHeightPx - marginPx).coerceAtLeast(minY + 1f)
 
-    var hasUserDragged by remember { mutableStateOf(false) }
-    var posX by remember { mutableFloatStateOf(defaultX) }
-    var posY by remember { mutableFloatStateOf(defaultY) }
+    val defaultX =
+      if (persistedXFraction != null) {
+        (minX + persistedXFraction.coerceIn(0f, 1f) * (maxX - minX)).coerceIn(minX, maxX)
+      } else {
+        (maxWidthPx - stageWidthPx - marginPx).coerceIn(minX, maxX)
+      }
+    val defaultY =
+      if (persistedYFraction != null) {
+        (minY + persistedYFraction.coerceIn(0f, 1f) * (maxY - minY)).coerceIn(minY, maxY)
+      } else {
+        (maxHeightPx - stageHeightPx - bottomDockReservedPx).coerceIn(minY, maxY)
+      }
+
+    var hasUserDragged by remember(persistedXFraction, persistedYFraction) {
+      mutableStateOf(persistedXFraction != null && persistedYFraction != null)
+    }
+    var posX by remember(defaultX) { mutableFloatStateOf(defaultX) }
+    var posY by remember(defaultY) { mutableFloatStateOf(defaultY) }
     var isDragging by remember { mutableStateOf(false) }
     var isHoveringDismiss by remember { mutableStateOf(false) }
 
-    val activeX =
-      if (hasUserDragged) posX.coerceIn(marginPx, (maxWidthPx - stageWidthPx - marginPx).coerceAtLeast(marginPx))
-      else defaultX
-    val activeY =
-      if (hasUserDragged) posY.coerceIn(marginPx, (maxHeightPx - stageHeightPx - marginPx).coerceAtLeast(marginPx))
-      else defaultY
+    val activeX = if (hasUserDragged) posX.coerceIn(minX, maxX) else defaultX
+    val activeY = if (hasUserDragged) posY.coerceIn(minY, maxY) else defaultY
 
     val dismissCenterX = maxWidthPx / 2f
     val dismissCenterY = (maxHeightPx - with(density) { 132.dp.toPx() }).coerceAtLeast(stageHeightPx)
@@ -834,54 +861,74 @@ fun DraggableLiveOrbStage(
       }
     }
 
-    // Floating Waveform + Orb Cluster
+    // Floating Waveform + Orb Cluster with unified tap-vs-drag gesture recognition
     Column(
       horizontalAlignment = Alignment.CenterHorizontally,
       verticalArrangement = Arrangement.spacedBy(2.dp),
       modifier =
         Modifier
           .offset { IntOffset(activeX.roundToInt(), activeY.roundToInt()) }
-          .pointerInput(Unit) {
-            detectTapGestures(onTap = { onOrbTap() })
-          }
-          .pointerInput(maxWidthPx, maxHeightPx) {
-            detectDragGestures(
-              onDragStart = {
-                if (!hasUserDragged) {
-                  posX = defaultX
-                  posY = defaultY
+          .pointerInput(minX, maxX, minY, maxY, dismissCenterX, dismissCenterY) {
+            val touchSlop = viewConfiguration.touchSlop
+            awaitEachGesture {
+              val down = awaitFirstDown(requireUnconsumed = false)
+              down.consume()
+
+              val startX = activeX
+              val startY = activeY
+              var accDx = 0f
+              var accDy = 0f
+              var exceededSlop = false
+
+              while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull() ?: break
+                if (change.changedToUpIgnoreConsumed() || !change.pressed) {
+                  change.consume()
+                  break
+                }
+                val delta = change.position - change.previousPosition
+                accDx += delta.x
+                accDy += delta.y
+                if (!exceededSlop && hypot(accDx, accDy) > touchSlop) {
+                  exceededSlop = true
                   hasUserDragged = true
+                  isDragging = true
+                  isHoveringDismiss = false
+                  latestOnDragStateChanged(true)
                 }
-                isDragging = true
-                isHoveringDismiss = false
-              },
-              onDrag = { change, dragAmount ->
+                if (exceededSlop) {
+                  posX = (startX + accDx).coerceIn(minX, maxX)
+                  posY = (startY + accDy).coerceIn(minY, maxY)
+                  val orbCenterX = posX + stageWidthPx / 2f
+                  val orbCenterY = posY + stageHeightPx * 0.70f
+                  val dist = hypot(orbCenterX - dismissCenterX, orbCenterY - dismissCenterY)
+                  val nowHover = dist <= dismissDropRadiusPx
+                  if (nowHover && !isHoveringDismiss) {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                  }
+                  isHoveringDismiss = nowHover
+                }
                 change.consume()
-                posX = (posX + dragAmount.x).coerceIn(marginPx, (maxWidthPx - stageWidthPx - marginPx).coerceAtLeast(marginPx))
-                posY = (posY + dragAmount.y).coerceIn(marginPx, (maxHeightPx - stageHeightPx - marginPx).coerceAtLeast(marginPx))
-                val orbCenterX = posX + stageWidthPx / 2f
-                val orbCenterY = posY + stageHeightPx * 0.70f
-                val dist = hypot(orbCenterX - dismissCenterX, orbCenterY - dismissCenterY)
-                val nowHover = dist <= dismissDropRadiusPx
-                if (nowHover && !isHoveringDismiss) {
-                  haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                }
-                isHoveringDismiss = nowHover
-              },
-              onDragEnd = {
+              }
+
+              if (exceededSlop) {
                 val shouldDismiss = isHoveringDismiss
                 isDragging = false
                 isHoveringDismiss = false
+                latestOnDragStateChanged(false)
                 if (shouldDismiss) {
                   hasUserDragged = false
-                  onDismissLive()
+                  latestOnDismissLive()
+                } else {
+                  val xFrac = ((posX - minX) / (maxX - minX).coerceAtLeast(1f)).coerceIn(0f, 1f)
+                  val yFrac = ((posY - minY) / (maxY - minY).coerceAtLeast(1f)).coerceIn(0f, 1f)
+                  latestOnPositionChanged(xFrac, yFrac)
                 }
-              },
-              onDragCancel = {
-                isDragging = false
-                isHoveringDismiss = false
-              },
-            )
+              } else {
+                latestOnOrbTap()
+              }
+            }
           }
           .testTag("draggable_live_orb_stage"),
     ) {
@@ -898,6 +945,244 @@ fun DraggableLiveOrbStage(
         reducedMotion = reducedMotion,
         orbDiameter = 66.dp,
       )
+    }
+  }
+}
+
+/**
+ * Compact [AssistantSurfaceState.COLLAPSED_ORB] floating Orb stage rendered after tapping outside
+ * the expanded Assistant UI:
+ * - Preserves live audio/conversation while leaving the underlying phone app visible and touch-interactive.
+ * - Reports exact window-space touchable bounds ([onTouchableRegionsChanged]) for [VoiceInteractionSession.onComputeInsets].
+ * - Supports smooth dragging (with persistent normalized coordinates across state transitions),
+ *   1-tap Orb restore ([onExpandAssistant]), and explicit Close via corner 'X' badge or drag-to-drop 'X' ([onCloseAssistant]).
+ */
+@Composable
+fun CollapsedFloatingOrbStage(
+  reactiveFrame: OrbReactiveFrame,
+  isLiveVoiceActive: Boolean,
+  isPaused: Boolean,
+  isMuted: Boolean,
+  reducedMotion: Boolean,
+  xFraction: Float,
+  yFraction: Float,
+  onPositionChanged: (xFraction: Float, yFraction: Float) -> Unit,
+  onExpandAssistant: () -> Unit,
+  onCloseAssistant: () -> Unit,
+  onTouchableRegionsChanged: (orbRect: AndroidRect, closeBadgeRect: AndroidRect) -> Unit = { _, _ -> },
+  onDragStateChanged: (Boolean) -> Unit = {},
+  modifier: Modifier = Modifier,
+) {
+  val density = LocalDensity.current
+  val haptic = LocalHapticFeedback.current
+  val latestOnExpand by rememberUpdatedState(onExpandAssistant)
+  val latestOnClose by rememberUpdatedState(onCloseAssistant)
+  val latestOnPositionChanged by rememberUpdatedState(onPositionChanged)
+  val latestOnTouchableRegions by rememberUpdatedState(onTouchableRegionsChanged)
+  val latestOnDragStateChanged by rememberUpdatedState(onDragStateChanged)
+
+  BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+    val maxWidthPx = with(density) { maxWidth.toPx() }
+    val maxHeightPx = with(density) { maxHeight.toPx() }
+    val orbDiameterDp = 66.dp
+    val stageWidthPx = with(density) { 104.dp.toPx() }
+    val stageHeightPx = with(density) { if (isLiveVoiceActive) 128.dp.toPx() else 84.dp.toPx() }
+    val marginPx = with(density) { 12.dp.toPx() }
+    val touchPadPx = with(density) { 8.dp.toPx() }.roundToInt()
+
+    val minX = marginPx
+    val maxX = (maxWidthPx - stageWidthPx - marginPx).coerceAtLeast(minX + 1f)
+    val minY = marginPx + with(density) { 28.dp.toPx() }
+    val maxY = (maxHeightPx - stageHeightPx - with(density) { 28.dp.toPx() }).coerceAtLeast(minY + 1f)
+
+    var posX by remember(xFraction, minX, maxX) {
+      mutableFloatStateOf((minX + xFraction.coerceIn(0f, 1f) * (maxX - minX)).coerceIn(minX, maxX))
+    }
+    var posY by remember(yFraction, minY, maxY) {
+      mutableFloatStateOf((minY + yFraction.coerceIn(0f, 1f) * (maxY - minY)).coerceIn(minY, maxY))
+    }
+    var isDragging by remember { mutableStateOf(false) }
+    var isHoveringDismiss by remember { mutableStateOf(false) }
+    val lastOrbRect = remember { AndroidRect() }
+    val lastCloseRect = remember { AndroidRect() }
+
+    val dismissCenterX = maxWidthPx / 2f
+    val dismissCenterY = (maxHeightPx - with(density) { 112.dp.toPx() }).coerceAtLeast(stageHeightPx)
+    val dismissDropRadiusPx = with(density) { 64.dp.toPx() }
+
+    // Bottom-center circular 'X' drop target appears ONLY while dragging the collapsed Orb
+    AnimatedVisibility(
+      visible = isDragging,
+      enter = fadeIn() + scaleIn(initialScale = 0.8f),
+      exit = fadeOut() + scaleOut(targetScale = 0.8f),
+      modifier =
+        Modifier
+          .align(Alignment.BottomCenter)
+          .padding(bottom = 84.dp),
+    ) {
+      Surface(
+        shape = CircleShape,
+        color = if (isHoveringDismiss) Color(0xFFDC2626) else Color(0xFF0E1424).copy(alpha = 0.92f),
+        border =
+          BorderStroke(
+            width = if (isHoveringDismiss) 2.dp else 1.2.dp,
+            color = if (isHoveringDismiss) Color.White else Color.White.copy(alpha = 0.42f),
+          ),
+        shadowElevation = 12.dp,
+        modifier = Modifier.size(if (isHoveringDismiss) 62.dp else 54.dp).testTag("collapsed_orb_dismiss_x"),
+      ) {
+        Box(contentAlignment = Alignment.Center) {
+          Icon(
+            imageVector = Icons.Rounded.Close,
+            contentDescription = "Drop here to close Mousomi Assistant",
+            tint = Color.White,
+            modifier = Modifier.size(26.dp),
+          )
+        }
+      }
+    }
+
+    Box(
+      modifier =
+        Modifier
+          .offset { IntOffset(posX.roundToInt(), posY.roundToInt()) }
+          .onGloballyPositioned { coords ->
+            val b = coords.boundsInWindow()
+            lastOrbRect.set(
+              (b.left.roundToInt() - touchPadPx).coerceAtLeast(0),
+              (b.top.roundToInt() - touchPadPx).coerceAtLeast(0),
+              b.right.roundToInt() + touchPadPx,
+              b.bottom.roundToInt() + touchPadPx,
+            )
+            latestOnTouchableRegions(AndroidRect(lastOrbRect), AndroidRect(lastCloseRect))
+          },
+    ) {
+      Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+        modifier =
+          Modifier
+            .padding(top = 6.dp, end = 10.dp)
+            .semantics {
+              contentDescription = "Mousomi Floating Assistant Orb"
+              role = Role.Button
+            }
+            .pointerInput(minX, maxX, minY, maxY, dismissCenterX, dismissCenterY) {
+              val touchSlop = viewConfiguration.touchSlop
+              awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                down.consume()
+
+                val startX = posX
+                val startY = posY
+                var accDx = 0f
+                var accDy = 0f
+                var exceededSlop = false
+
+                while (true) {
+                  val event = awaitPointerEvent()
+                  val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull() ?: break
+                  if (change.changedToUpIgnoreConsumed() || !change.pressed) {
+                    change.consume()
+                    break
+                  }
+                  val delta = change.position - change.previousPosition
+                  accDx += delta.x
+                  accDy += delta.y
+                  if (!exceededSlop && hypot(accDx, accDy) > touchSlop) {
+                    exceededSlop = true
+                    isDragging = true
+                    isHoveringDismiss = false
+                    latestOnDragStateChanged(true)
+                  }
+                  if (exceededSlop) {
+                    posX = (startX + accDx).coerceIn(minX, maxX)
+                    posY = (startY + accDy).coerceIn(minY, maxY)
+                    val orbCenterX = posX + stageWidthPx / 2f
+                    val orbCenterY = posY + stageHeightPx * 0.65f
+                    val dist = hypot(orbCenterX - dismissCenterX, orbCenterY - dismissCenterY)
+                    val nowHover = dist <= dismissDropRadiusPx
+                    if (nowHover && !isHoveringDismiss) {
+                      haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    }
+                    isHoveringDismiss = nowHover
+                  }
+                  change.consume()
+                }
+
+                if (exceededSlop) {
+                  val shouldClose = isHoveringDismiss
+                  isDragging = false
+                  isHoveringDismiss = false
+                  latestOnDragStateChanged(false)
+                  if (shouldClose) {
+                    latestOnClose()
+                  } else {
+                    val xf = ((posX - minX) / (maxX - minX).coerceAtLeast(1f)).coerceIn(0f, 1f)
+                    val yf = ((posY - minY) / (maxY - minY).coerceAtLeast(1f)).coerceIn(0f, 1f)
+                    latestOnPositionChanged(xf, yf)
+                  }
+                } else {
+                  latestOnExpand()
+                }
+              }
+            }
+            .testTag("collapsed_floating_orb"),
+      ) {
+        if (isLiveVoiceActive) {
+          OrganicLiveWaveform(
+            reactiveFrame = reactiveFrame,
+            isPaused = isPaused,
+            isMuted = isMuted,
+            reducedMotion = reducedMotion,
+          )
+        }
+        SmallIridescentSmokeOrb(
+          reactiveFrame = reactiveFrame,
+          isPaused = isPaused,
+          isMuted = isMuted,
+          reducedMotion = reducedMotion,
+          orbDiameter = orbDiameterDp,
+        )
+      }
+
+      // Explicit small Close badge on the Orb's top-right corner for deliberate 1-tap session end
+      if (!isDragging) {
+        Surface(
+          onClick = { latestOnClose() },
+          shape = CircleShape,
+          color = Color(0xFF0E1424).copy(alpha = 0.90f),
+          border = BorderStroke(1.dp, Color.White.copy(alpha = 0.34f)),
+          shadowElevation = 6.dp,
+          modifier =
+            Modifier
+              .align(Alignment.TopEnd)
+              .size(26.dp)
+              .onGloballyPositioned { coords ->
+                val b = coords.boundsInWindow()
+                lastCloseRect.set(
+                  (b.left.roundToInt() - touchPadPx).coerceAtLeast(0),
+                  (b.top.roundToInt() - touchPadPx).coerceAtLeast(0),
+                  b.right.roundToInt() + touchPadPx,
+                  b.bottom.roundToInt() + touchPadPx,
+                )
+                latestOnTouchableRegions(AndroidRect(lastOrbRect), AndroidRect(lastCloseRect))
+              }
+              .semantics {
+                contentDescription = "Close Assistant"
+              }
+              .testTag("collapsed_orb_close_button"),
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              imageVector = Icons.Rounded.Close,
+              contentDescription = "Close assistant session",
+              tint = Color.White.copy(alpha = 0.92f),
+              modifier = Modifier.size(14.dp),
+            )
+          }
+        }
+      }
     }
   }
 }

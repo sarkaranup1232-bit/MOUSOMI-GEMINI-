@@ -88,6 +88,7 @@ fun PermissionCenterScreen(
   onOpenNotificationAccess: () -> Unit,
   onOpenAssistantSettings: () -> Unit,
   onBack: () -> Unit,
+  onOpenAccessibilitySetup: () -> Unit = {},
 ) {
   BackHandler(onBack = onBack)
   val context = LocalContext.current
@@ -196,8 +197,8 @@ fun PermissionCenterScreen(
                 }
                 item.category == PermissionCategory.OVERLAY -> onOpenOverlaySettings()
                 item.category == PermissionCategory.NOTIFICATION_LISTENER -> onOpenNotificationAccess()
-                item.category == PermissionCategory.ACCESSIBILITY ||
-                  item.category == PermissionCategory.DEFAULT_ASSISTANT -> onOpenAssistantSettings()
+                item.category == PermissionCategory.ACCESSIBILITY -> onOpenAccessibilitySetup()
+                item.category == PermissionCategory.DEFAULT_ASSISTANT -> onOpenAssistantSettings()
                 item.category == PermissionCategory.EXACT_ALARM -> {
                   runCatching {
                     val intent =

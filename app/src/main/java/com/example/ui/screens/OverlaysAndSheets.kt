@@ -97,8 +97,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -1006,9 +1010,12 @@ fun GeminiLiveOverlay(
   liveElapsedSeconds: Long = 0L,
   isScreenShareActive: Boolean = false,
   onShareScreenWithLive: () -> Unit = {},
+  onRequestOverlayPermission: (() -> Unit)? = null,
 ) {
   BackHandler(onBack = onClose)
 
+  val context = LocalContext.current
+  val canDrawOverlays = remember(context) { runCatching { Settings.canDrawOverlays(context) }.getOrDefault(false) }
   var followUpText by remember { mutableStateOf("") }
   var showControlsDrawer by remember { mutableStateOf(false) }
 
@@ -1083,10 +1090,10 @@ fun GeminiLiveOverlay(
     modifier =
       Modifier
         .fillMaxSize()
-        .background(Color.Black)
+        .background(Color.Transparent)
         .testTag("mousomi_live_overlay")
   ) {
-    // Full-screen rounded neon Border Light matching Reference Image 2
+    // Full-screen rounded neon Border Light without blocking underlying content with black
     EdgeLightPerimeterOverlay(params = edgeParams)
 
     // Top minimal bar (status pill, timer, minimize, pause/stop controls)
@@ -1298,37 +1305,86 @@ fun GeminiLiveOverlay(
       horizontalAlignment = Alignment.Start,
       verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-      Surface(
-        onClick = onShareScreenWithLive,
-        shape = RoundedCornerShape(24.dp),
-        color = Color(0xFF141824).copy(alpha = 0.88f),
-        border =
-          BorderStroke(
-            width = 1.dp,
-            color =
-              if (isScreenShareActive) NeonCyan.copy(alpha = 0.75f)
-              else Color.White.copy(alpha = 0.16f),
-          ),
-        shadowElevation = 10.dp,
-        modifier = Modifier.testTag("live_share_screen_pill"),
+      Row(
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
       ) {
-        Row(
-          modifier = Modifier.padding(horizontal = 15.dp, vertical = 10.dp),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Surface(
+          onClick = onShareScreenWithLive,
+          shape = RoundedCornerShape(24.dp),
+          color = Color(0xFF141824).copy(alpha = 0.88f),
+          border =
+            BorderStroke(
+              width = 1.dp,
+              color =
+                if (isScreenShareActive) NeonCyan.copy(alpha = 0.75f)
+                else Color.White.copy(alpha = 0.16f),
+            ),
+          shadowElevation = 10.dp,
+          modifier = Modifier.testTag("live_share_screen_pill"),
         ) {
-          Icon(
-            imageVector = Icons.AutoMirrored.Outlined.ScreenShare,
-            contentDescription = null,
-            tint = if (isScreenShareActive) NeonCyan else Color.White.copy(alpha = 0.92f),
-            modifier = Modifier.size(18.dp),
-          )
-          Text(
-            text = if (isScreenShareActive) "Sharing screen with Live" else "Share screen with Live",
-            color = Color.White.copy(alpha = 0.94f),
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-          )
+          Row(
+            modifier = Modifier.padding(horizontal = 15.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Icon(
+              imageVector = Icons.AutoMirrored.Outlined.ScreenShare,
+              contentDescription = null,
+              tint = if (isScreenShareActive) NeonCyan else Color.White.copy(alpha = 0.92f),
+              modifier = Modifier.size(18.dp),
+            )
+            Text(
+              text = if (isScreenShareActive) "Stop Screen Share" else "Share screen with Live",
+              color = Color.White.copy(alpha = 0.94f),
+              fontSize = 14.sp,
+              fontWeight = FontWeight.Medium,
+            )
+          }
+        }
+
+        if (!canDrawOverlays) {
+          Surface(
+            onClick = {
+              if (onRequestOverlayPermission != null) {
+                onRequestOverlayPermission()
+              } else {
+                val intent =
+                  Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${context.packageName}"),
+                  ).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  }
+                runCatching { context.startActivity(intent) }
+              }
+            },
+            shape = RoundedCornerShape(24.dp),
+            color = Color(0xFF10192E).copy(alpha = 0.90f),
+            border = BorderStroke(1.dp, ElectricBlue.copy(alpha = 0.72f)),
+            shadowElevation = 8.dp,
+            modifier = Modifier.testTag("live_float_over_apps_pill"),
+          ) {
+            Row(
+              modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              Icon(
+                imageVector = Icons.Outlined.Layers,
+                contentDescription = "Float Over Apps",
+                tint = NeonCyan,
+                modifier = Modifier.size(16.dp),
+              )
+              Text(
+                text = "Float Over Apps",
+                color = Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+              )
+            }
+          }
         }
       }
 

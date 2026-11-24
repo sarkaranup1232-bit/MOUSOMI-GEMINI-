@@ -18,17 +18,17 @@ class FloatingAssistantService : MousomiOverlayService() {
 
   companion object {
     fun buildStartIntent(context: Context): Intent =
-      Intent(context, FloatingAssistantService::class.java).apply {
+      Intent(context, MousomiOverlayService::class.java).apply {
         action = ACTION_SHOW_CONTROL_BAR
       }
 
     fun buildControlBarIntent(context: Context): Intent =
-      Intent(context, FloatingAssistantService::class.java).apply {
+      Intent(context, MousomiOverlayService::class.java).apply {
         action = ACTION_SHOW_CONTROL_BAR
       }
 
     fun buildPanelIntent(context: Context, autoVoice: Boolean = false): Intent =
-      Intent(context, FloatingAssistantService::class.java).apply {
+      Intent(context, MousomiOverlayService::class.java).apply {
         action = ACTION_SHOW_ASSISTANT_PANEL
         putExtra(EXTRA_PANEL_VOICE_AUTO, autoVoice)
       }
@@ -39,7 +39,7 @@ class FloatingAssistantService : MousomiOverlayService() {
       expandPanel: Boolean = true,
       autoVoice: Boolean = true,
     ): Intent =
-      Intent(context, FloatingAssistantService::class.java).apply {
+      Intent(context, MousomiOverlayService::class.java).apply {
         action = ACTION_ACTIVATE_ASSISTANT
         putExtra(EXTRA_ACTIVATION_EDGE, edge.name)
         putExtra(EXTRA_EXPAND_PANEL, expandPanel)
@@ -47,7 +47,7 @@ class FloatingAssistantService : MousomiOverlayService() {
       }
 
     fun buildStopIntent(context: Context): Intent =
-      Intent(context, FloatingAssistantService::class.java).apply {
+      Intent(context, MousomiOverlayService::class.java).apply {
         action = ACTION_STOP
       }
   }

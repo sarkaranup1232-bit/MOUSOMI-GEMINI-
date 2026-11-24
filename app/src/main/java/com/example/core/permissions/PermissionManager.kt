@@ -267,15 +267,21 @@ class PermissionManager @Inject constructor(
         relatedFeature = "Precise Local Assistance (Optional)",
         lastCheckedAtMs = checkedAt,
       ),
-      PermissionCategoryItem(
-        category = PermissionCategory.CONTACTS_PICKER,
-        state = PermissionState.ZERO_PERMISSION_PICKER,
-        whyNeeded = "Optionally pick a single contact card using Android's system Contact Picker.",
-        dataUsageDisclosure = "Never requests READ_CONTACTS; uses zero-permission ContactsContract picker when invoked.",
-        howToManage = "Zero standing permission held.",
-        relatedFeature = "Contact Lookup",
-        lastCheckedAtMs = checkedAt,
-      ),
+      run {
+        val contactsGranted = isPermissionGranted(Manifest.permission.READ_CONTACTS)
+        PermissionCategoryItem(
+          category = PermissionCategory.CONTACTS_PICKER,
+          state = if (contactsGranted) PermissionState.GRANTED else PermissionState.ZERO_PERMISSION_PICKER,
+          manifestPermission = Manifest.permission.READ_CONTACTS,
+          whyNeeded = "Optional Contacts lookup for voice commands like 'WhatsApp Alice' or 'Call Bob', with Contact Picker always available.",
+          dataUsageDisclosure = "Only queried on demand when you ask to message or call a named contact; never uploaded or logged.",
+          howToManage = "Tap Request Permission for voice lookup, or use the zero-permission Contact Picker; revoke anytime in App Info > Permissions.",
+          isRuntimeRequestable = true,
+          isOptionalFeature = true,
+          relatedFeature = "Contacts, Dialer & WhatsApp",
+          lastCheckedAtMs = checkedAt,
+        )
+      },
       PermissionCategoryItem(
         category = PermissionCategory.PHONE_DIAL,
         state = PermissionState.ZERO_PERMISSION_PICKER,
@@ -307,12 +313,13 @@ class PermissionManager @Inject constructor(
       ),
       PermissionCategoryItem(
         category = PermissionCategory.ACCESSIBILITY,
-        state = if (isAccessibilityEnabledForPackage()) PermissionState.GRANTED else PermissionState.NOT_APPLICABLE,
-        whyNeeded = "Guided system shortcuts only; Mousomi avoids intrusive Accessibility automation to stay Play compliant.",
-        dataUsageDisclosure = "No automated arbitrary screen-tapping or hidden Accessibility service bundled.",
-        howToManage = "Optional OS Accessibility preferences can be opened in System Settings.",
+        state = if (isAccessibilityEnabledForPackage()) PermissionState.GRANTED else PermissionState.REQUIRES_SETTINGS,
+        whyNeeded = "Optional user-authorized UI navigation: reads visible labels, clicks requested buttons, scrolls, and fills non-sensitive fields.",
+        dataUsageDisclosure = "Disabled by default. Never enabled silently, strictly blocks passwords/OTP/PIN/payment fields, and honors Emergency Stop.",
+        howToManage = "Review disclosure in Accessibility Setup or disable anytime in Settings > Accessibility > Mousomi Accessibility Assistant.",
         requiresSpecialSettings = true,
-        relatedFeature = "Guided Device Control",
+        isOptionalFeature = true,
+        relatedFeature = "Accessibility UI Assistant",
         lastCheckedAtMs = checkedAt,
       ),
       PermissionCategoryItem(

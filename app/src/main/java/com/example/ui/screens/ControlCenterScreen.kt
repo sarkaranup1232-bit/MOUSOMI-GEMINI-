@@ -78,6 +78,7 @@ fun ControlCenterScreen(
   onOpenFullPermissionCenter: () -> Unit = {},
   onTriggerEmergencyStop: () -> Unit = {},
   onLaunchFloatingControlBar: () -> Unit = {},
+  onOpenAccessibilitySetup: () -> Unit = {},
 ) {
   BackHandler(onBack = onBack)
   val context = LocalContext.current
@@ -196,6 +197,7 @@ fun ControlCenterScreen(
               onCancelAutomation = onCancelAutomation,
               onOpenNotificationAccessSettings = onOpenNotificationAccessSettings,
               onRequestAssistantRole = onRequestAssistantRole,
+              onOpenAccessibilitySetup = onOpenAccessibilitySetup,
             )
           }
           else -> {
@@ -212,6 +214,7 @@ fun ControlCenterScreen(
                     if (uiState.screenShareStatus.name == "STOPPED") onRequestStartScreenShare()
                     else onStopScreenShare()
                   "notif_listener" -> onOpenNotificationAccessSettings()
+                  "accessibility" -> onOpenAccessibilitySetup()
                   "assistant" -> onRequestAssistantRole()
                   else -> onOpenApiAndModelSettings()
                 }

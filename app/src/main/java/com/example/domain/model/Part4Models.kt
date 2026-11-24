@@ -277,6 +277,10 @@ data class NotificationIntelligenceConfig(
   val allowedPackages: Set<String> = emptySet(),
   val generateDraftRepliesForReview: Boolean = true,
   val redactSensitiveCodes: Boolean = true,
+  val readAloudEnabled: Boolean = false,
+  val readAloudContentEnabled: Boolean = false,
+  val readAloudPaused: Boolean = false,
+  val excludedPackages: Set<String> = emptySet(),
 )
 
 @Serializable

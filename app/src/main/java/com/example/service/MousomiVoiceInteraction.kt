@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color as AndroidColor
+import android.graphics.Rect as AndroidRect
+import android.graphics.Region
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
@@ -39,15 +41,38 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.example.MainActivity
+import com.example.core.accessibility.AccessibilityActionResult
+import com.example.core.accessibility.AccessibilityAgentController
+import com.example.core.agent.AgentTaskPlanner
+import com.example.core.agent.PlannedAgentOutcome
+import com.example.core.alarms.TimerManager
 import com.example.core.assistant.AssistantSessionStateManager
+import com.example.core.assistant.AssistantSurfaceState
 import com.example.core.assistant.AssistantVisualState
 import com.example.core.assistant.EdgeActivationEdge
+import com.example.core.device.AgentCommandIntent
+import com.example.core.device.AssistantAgentCommandRouter
+import com.example.core.device.ContactResolver
+import com.example.core.device.DeviceActionExecutor
 import com.example.core.device.PendingPhoneAction
+import com.example.core.device.PendingPhoneActionType
 import com.example.core.device.PendingSocialAction
 import com.example.core.device.PhoneActionController
+import com.example.core.device.ResolvedContact
 import com.example.core.device.SocialIntegrationManager
 import com.example.core.edge.EdgeLightStateMapper
+import com.example.core.overlay.FloatingAttachmentItem
+import com.example.core.screen.AttachedVisualItem
+import com.example.core.screen.ImageAttachmentManager
+import com.example.core.screen.ScreenRecordingManager
 import com.example.core.screen.ScreenShareSessionManager
+import com.example.core.screen.ScreenshotCaptureManager
+import com.example.core.screen.SelectionGeometryEngine
+import com.example.core.screen.SelectionGeometryResult
+import com.example.core.screen.SelectionToolMode
+import com.example.core.screen.SmartCropEngine
+import com.example.core.screen.VisualQueryProcessor
+import com.example.core.storage.TempMediaCacheManager
 import com.example.core.voice.DictationTranscriptMerger
 import com.example.core.voice.GeminiLiveVoiceEngine
 import com.example.core.voice.LiveVoiceSessionManager
@@ -59,6 +84,8 @@ import com.example.domain.model.AiResponseState
 import com.example.domain.model.EdgeLightConfig
 import com.example.domain.model.EdgeLightIntensity
 import com.example.domain.model.EdgeLightPreset
+import com.example.domain.model.NormBoundingBox
+import com.example.domain.model.NormPoint
 import com.example.domain.model.OrbQuickAction
 import com.example.domain.model.ResponseBlock
 import com.example.domain.model.ScreenShareStatus
@@ -68,6 +95,7 @@ import com.example.domain.orchestrator.OrchestrationEvent
 import com.example.domain.orchestrator.OrchestrationRequest
 import com.example.domain.repository.SettingsRepository
 import com.example.ui.components.AssistantSessionOverlayUi
+import com.example.ui.model.AttachmentPreview
 import com.example.ui.overlay.OverlayMediaPickerActivity
 import com.example.ui.overlay.ScreenCaptureConsentActivity
 import com.example.ui.theme.AppThemeMode
@@ -76,12 +104,15 @@ import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.components.SingletonComponent
+import java.io.File
 import java.util.Calendar
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -95,8 +126,21 @@ interface VoiceInteractionEntryPoint {
   fun voiceController(): VoiceController
   fun aiOrchestrator(): AiOrchestrator
   fun screenShareSessionManager(): ScreenShareSessionManager
+  fun screenRecordingManager(): ScreenRecordingManager
+  fun selectionGeometryEngine(): SelectionGeometryEngine
+  fun smartCropEngine(): SmartCropEngine
+  fun visualQueryProcessor(): VisualQueryProcessor
+  fun screenshotCaptureManager(): ScreenshotCaptureManager
+  fun imageAttachmentManager(): ImageAttachmentManager
+  fun tempMediaCacheManager(): TempMediaCacheManager
+  fun assistantAgentCommandRouter(): AssistantAgentCommandRouter
+  fun deviceActionExecutor(): DeviceActionExecutor
   fun phoneActionController(): PhoneActionController
   fun socialIntegrationManager(): SocialIntegrationManager
+  fun agentTaskPlanner(): AgentTaskPlanner
+  fun timerManager(): TimerManager
+  fun contactResolver(): ContactResolver
+  fun accessibilityAgentController(): AccessibilityAgentController
 }
 
 /**
@@ -273,7 +317,17 @@ class MousomiAssistantSession(
   private var responsePhaseState by mutableStateOf<AiResponseState>(AiResponseState.Idle)
   private var pendingPhoneActionState by mutableStateOf<PendingPhoneAction?>(null)
   private var pendingSocialActionState by mutableStateOf<PendingSocialAction?>(null)
+  private var pendingAccessibilityActionState by mutableStateOf<AccessibilityActionResult?>(null)
   private var usingLiveSocketState by mutableStateOf(false)
+  private var isDrawingModeState by mutableStateOf(false)
+  private var drawingToolModeState by mutableStateOf(SelectionToolMode.SMART_LOOP)
+  private var drawingStrokePointsState by mutableStateOf<List<NormPoint>>(emptyList())
+  private var snappedDrawingResultState by mutableStateOf<SelectionGeometryResult?>(null)
+  private var confirmedSelectionBoxState by mutableStateOf<NormBoundingBox?>(null)
+  private var pendingAttachmentsState by mutableStateOf<List<FloatingAttachmentItem>>(emptyList())
+  private var isOrbDraggingState by mutableStateOf(false)
+  private val orbTouchableRect = AndroidRect()
+  private val orbCloseTouchableRect = AndroidRect()
 
   override val lifecycle: Lifecycle
     get() = lifecycleRegistry
@@ -310,6 +364,9 @@ class MousomiAssistantSession(
       setViewTreeLifecycleOwner(this@MousomiAssistantSession)
       setViewTreeSavedStateRegistryOwner(this@MousomiAssistantSession)
       setContent {
+        val surfaceState by sessionState.surfaceState.collectAsState()
+        val orbXFraction by sessionState.orbXFraction.collectAsState()
+        val orbYFraction by sessionState.orbYFraction.collectAsState()
         val visualState by sessionState.visualState.collectAsState()
         val sessionPhase by sessionState.currentPhase.collectAsState()
         val edgeSignal by sessionState.edgeActivation.collectAsState()
@@ -319,8 +376,14 @@ class MousomiAssistantSession(
         val voiceState by voiceCtrl.voiceState.collectAsState()
         val voiceRms by voiceCtrl.audioRmsNormalized.collectAsState()
         val screenShareStatus by screenShareMgr.status.collectAsState()
+        val screenRecordingState by ep.screenRecordingManager().state.collectAsState()
         val liveAssistantTranscript by liveEngine.assistantTranscript.collectAsState()
         val liveUserTranscript by liveEngine.userTranscript.collectAsState()
+
+        LaunchedEffect(surfaceState, isOrbDraggingState) {
+          syncWindowForSurfaceState(surfaceState)
+          requestInsetsRefresh()
+        }
 
         LaunchedEffect(liveAssistantTranscript) {
           if (liveAssistantTranscript.isNotBlank()) {
@@ -358,11 +421,37 @@ class MousomiAssistantSession(
             edgeActivationSignal = edgeSignal,
           )
 
+        val effectiveSurfaceState =
+          if (surfaceState == AssistantSurfaceState.CLOSED && hasShownOnce) {
+            if (isDrawingModeState) AssistantSurfaceState.DRAWING else AssistantSurfaceState.EXPANDED
+          } else {
+            surfaceState
+          }
+
         MousomiTheme(themeMode = AppThemeMode.DARK) {
           AssistantSessionOverlayUi(
             visualState =
               if (visualState == AssistantVisualState.HIDDEN) AssistantVisualState.STANDARD_ASSISTANT
               else visualState,
+            surfaceState = effectiveSurfaceState,
+            orbXFraction = orbXFraction,
+            orbYFraction = orbYFraction,
+            onOrbPositionChanged = { xf, yf -> sessionState.updateOrbPosition(xf, yf) },
+            onCollapseToOrb = { collapseSessionToOrb() },
+            onExpandFromOrb = { expandSessionFromOrb() },
+            onOrbTouchableRegionsChanged = { orbRect, closeRect ->
+              if (orbTouchableRect != orbRect || orbCloseTouchableRect != closeRect) {
+                orbTouchableRect.set(orbRect)
+                orbCloseTouchableRect.set(closeRect)
+                requestInsetsRefresh()
+              }
+            },
+            onOrbDragStateChanged = { dragging ->
+              if (isOrbDraggingState != dragging) {
+                isOrbDraggingState = dragging
+                requestInsetsRefresh()
+              }
+            },
             edgeLightParams = edgeParams,
             reactiveFrame = reactiveFrame,
             inputText = inputTextState,
@@ -382,7 +471,9 @@ class MousomiAssistantSession(
             onStopDictation = { stopSessionDictation() },
             onRetryDictation = { startOrResumeSessionDictation() },
             onLiveButtonClick = {
-              if (visualState == AssistantVisualState.LIVE_ASSISTANT) {
+              if (Settings.canDrawOverlays(context)) {
+                launchFloatingLiveModeFromSession()
+              } else if (visualState == AssistantVisualState.LIVE_ASSISTANT) {
                 stopLiveToStandard()
               } else {
                 startLiveAssistantMode()
@@ -397,16 +488,10 @@ class MousomiAssistantSession(
               responsePhaseState = AiResponseState.Cancelled
             },
             onOpenFullApp = { openMainAppFromSession(null) },
-            onOpenScreenSelection = { launchScreenSelectionFromSession() },
-            onOpenDrawingStudio = { openMainAppFromSession(OrbQuickAction.DRAW_ON_SCREEN) },
+            onOpenScreenSelection = { enterInlineDrawingMode() },
+            onOpenDrawingStudio = { enterInlineDrawingMode() },
             onOpenPhotoPicker = { launchPhotoPickerFromSession() },
-            onCloseSession = {
-              cleanupVoiceAndQueries()
-              entryPoint.assistantSessionStateManager().dismissAssistantSession(
-                keepScreenShare = entryPoint.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED
-              )
-              hide()
-            },
+            onCloseSession = { explicitCloseSession() },
             isGenerating = isGeneratingState,
             isVoiceListening = voiceState is VoiceState.Listening ||
               (visualState == AssistantVisualState.LIVE_ASSISTANT && !livePaused && !liveMuted),
@@ -423,9 +508,71 @@ class MousomiAssistantSession(
             pendingPhoneAction = pendingPhoneActionState,
             onConfirmPhoneAction = { action -> confirmPhoneAction(action) },
             onDismissPhoneAction = { pendingPhoneActionState = null },
+            onSelectPhoneCandidate = { candidate -> selectPhoneCandidate(candidate) },
             pendingSocialAction = pendingSocialActionState,
             onConfirmSocialAction = { action -> confirmSocialAction(action) },
             onDismissSocialAction = { pendingSocialActionState = null },
+            onSelectSocialCandidate = { candidate -> selectSocialCandidate(candidate) },
+            pendingAccessibilityAction = pendingAccessibilityActionState,
+            onConfirmAccessibilityAction = { action -> confirmAccessibilityAction(action) },
+            onDismissAccessibilityAction = { pendingAccessibilityActionState = null },
+            isDrawingMode = isDrawingModeState,
+            drawingToolMode = drawingToolModeState,
+            activeDrawingPoints = drawingStrokePointsState,
+            snappedDrawingResult = snappedDrawingResultState,
+            confirmedSelectionBox = confirmedSelectionBoxState,
+            selectionGeometryEngine = ep.selectionGeometryEngine(),
+            onToggleDrawingMode = {
+              if (isDrawingModeState) {
+                cancelInlineDrawing()
+              } else {
+                enterInlineDrawingMode()
+              }
+            },
+            onSelectDrawingTool = { mode ->
+              drawingToolModeState = mode
+              snappedDrawingResultState = null
+              drawingStrokePointsState = emptyList()
+            },
+            onDrawingStrokeStart = { pt ->
+              drawingStrokePointsState = listOf(pt)
+              snappedDrawingResultState = null
+            },
+            onDrawingStrokeMove = { pt ->
+              drawingStrokePointsState = (drawingStrokePointsState + pt).takeLast(240)
+            },
+            onDrawingStrokeEnd = {
+              if (drawingStrokePointsState.size >= 2) {
+                snappedDrawingResultState =
+                  ep.selectionGeometryEngine().processStroke(drawingStrokePointsState, drawingToolModeState)
+              }
+              drawingStrokePointsState = emptyList()
+            },
+            onDrawingHandleDrag = { handle, dx, dy ->
+              snappedDrawingResultState?.let { cur ->
+                snappedDrawingResultState =
+                  ep.selectionGeometryEngine().adjustSnappedResult(cur, handle, dx, dy)
+              }
+            },
+            onConfirmDrawingSelection = { confirmInlineDrawing() },
+            onRedrawDrawingSelection = { redrawInlineDrawing() },
+            onCancelDrawingSelection = { cancelInlineDrawing() },
+            pendingAttachments = pendingAttachmentsState,
+            onRemoveAttachment = { uriString -> removeSessionAttachment(uriString) },
+            onReplaceAttachment = { enterInlineDrawingMode() },
+            screenRecordingState = screenRecordingState,
+            onConfirmScreenRecording = {
+              context.startActivity(ScreenCaptureConsentActivity.buildScreenRecordingIntent(context, fromOverlay = false))
+            },
+            onStopScreenRecording = {
+              ContextCompat.startForegroundService(context, MediaProjectionCaptureService.buildStopRecordingIntent(context))
+            },
+            onCancelScreenRecording = {
+              ContextCompat.startForegroundService(context, MediaProjectionCaptureService.buildCancelRecordingIntent(context))
+            },
+            onDismissScreenRecordingCard = {
+              ep.screenRecordingManager().resetToIdle()
+            },
           )
         }
       }
@@ -468,6 +615,7 @@ class MousomiAssistantSession(
     statusBannerState = null
     pendingPhoneActionState = null
     pendingSocialActionState = null
+    pendingAccessibilityActionState = null
     entryPoint.assistantSessionStateManager().openStandardAssistant(EdgeActivationEdge.BOTTOM_CORNER)
     startVoiceCollector()
 
@@ -482,6 +630,10 @@ class MousomiAssistantSession(
 
   override fun onHide() {
     super.onHide()
+    isDrawingModeState = false
+    drawingStrokePointsState = emptyList()
+    snappedDrawingResultState = null
+    isOrbDraggingState = false
     cleanupVoiceAndQueries()
     entryPoint.assistantSessionStateManager().dismissAssistantSession(
       keepScreenShare = entryPoint.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED
@@ -492,6 +644,10 @@ class MousomiAssistantSession(
   }
 
   override fun onCloseSystemDialogs() {
+    isDrawingModeState = false
+    drawingStrokePointsState = emptyList()
+    snappedDrawingResultState = null
+    isOrbDraggingState = false
     cleanupVoiceAndQueries()
     entryPoint.assistantSessionStateManager().dismissAssistantSession(
       keepScreenShare = entryPoint.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED
@@ -501,8 +657,16 @@ class MousomiAssistantSession(
 
   override fun onBackPressed() {
     val sessionState = entryPoint.assistantSessionStateManager()
-    if (sessionState.visualState.value == AssistantVisualState.LIVE_ASSISTANT) {
-      stopLiveToStandard()
+    if (isDrawingModeState || sessionState.surfaceState.value == AssistantSurfaceState.DRAWING) {
+      cancelInlineDrawing()
+      return
+    }
+    if (sessionState.surfaceState.value == AssistantSurfaceState.EXPANDED) {
+      if (sessionState.visualState.value == AssistantVisualState.LIVE_ASSISTANT) {
+        stopLiveToStandard()
+        return
+      }
+      collapseSessionToOrb()
       return
     }
     cleanupVoiceAndQueries()
@@ -513,6 +677,8 @@ class MousomiAssistantSession(
   }
 
   override fun onDestroy() {
+    isDrawingModeState = false
+    isOrbDraggingState = false
     cleanupVoiceAndQueries()
     entryPoint.assistantSessionStateManager().dismissAssistantSession(keepScreenShare = false)
     val state = lifecycleRegistry.currentState
@@ -524,11 +690,35 @@ class MousomiAssistantSession(
     super.onDestroy()
   }
 
+  override fun onComputeInsets(outInsets: Insets) {
+    super.onComputeInsets(outInsets)
+    val surface = entryPoint.assistantSessionStateManager().surfaceState.value
+    if (surface == AssistantSurfaceState.COLLAPSED_ORB && !isOrbDraggingState) {
+      val activeOrbRect =
+        if (!orbTouchableRect.isEmpty) {
+          orbTouchableRect
+        } else {
+          val dm = context.resources.displayMetrics
+          val density = dm.density
+          val orbBoxPx = (96f * density).toInt()
+          val right = (dm.widthPixels - (12f * density).toInt()).coerceAtLeast(orbBoxPx)
+          val bottom = (dm.heightPixels * 0.78f).toInt().coerceAtLeast(orbBoxPx)
+          AndroidRect(right - orbBoxPx, bottom - orbBoxPx, right, bottom)
+        }
+      outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
+      outInsets.touchableRegion.set(activeOrbRect)
+      if (!orbCloseTouchableRect.isEmpty) {
+        outInsets.touchableRegion.op(orbCloseTouchableRect, Region.Op.UNION)
+      }
+    } else {
+      outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_FRAME
+    }
+  }
+
   private fun configureSessionWindow() {
     val win = window?.window ?: return
     win.setBackgroundDrawable(ColorDrawable(AndroidColor.TRANSPARENT))
-    win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-    win.setDimAmount(0.22f)
+    syncWindowForSurfaceState(entryPoint.assistantSessionStateManager().surfaceState.value)
     win.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
       val lp = win.attributes
@@ -536,6 +726,69 @@ class MousomiAssistantSession(
       win.attributes = lp
     }
     WindowCompat.setDecorFitsSystemWindows(win, false)
+  }
+
+  private fun syncWindowForSurfaceState(surfaceState: AssistantSurfaceState) {
+    val win = window?.window ?: return
+    when (surfaceState) {
+      AssistantSurfaceState.COLLAPSED_ORB -> {
+        win.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        win.setDimAmount(0f)
+        if (!isOrbDraggingState) {
+          win.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+        } else {
+          win.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+        }
+      }
+      AssistantSurfaceState.DRAWING -> {
+        win.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        win.setDimAmount(0f)
+        win.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+      }
+      AssistantSurfaceState.EXPANDED,
+      AssistantSurfaceState.CLOSED -> {
+        win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        win.setDimAmount(0.22f)
+        win.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+      }
+    }
+  }
+
+  private fun requestInsetsRefresh() {
+    val root = rootContainer ?: return
+    root.post {
+      window?.window?.decorView?.requestLayout()
+      root.requestLayout()
+    }
+  }
+
+  private fun collapseSessionToOrb() {
+    val sessionState = entryPoint.assistantSessionStateManager()
+    if (isDrawingModeState || sessionState.surfaceState.value == AssistantSurfaceState.DRAWING) {
+      return
+    }
+    sessionState.collapseToOrb()
+    syncWindowForSurfaceState(AssistantSurfaceState.COLLAPSED_ORB)
+    requestInsetsRefresh()
+  }
+
+  private fun expandSessionFromOrb() {
+    val sessionState = entryPoint.assistantSessionStateManager()
+    sessionState.expandFromOrb()
+    syncWindowForSurfaceState(AssistantSurfaceState.EXPANDED)
+    requestInsetsRefresh()
+  }
+
+  private fun explicitCloseSession() {
+    val sessionState = entryPoint.assistantSessionStateManager()
+    if (isDrawingModeState || sessionState.surfaceState.value == AssistantSurfaceState.DRAWING) {
+      return
+    }
+    cleanupVoiceAndQueries()
+    sessionState.closeAssistant(
+      keepScreenShare = entryPoint.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED
+    )
+    hide()
   }
 
   private fun hasMicPermission(): Boolean =
@@ -711,40 +964,155 @@ class MousomiAssistantSession(
     }
   }
 
-  private fun submitQueryFromSession(rawPrompt: String) {
+  private fun submitQueryFromSession(
+    rawPrompt: String,
+    forceIncludeScreenFrame: Boolean = false,
+  ) {
     val prompt = rawPrompt.trim()
-    if (prompt.isEmpty()) return
+    val currentPending = pendingAttachmentsState
+    if (prompt.isEmpty() && currentPending.isEmpty()) return
     inputTextState = ""
     statusBannerState = null
 
     val ep = entryPoint
-    // Check confirmation-gated Phone Actions (Dial / SMS)
-    val phoneCmd = PhoneActionController.tryParseConfirmationCommand(prompt)
-    if (phoneCmd != null) {
-      pendingPhoneActionState = phoneCmd
-      assistantResponseState = "Review and confirm before opening ${phoneCmd.type.title}."
-      return
-    }
-    // Check confirmation-gated Social Actions (WhatsApp / Instagram / Facebook)
-    val socialCmd = SocialIntegrationManager.tryParseSocialCommand(prompt)
-    if (socialCmd != null) {
-      pendingSocialActionState = socialCmd
-      assistantResponseState = "Review and confirm before opening ${socialCmd.platform.displayName}."
-      return
-    }
-
     queryJob?.cancel()
-    isGeneratingState = true
-    responsePhaseState = AiResponseState.Thinking()
-    assistantResponseState = ""
-
     queryJob = sessionScope.launch {
+      // Check modular AgentTaskPlanner when there are no staged image attachments (or when social media attaches cropped visual)
+      if (prompt.isNotEmpty() && currentPending.isEmpty()) {
+        when (val planned = ep.agentTaskPlanner().planAndRoute(prompt)) {
+          is PlannedAgentOutcome.ConfirmPhoneAction -> {
+            pendingPhoneActionState = planned.action
+            assistantResponseState =
+              if (planned.action.isContactAmbiguous) {
+                planned.action.summary
+              } else {
+                "Review and confirm before opening ${planned.action.type.title}."
+              }
+            return@launch
+          }
+          is PlannedAgentOutcome.ConfirmSocialAction -> {
+            pendingSocialActionState = planned.action
+            assistantResponseState =
+              if (planned.action.isContactAmbiguous) {
+                planned.action.summary
+              } else {
+                "Review and confirm before opening ${planned.action.platform.displayName}."
+              }
+            return@launch
+          }
+          is PlannedAgentOutcome.TimerRequested -> {
+            val res = ep.timerManager().startTimer(planned.durationSeconds, planned.label)
+            assistantResponseState = res.second
+            return@launch
+          }
+          is PlannedAgentOutcome.NotificationControlHandled -> {
+            assistantResponseState = planned.message
+            return@launch
+          }
+          is PlannedAgentOutcome.AccessibilityHandled -> {
+            val acc = planned.result
+            if (acc.requiresConfirmation) {
+              pendingAccessibilityActionState = acc
+              assistantResponseState = acc.pendingActionSummary.ifBlank { acc.detail }
+            } else {
+              assistantResponseState = "${acc.statusLabel}: ${acc.detail}"
+            }
+            return@launch
+          }
+          is PlannedAgentOutcome.LaunchCommand -> {
+            when (val agentCmd = planned.intent) {
+              is AgentCommandIntent.StartScreenRecording -> {
+                ep.screenRecordingManager().requestConfirmation()
+                assistantResponseState = "Please confirm below to grant Android screen-recording permission."
+                return@launch
+              }
+              AgentCommandIntent.StopScreenRecording -> {
+                ContextCompat.startForegroundService(context, MediaProjectionCaptureService.buildStopRecordingIntent(context))
+                assistantResponseState = "Stopping and finalizing screen recording…"
+                return@launch
+              }
+              AgentCommandIntent.CancelScreenRecording -> {
+                ContextCompat.startForegroundService(context, MediaProjectionCaptureService.buildCancelRecordingIntent(context))
+                assistantResponseState = "Cancelling screen recording…"
+                return@launch
+              }
+              AgentCommandIntent.StartScreenShare -> {
+                handleShareScreenWithLive()
+                return@launch
+              }
+              AgentCommandIntent.StopScreenShare -> {
+                if (ep.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED) {
+                  ContextCompat.startForegroundService(context, MediaProjectionCaptureService.buildStopIntent(context))
+                  ep.screenShareSessionManager().stopSession("Screen sharing stopped by command.")
+                }
+                assistantResponseState = "Screen sharing is now off."
+                return@launch
+              }
+              AgentCommandIntent.StartScreenSelection -> {
+                enterInlineDrawingMode()
+                return@launch
+              }
+              is AgentCommandIntent.AnalyzeCurrentScreen -> {
+                val shareStatus = ep.screenShareSessionManager().status.value
+                if (shareStatus == ScreenShareStatus.STOPPED || shareStatus == ScreenShareStatus.REQUESTING_CONSENT) {
+                  statusBannerState = "Screen sharing is off. Tap 'Share screen with Live' so Mousomi can view the screen."
+                  return@launch
+                }
+              }
+              is AgentCommandIntent.UnsupportedSilentToggle -> {
+                agentCmd.fallbackSettingsQuery?.let { ep.deviceActionExecutor().executeNaturalCommand(it) }
+                assistantResponseState = agentCmd.explanation
+                return@launch
+              }
+              is AgentCommandIntent.OpenTargetOrSetting -> {
+                val res = ep.deviceActionExecutor().executeNaturalCommand(agentCmd.command)
+                assistantResponseState = "${res.statusLabel}: ${res.verifiedDetail}"
+                return@launch
+              }
+            }
+          }
+          PlannedAgentOutcome.ForwardToMultimodalAi -> Unit
+        }
+      }
+
+      pendingAttachmentsState = emptyList()
+      isGeneratingState = true
+      responsePhaseState = AiResponseState.Thinking()
+      assistantResponseState = ""
+
       val settings = ep.settingsRepository().getSettingsSnapshot()
+      val attachmentPreviews = currentPending.map { AttachmentPreview.PickedPhotoUri(it.uriString) }
+      val preparedQuery =
+        if (attachmentPreviews.isNotEmpty()) {
+          ep.visualQueryProcessor().prepareQuery(prompt, attachmentPreviews)
+        } else {
+          null
+        }
+      val payloads = preparedQuery?.payloads?.toMutableList() ?: mutableListOf()
+      val shareStatus = ep.screenShareSessionManager().status.value
+      val shouldAttachScreen =
+        payloads.isEmpty() &&
+          (forceIncludeScreenFrame ||
+            (shareStatus != ScreenShareStatus.STOPPED && shareStatus != ScreenShareStatus.REQUESTING_CONSENT))
+      if (shouldAttachScreen) {
+        val screenPayload =
+          ep.visualQueryProcessor().prepareScreenSharePayload(
+            screenShareSessionManager = ep.screenShareSessionManager(),
+            screenshotCaptureManager = ep.screenshotCaptureManager(),
+            smartCropEngine = ep.smartCropEngine(),
+            cropBox = confirmedSelectionBoxState,
+          )
+        if (screenPayload != null) {
+          payloads.add(screenPayload.payload)
+        }
+      }
+      val effectivePrompt = preparedQuery?.modelPrompt ?: prompt
       val req =
         OrchestrationRequest(
           conversationId = "assistant_session",
-          userPrompt = prompt,
+          userPrompt = effectivePrompt,
           historyMessages = emptyList(),
+          currentTurnImages = payloads,
           requestedModelId = VerifiedModelCatalog.MOUSOMI_AUTO_SLOT_ID,
         )
       ep.aiOrchestrator().processMessage(req).collectLatest { event ->
@@ -783,6 +1151,26 @@ class MousomiAssistantSession(
     }
   }
 
+  private fun selectPhoneCandidate(candidate: ResolvedContact) {
+    val cur = pendingPhoneActionState ?: return
+    pendingPhoneActionState =
+      if (cur.type == PendingPhoneActionType.DIAL_PHONE) {
+        entryPoint.phoneActionController().prepareDialNumber(candidate.phoneNumber, candidate.displayName)
+      } else {
+        entryPoint.phoneActionController().prepareSms(candidate.phoneNumber, cur.messageBody, candidate.displayName)
+      }
+  }
+
+  private fun selectSocialCandidate(candidate: ResolvedContact) {
+    val cur = pendingSocialActionState ?: return
+    pendingSocialActionState =
+      entryPoint.socialIntegrationManager().prepareWhatsAppMessage(
+        phoneOrName = candidate.phoneNumber,
+        messageText = cur.captionOrMessage,
+        resolvedDisplayLabel = "${candidate.displayName} (${candidate.phoneNumber})",
+      )
+  }
+
   private fun confirmPhoneAction(action: PendingPhoneAction) {
     pendingPhoneActionState = null
     sessionScope.launch {
@@ -799,23 +1187,168 @@ class MousomiAssistantSession(
     }
   }
 
-  private fun handleShareScreenWithLive() {
-    startLiveAssistantMode()
-    entryPoint.screenShareSessionManager().markRequestingConsent()
-    val intent =
-      Intent(context, MainActivity::class.java).apply {
-        action = Intent.ACTION_ASSIST
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        putExtra(MainActivity.EXTRA_QUICK_ACTION, OrbQuickAction.START_SCREEN_SHARE.name)
-      }
-    context.startActivity(intent)
-    finish()
+  private fun confirmAccessibilityAction(action: AccessibilityActionResult) {
+    pendingAccessibilityActionState = null
+    val target = action.targetLabelToConfirm
+    if (target.isBlank()) return
+    val res = entryPoint.accessibilityAgentController().performNodeClick(targetText = target, confirmedSensitiveAction = true)
+    assistantResponseState = "${res.statusLabel}: ${res.detail}"
   }
 
-  private fun launchScreenSelectionFromSession() {
+  private fun enterInlineDrawingMode() {
+    statusBannerState = null
+    drawingStrokePointsState = emptyList()
+    snappedDrawingResultState = null
+    isDrawingModeState = true
+    entryPoint.assistantSessionStateManager().enterDrawingMode()
+    syncWindowForSurfaceState(AssistantSurfaceState.DRAWING)
+    requestInsetsRefresh()
+  }
+
+  private fun redrawInlineDrawing() {
+    confirmedSelectionBoxState = null
+    drawingStrokePointsState = emptyList()
+    snappedDrawingResultState = null
+    isDrawingModeState = true
+    entryPoint.assistantSessionStateManager().enterDrawingMode()
+  }
+
+  private fun confirmInlineDrawing() {
+    val snapped = snappedDrawingResultState ?: return
+    val ep = entryPoint
+    val shareStatus = ep.screenShareSessionManager().status.value
+    if (shareStatus == ScreenShareStatus.STOPPED || shareStatus == ScreenShareStatus.REQUESTING_CONSENT) {
+      isDrawingModeState = false
+      ep.assistantSessionStateManager().confirmDrawingMode()
+      syncWindowForSurfaceState(AssistantSurfaceState.EXPANDED)
+      snappedDrawingResultState = null
+      drawingStrokePointsState = emptyList()
+      confirmedSelectionBoxState = snapped.boundingBox
+      statusBannerState =
+        "Screen sharing is disabled, so external screen content cannot be captured. Tap 'Share screen with Live' to authorize capture."
+      return
+    }
+
+    sessionScope.launch {
+      val ovW = rootContainer?.width ?: 0
+      val ovH = rootContainer?.height ?: 0
+      rootContainer?.visibility = View.INVISIBLE
+      delay(95L)
+      val outcome =
+        ep.screenshotCaptureManager().captureAuthorizedScreenFrame(
+          overlayWidthPx = ovW,
+          overlayHeightPx = ovH,
+        )
+      rootContainer?.visibility = View.VISIBLE
+
+      when (outcome) {
+        ScreenshotCaptureManager.CaptureOutcome.ConsentRequired -> {
+          isDrawingModeState = false
+          ep.assistantSessionStateManager().confirmDrawingMode()
+          syncWindowForSurfaceState(AssistantSurfaceState.EXPANDED)
+          snappedDrawingResultState = null
+          drawingStrokePointsState = emptyList()
+          confirmedSelectionBoxState = snapped.boundingBox
+          statusBannerState = "Screen capture session expired — requesting renewed consent."
+          context.startActivity(ScreenCaptureConsentActivity.buildScreenShareIntent(context, fromOverlay = false))
+        }
+        is ScreenshotCaptureManager.CaptureOutcome.BlockedOrFailed -> {
+          statusBannerState = outcome.reason
+        }
+        is ScreenshotCaptureManager.CaptureOutcome.Success -> {
+          val cropOutcome =
+            ep.smartCropEngine().cropSelectionToFile(
+              sourceFilePath = outcome.filePath,
+              snappedResult = snapped,
+              metadata = outcome.metadata,
+              prefix = "sel_crop_",
+            )
+          cropOutcome.onSuccess { cropped ->
+            val attached =
+              ep.imageAttachmentManager().attachCroppedVisual(
+                croppedFile = cropped.file,
+                sourceFrameFilePath = outcome.filePath,
+                captureMetadata = outcome.metadata,
+                normCropRect = snapped.boundingBox,
+                detectedShape = snapped.detectedShape,
+                isSettling = false,
+              )
+            val floatingItem =
+              FloatingAttachmentItem(
+                id = attached.id,
+                uriString = attached.croppedUriString,
+                filePath = attached.croppedFilePath,
+                label = if (cropped.hasTransparencyMask) "Masked region" else "Cropped area",
+                isFromScreenSelection = true,
+              )
+            pendingAttachmentsState =
+              (pendingAttachmentsState.filterNot { it.isFromScreenSelection } + floatingItem).takeLast(4)
+            isDrawingModeState = false
+            ep.assistantSessionStateManager().confirmDrawingMode()
+            syncWindowForSurfaceState(AssistantSurfaceState.EXPANDED)
+            snappedDrawingResultState = null
+            drawingStrokePointsState = emptyList()
+            confirmedSelectionBoxState = null
+            statusBannerState = "Cropped region attached to Chat Bar. Ask your question and tap Send."
+          }.onFailure { err ->
+            statusBannerState = err.message ?: "Failed to crop selected screen region."
+          }
+        }
+      }
+    }
+  }
+
+  private fun removeSessionAttachment(uriString: String) {
+    val target = pendingAttachmentsState.firstOrNull { it.uriString == uriString }
+    pendingAttachmentsState = pendingAttachmentsState.filterNot { it.uriString == uriString }
+    entryPoint.imageAttachmentManager().removeByUri(uriString)
+    target?.filePath?.let { path ->
+      val file = File(path)
+      if (file.name.startsWith("sel_") || file.name.startsWith("annotated_")) {
+        entryPoint.tempMediaCacheManager().cleanupFile(file)
+      }
+    }
+  }
+
+  private fun cancelInlineDrawing() {
+    isDrawingModeState = false
+    entryPoint.assistantSessionStateManager().cancelDrawingMode()
+    syncWindowForSurfaceState(entryPoint.assistantSessionStateManager().surfaceState.value)
+    requestInsetsRefresh()
+    snappedDrawingResultState = null
+    drawingStrokePointsState = emptyList()
+    confirmedSelectionBoxState = null
+  }
+
+  private fun launchFloatingLiveModeFromSession() {
     cleanupVoiceAndQueries()
-    context.startActivity(ScreenCaptureConsentActivity.buildIntent(context, fromOverlay = false))
-    finish()
+    entryPoint.assistantSessionStateManager().dismissAssistantSession(
+      keepScreenShare = entryPoint.screenShareSessionManager().status.value != ScreenShareStatus.STOPPED
+    )
+    if (hasMicPermission()) {
+      runCatching {
+        ContextCompat.startForegroundService(context, LiveVoiceSessionService.buildStartIntent(context))
+      }
+    }
+    runCatching {
+      ContextCompat.startForegroundService(
+        context,
+        MousomiOverlayService.buildStartFloatingLiveIntent(context),
+      )
+    }
+    hide()
+  }
+
+  private fun handleShareScreenWithLive() {
+    val shareMgr = entryPoint.screenShareSessionManager()
+    if (shareMgr.status.value != ScreenShareStatus.STOPPED) {
+      runCatching { ContextCompat.startForegroundService(context, MediaProjectionCaptureService.buildStopIntent(context)) }
+      shareMgr.stopSession("Screen sharing stopped.")
+      statusBannerState = "Screen sharing turned off."
+      return
+    }
+    statusBannerState = "Requesting Android screen-sharing consent…"
+    context.startActivity(ScreenCaptureConsentActivity.buildScreenShareIntent(context, fromOverlay = false))
   }
 
   private fun launchPhotoPickerFromSession() {

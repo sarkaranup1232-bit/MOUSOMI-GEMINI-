@@ -1,7 +1,7 @@
 package com.example.ui.components
 
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,12 +12,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import kotlin.math.hypot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -83,6 +86,9 @@ fun InAppFloatingOrbOverlay(
       mutableFloatStateOf(config.positionYFraction.coerceIn(0.08f, 0.88f) * usableH)
     }
 
+    val latestSnapToEdge by rememberUpdatedState(config.snapToEdge)
+    val latestDoubleTapVoice by rememberUpdatedState(config.doubleTapForVoice)
+
     Box(
       modifier =
         Modifier
@@ -97,36 +103,61 @@ fun InAppFloatingOrbOverlay(
               true
             }
           }
-          .pointerInput(config.snapToEdge, config.doubleTapForVoice, usableW, usableH) {
-            detectDragGestures(
-              onDragStart = { isDragging = true },
-              onDragEnd = {
+          .pointerInput(usableW, usableH) {
+            val touchSlop = viewConfiguration.touchSlop
+            var lastTapUpMs = 0L
+            awaitEachGesture {
+              val down = awaitFirstDown(requireUnconsumed = false)
+              down.consume()
+              val startX = dragX
+              val startY = dragY
+              var accDx = 0f
+              var accDy = 0f
+              var exceededSlop = false
+              var cancelled = false
+
+              while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull() ?: break
+                if (change.changedToUpIgnoreConsumed() || !change.pressed) {
+                  change.consume()
+                  break
+                }
+                val delta = change.position - change.previousPosition
+                accDx += delta.x
+                accDy += delta.y
+                if (!exceededSlop && hypot(accDx, accDy) > touchSlop) {
+                  exceededSlop = true
+                  isDragging = true
+                }
+                if (exceededSlop) {
+                  dragX = (startX + accDx).coerceIn(0f, usableW)
+                  dragY = (startY + accDy).coerceIn(0.08f * usableH, 0.88f * usableH)
+                }
+                change.consume()
+              }
+
+              if (exceededSlop) {
                 isDragging = false
                 val rawXFrac = (dragX / usableW).coerceIn(0f, 1f)
-                val snappedXFrac = OrbPositionHelper.computeSnappedXFraction(rawXFrac, config.snapToEdge)
+                val snappedXFrac = OrbPositionHelper.computeSnappedXFraction(rawXFrac, latestSnapToEdge)
                 val clampedYFrac = OrbPositionHelper.clampFraction(dragY / usableH, 0.08f, 0.88f)
                 dragX = snappedXFrac * usableW
                 dragY = clampedYFrac * usableH
                 onPositionCommitted(snappedXFrac, clampedYFrac)
-              },
-              onDragCancel = { isDragging = false },
-              onDrag = { change, dragAmount ->
-                change.consume()
-                dragX = (dragX + dragAmount.x).coerceIn(0f, usableW)
-                dragY = (dragY + dragAmount.y).coerceIn(0.08f * usableH, 0.88f * usableH)
-              },
-            )
-          }
-          .pointerInput(config.doubleTapForVoice) {
-            detectTapGestures(
-              onTap = { menuOpen = !menuOpen },
-              onDoubleTap = {
-                if (config.doubleTapForVoice) {
+              } else if (!cancelled) {
+                val now = System.currentTimeMillis()
+                val isDoubleTap = latestDoubleTapVoice && (now - lastTapUpMs) in 40L..280L
+                if (isDoubleTap) {
+                  lastTapUpMs = 0L
                   menuOpen = false
                   onQuickAction(OrbQuickAction.START_VOICE)
+                } else {
+                  lastTapUpMs = now
+                  menuOpen = !menuOpen
                 }
-              },
-            )
+              }
+            }
           }
           .testTag("floating_ai_orb"),
       contentAlignment = Alignment.Center,

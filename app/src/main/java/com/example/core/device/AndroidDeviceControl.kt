@@ -10,7 +10,9 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.AlarmClock
 import android.provider.CalendarContract
+import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.content.pm.ShortcutInfoCompat
@@ -154,6 +156,16 @@ class AndroidIntentManager @Inject constructor(
         "Sound Settings" to Intent(Settings.ACTION_SOUND_SETTINGS)
       "battery" in q -> "Battery Saver Settings" to Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS)
       "location" in q -> "Location Settings" to Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+      "contact" in q || "contacts" in q ->
+        "Contacts" to Intent(Intent.ACTION_VIEW, ContactsContract.Contacts.CONTENT_URI)
+      "accessibility" in q ->
+        "Accessibility Settings" to Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+      "notification listener" in q || "notification access" in q ->
+        "Notification Access Settings" to Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+      "default assistant" in q || "assistant settings" in q ->
+        "Default Assistant Settings" to Intent(Settings.ACTION_VOICE_INPUT_SETTINGS)
+      "timer" in q && "open" in q ->
+        "Timers" to Intent(AlarmClock.ACTION_SHOW_ALARMS)
       "notification" in q ->
         "App Notification Settings" to
           Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
