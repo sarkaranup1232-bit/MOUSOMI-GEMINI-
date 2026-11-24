@@ -111,10 +111,19 @@ class LiveConnectionManager @Inject constructor(
   fun buildSystemInstruction(custom: String?, language: ResponseLanguage): String {
     val langHint =
       when (language) {
-        ResponseLanguage.BENGALI -> "Respond concisely and naturally in Bengali unless asked otherwise."
-        ResponseLanguage.HINDI -> "Respond concisely and naturally in Hindi unless asked otherwise."
-        ResponseLanguage.ENGLISH -> "Respond concisely and naturally in English."
-        ResponseLanguage.AUTO -> "Match the user's spoken language naturally and respond concisely."
+        ResponseLanguage.BENGALI,
+        ResponseLanguage.BENGALI_IN,
+        ResponseLanguage.BENGALI_BD ->
+          "Respond concisely and naturally in Bengali unless asked otherwise."
+        ResponseLanguage.HINDI,
+        ResponseLanguage.HINDI_IN ->
+          "Respond concisely and naturally in Hindi unless asked otherwise."
+        ResponseLanguage.ENGLISH,
+        ResponseLanguage.ENGLISH_IN,
+        ResponseLanguage.ENGLISH_US ->
+          "Respond concisely and naturally in English."
+        ResponseLanguage.AUTO ->
+          "Match the user's spoken language naturally and respond concisely."
       }
     val base = custom?.takeIf { it.isNotBlank() } ?: DEFAULT_SYSTEM_INSTRUCTION
     return "$base $langHint"

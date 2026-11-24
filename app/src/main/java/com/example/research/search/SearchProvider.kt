@@ -17,6 +17,7 @@ data class SearchQueryRequest(
   val page: Int = 1,
   val pageSize: Int = 8,
   val includePageContent: Boolean = false,
+  val bypassCache: Boolean = false,
 )
 
 class NoSearchProviderConfiguredException(message: String) : IllegalStateException(message)

@@ -314,7 +314,9 @@ class GeminiGroundingSearchProvider @Inject constructor(
         }
 
       if (!resp.isSuccessful) {
-        error("Gemini Search Grounding failed (HTTP ${resp.code()}).")
+        val errBody = resp.errorBody()?.string()
+        resp.errorBody()?.close()
+        throw RetryPolicy.mapHttpError(resp.code(), errBody, resp.headers()["Retry-After"])
       }
 
       val body = resp.body() ?: error("Empty response from Gemini Search Grounding.")
@@ -396,7 +398,9 @@ class GeminiGroundingSearchProvider @Inject constructor(
           )
         }
       if (!resp.isSuccessful) {
-        error("Gemini Maps Grounding failed (HTTP ${resp.code()}).")
+        val errBody = resp.errorBody()?.string()
+        resp.errorBody()?.close()
+        throw RetryPolicy.mapHttpError(resp.code(), errBody, resp.headers()["Retry-After"])
       }
       val body = resp.body() ?: error("Empty response from Gemini Maps Grounding.")
       val candidate = body.candidates.firstOrNull()
@@ -463,9 +467,11 @@ class CompositeSearchService @Inject constructor(
 
     val cacheKey = "${cleanQuery.lowercase()}|${request.topic.name}|p${request.page}|c${request.includePageContent}"
     val now = System.currentTimeMillis()
-    cache[cacheKey]?.let { entry ->
-      if (now - entry.cachedAtMs <= cacheTtlMs) {
-        return Result.success(entry.response)
+    if (!request.bypassCache) {
+      cache[cacheKey]?.let { entry ->
+        if (now - entry.cachedAtMs <= cacheTtlMs) {
+          return Result.success(entry.response)
+        }
       }
     }
 
@@ -497,7 +503,7 @@ class CompositeSearchService @Inject constructor(
     if (orderedProviders.isEmpty()) {
       return Result.failure(
         NoSearchProviderConfiguredException(
-          "No live search provider configured. Add a Gemini API key (for Google Search Grounding), an External Search endpoint, or an HTTPS Backend Proxy in Settings."
+          "No live search provider configured. Add a Gemini API key in Settings for Google Search Grounding (works with both Gemini and Groq models)."
         )
       )
     }
@@ -510,7 +516,7 @@ class CompositeSearchService @Inject constructor(
         val deduped = deduplicateAndRank(raw.results)
         val enriched =
           if (request.includePageContent) {
-            deduped.take(5).map { item ->
+            deduped.take(8).map { item ->
               val meta = pageRetriever.fetchPageMetadata(item.url)
               if (meta != null) {
                 item.copy(
@@ -522,7 +528,7 @@ class CompositeSearchService @Inject constructor(
               } else {
                 item
               }
-            } + deduped.drop(5)
+            } + deduped.drop(8)
           } else {
             deduped
           }

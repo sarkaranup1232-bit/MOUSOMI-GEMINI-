@@ -13,6 +13,7 @@ import com.example.core.voice.HotwordCapabilityReport
 import com.example.core.voice.LiveConnectionState
 import com.example.core.voice.LiveSessionPhase
 import com.example.core.voice.OrbReactiveFrame
+import com.example.core.voice.VoiceOptionInfo
 import com.example.core.voice.VoiceState
 import com.example.domain.memory.DiscoveryQuestionPrompt
 import com.example.domain.memory.PendingMemoryConfirmation
@@ -37,6 +38,7 @@ import com.example.domain.model.ImageEditFeatureType
 import com.example.domain.model.ImageGenerationStatus
 import com.example.domain.model.ImageVersionRecord
 import com.example.domain.model.InstalledAppInfo
+import com.example.domain.model.LiveDiscoveredModel
 import com.example.domain.model.ManagedTaskItem
 import com.example.domain.model.MemoryRecord
 import com.example.domain.model.ModelSubstitutionPrompt
@@ -54,6 +56,7 @@ import com.example.domain.model.PosterFontChoice
 import com.example.domain.model.PosterTemplatePreset
 import com.example.domain.model.PosterTextLayer
 import com.example.domain.model.PrivacyAndPerformanceConfig
+import com.example.domain.model.ProviderTestReport
 import com.example.domain.model.ReminderEntry
 import com.example.domain.model.ResearchActivitySnapshot
 import com.example.domain.model.ResponseBlock
@@ -327,6 +330,13 @@ data class MousomiUiState(
   val pendingDiscoveryPrompt: DiscoveryQuestionPrompt? = null,
   val hotwordCapabilityReport: HotwordCapabilityReport? = null,
   val todoNotes: List<TodoNoteRecord> = emptyList(),
+  val isTestingGemini: Boolean = false,
+  val isTestingGroq: Boolean = false,
+  val geminiTestReport: ProviderTestReport? = null,
+  val groqTestReport: ProviderTestReport? = null,
+  val discoveredGeminiModels: List<LiveDiscoveredModel> = emptyList(),
+  val discoveredGroqModels: List<LiveDiscoveredModel> = emptyList(),
+  val availableTtsVoices: List<VoiceOptionInfo> = emptyList(),
 ) {
   val pendingAttachment: AttachmentPreview?
     get() = pendingAttachments.firstOrNull()

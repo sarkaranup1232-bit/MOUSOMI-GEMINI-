@@ -566,6 +566,15 @@ fun NeonChatComposer(
         testTag = "mode_search_button",
       )
       ComposerModePill(
+        label = stringResource(R.string.mode_latest_news),
+        selected = operatingMode == OperatingMode.LATEST_NEWS,
+        onClick = {
+          onSelectMode(InputMode.CHAT)
+          onSelectOperatingMode(OperatingMode.LATEST_NEWS)
+        },
+        testTag = "mode_latest_news_button",
+      )
+      ComposerModePill(
         label = stringResource(R.string.mode_deep_research),
         selected = operatingMode == OperatingMode.DEEP_RESEARCH,
         onClick = {
@@ -810,6 +819,7 @@ fun NeonChatComposer(
                         stringResource(R.string.input_placeholder_task)
                       operatingMode == OperatingMode.ANALYSIS_THINK -> stringResource(R.string.input_placeholder_analysis)
                       operatingMode == OperatingMode.GOOGLE_AI_SEARCH -> stringResource(R.string.input_placeholder_search)
+                      operatingMode == OperatingMode.LATEST_NEWS -> stringResource(R.string.input_placeholder_latest_news)
                       operatingMode == OperatingMode.DEEP_RESEARCH -> stringResource(R.string.input_placeholder_research)
                       else -> stringResource(R.string.input_placeholder_chat)
                     },

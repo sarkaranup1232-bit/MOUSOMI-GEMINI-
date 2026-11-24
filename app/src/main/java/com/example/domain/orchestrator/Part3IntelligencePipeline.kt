@@ -35,6 +35,7 @@ import com.example.multimodal.document.DocumentIntelligenceEngine
 import com.example.multimodal.image.PhotoIntelligenceEngine
 import com.example.multimodal.video.VideoIntelligenceEngine
 import com.example.research.deepresearch.DeepResearchEngine
+import com.example.research.search.LiveSearchCoordinator
 import com.example.research.search.SearchQueryRequest
 import com.example.research.search.SearchService
 import com.example.research.search.SearchTopic
@@ -61,6 +62,7 @@ class Part3IntelligencePipeline @Inject constructor(
   private val reminderManager: ReminderManager? = null,
   private val taskExecutionEngine: TaskExecutionEngine? = null,
   private val videoAndMusicService: VideoAndMusicGenerationService? = null,
+  private val liveSearchCoordinator: LiveSearchCoordinator? = null,
 ) {
 
   suspend fun handleSpecialIntent(
@@ -232,36 +234,67 @@ class Part3IntelligencePipeline @Inject constructor(
       }
 
       IntelligenceIntent.LIVE_SEARCH -> {
-        collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Searching("Running real-time web search…")))
-        val topic =
-          if ("news" in cleanPrompt.lowercase() || "today" in cleanPrompt.lowercase()) SearchTopic.NEWS
-          else SearchTopic.GENERAL
-        val searchRes =
-          searchService.search(
-            SearchQueryRequest(
+        val statusMsg =
+          if (decision.selectedModel.provider == ProviderType.GROQ) {
+            "Searching web via Gemini Grounding → preparing sources for ${decision.selectedModel.displayName}…"
+          } else {
+            "Running real-time Google Search Grounding…"
+          }
+        collector.emit(OrchestrationEvent.StateChanged(AiResponseState.Searching(statusMsg)))
+
+        if (liveSearchCoordinator != null) {
+          val coordinatedRes =
+            liveSearchCoordinator.coordinateSearch(
               query = cleanPrompt,
-              topic = topic,
-              page = 1,
-              pageSize = 6,
-              includePageContent = true,
-            ),
-            settings,
+              decision = decision,
+              operatingMode = decision.operatingMode,
+              settings = settings,
+            )
+          if (coordinatedRes.isFailure) {
+            val reason = coordinatedRes.exceptionOrNull()?.message ?: "Live search failed."
+            return PipelinePreparation.Aborted(
+              "Live Search Unavailable: $reason"
+            )
+          }
+          val outcome = coordinatedRes.getOrThrow()
+          collector.emit(OrchestrationEvent.ResearchTelemetry(outcome.telemetrySnapshot))
+          val blocks = listOf(ResponseBlock.SourceCitations(outcome.verifiedSources))
+          collector.emit(OrchestrationEvent.BlocksUpdated(blocks))
+          PipelinePreparation.ContinueWithLlm(
+            extraSystemContext = outcome.promptInstructionContext,
+            preEmittedBlocks = blocks,
           )
-        if (searchRes.isFailure) {
-          val reason = searchRes.exceptionOrNull()?.message ?: "Live search failed."
-          return PipelinePreparation.Aborted(
-            "Live Search Unavailable: $reason. Never claiming live search results without a configured search provider."
+        } else {
+          val topic =
+            if ("news" in cleanPrompt.lowercase() || "today" in cleanPrompt.lowercase()) SearchTopic.NEWS
+            else SearchTopic.GENERAL
+          val searchRes =
+            searchService.search(
+              SearchQueryRequest(
+                query = cleanPrompt,
+                topic = topic,
+                page = 1,
+                pageSize = 8,
+                includePageContent = true,
+                bypassCache = true,
+              ),
+              settings,
+            )
+          if (searchRes.isFailure) {
+            val reason = searchRes.exceptionOrNull()?.message ?: "Live search failed."
+            return PipelinePreparation.Aborted(
+              "Live Search Unavailable: $reason. Never claiming live search results without a configured search provider."
+            )
+          }
+          val sources = searchRes.getOrThrow().results.mapIndexed { i, item -> item.copy(sourceNumber = i + 1) }
+          val blocks = listOf(ResponseBlock.SourceCitations(sources))
+          collector.emit(OrchestrationEvent.BlocksUpdated(blocks))
+          val sourceContext = formatSourcesForPrompt(sources)
+          PipelinePreparation.ContinueWithLlm(
+            extraSystemContext = sourceContext,
+            preEmittedBlocks = blocks,
           )
         }
-        val sources = searchRes.getOrThrow().results
-        val blocks =
-          if (sources.isNotEmpty()) listOf(ResponseBlock.SourceCitations(sources)) else emptyList()
-        collector.emit(OrchestrationEvent.BlocksUpdated(blocks))
-        val sourceContext = formatSourcesForPrompt(sources)
-        PipelinePreparation.ContinueWithLlm(
-          extraSystemContext = sourceContext,
-          preEmittedBlocks = blocks,
-        )
       }
 
       IntelligenceIntent.DOCUMENT_INTELLIGENCE,

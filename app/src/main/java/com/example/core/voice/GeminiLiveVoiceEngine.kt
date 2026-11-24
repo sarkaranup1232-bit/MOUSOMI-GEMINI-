@@ -1,11 +1,14 @@
 package com.example.core.voice
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.example.core.assistant.AssistantSessionStateManager
 import com.example.core.assistant.VoiceSubsystemPhase
 import com.example.domain.model.VoicePreferences
@@ -206,6 +209,18 @@ class GeminiLiveVoiceEngine @Inject constructor(
               }
             }
 
+          if (
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
+              PackageManager.PERMISSION_GRANTED
+          ) {
+            throw SecurityException("Microphone permission is required for Live Voice.")
+          }
+          if (
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
+              PackageManager.PERMISSION_GRANTED
+          ) {
+            throw SecurityException("Microphone permission is required for Live Voice.")
+          }
           session.startAudioConversation(conversationConfig)
         } catch (ce: CancellationException) {
           throw ce
@@ -284,6 +299,18 @@ class GeminiLiveVoiceEngine @Inject constructor(
             _status.value = LiveVoiceSessionStatus.Active
             liveVoiceSessionManager.onHandshakeSucceeded()
             sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.LISTENING)
+            if (
+              ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+              throw SecurityException("Microphone permission is required for Live Voice.")
+            }
+            if (
+              ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+              throw SecurityException("Microphone permission is required for Live Voice.")
+            }
             existing.startAudioConversation(
               liveAudioConversationConfig {
                 enableInterruptions = lastAllowInterruptions

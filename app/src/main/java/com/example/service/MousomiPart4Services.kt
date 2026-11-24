@@ -1,6 +1,7 @@
 package com.example.service
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
@@ -1005,6 +1006,7 @@ open class MousomiOverlayService : Service() {
   private val isSystemPowerSave = MutableStateFlow(false)
   private var overlayQueryJob: Job? = null
   private var overlayVoiceCollectorJob: Job? = null
+  private var overlayTtsLoopJob: Job? = null
   private var edgeRevealSettlerJob: Job? = null
   private var edgeStopFadeJob: Job? = null
   private var imeHidePendingJob: Job? = null
@@ -1161,6 +1163,31 @@ open class MousomiOverlayService : Service() {
         maybeAttachSystemOrbFromSettings()
         val autoVoice = intent.getBooleanExtra(EXTRA_PANEL_VOICE_AUTO, false)
         showAssistantPanel(autoStartVoice = autoVoice)
+        return START_STICKY
+      }
+      ACTION_SYNC_BORDER_LIGHT -> {
+        scope.launch {
+          val cfg = settingsRepository.getSettingsSnapshot().edgeLightConfig
+          if (cfg.enabled && cfg.systemOverlayEnabled) {
+            isOverlayPaused.value = false
+            startForegroundOverlayNotification()
+            attachEdgeLightWindow()
+          } else {
+            val keepRunning =
+              sessionStateManager.isSessionActive.value ||
+                controlBarContainer != null ||
+                orbView != null ||
+                assistantPanelContainer != null ||
+                isFloatingLivePopupMode.value
+            if (!keepRunning) {
+              detachEdgeLightWindow()
+              stopForeground(STOP_FOREGROUND_REMOVE)
+              stopSelf()
+            } else if (!cfg.enabled) {
+              detachEdgeLightWindow()
+            }
+          }
+        }
         return START_STICKY
       }
     }
@@ -1341,8 +1368,9 @@ open class MousomiOverlayService : Service() {
           val effectiveConfig =
             baseCfg.copy(
               enabled = screenOn && !paused && (baseCfg.enabled || floatingLiveActive),
+              systemOverlayEnabled = baseCfg.systemOverlayEnabled || floatingLiveActive,
               reducedMotion = baseCfg.reducedMotion || !screenOn,
-              scheduleEnabled = false,
+              scheduleEnabled = if (floatingLiveActive) false else baseCfg.scheduleEnabled,
             )
           val edgeParams =
             EdgeLightStateMapper.resolve(
@@ -2017,6 +2045,8 @@ open class MousomiOverlayService : Service() {
     detachOverlayDrawingSelectionWindow()
     overlayQueryJob?.cancel()
     overlayVoiceCollectorJob?.cancel()
+    overlayTtsLoopJob?.cancel()
+    overlayTtsLoopJob = null
     geminiLiveVoiceEngine.stopAndClose()
     liveVoiceSessionManager.onEnded(keepScreenShare = false)
     voiceController.stopListening()
@@ -2930,6 +2960,23 @@ open class MousomiOverlayService : Service() {
           }
         }
       }
+    overlayTtsLoopJob?.cancel()
+    overlayTtsLoopJob =
+      scope.launch {
+        voiceController.ttsCompletedTick.collectLatest { tick ->
+          if (tick <= 0L) return@collectLatest
+          delay(300L)
+          val busy =
+            overlayResponseState.value is AiResponseState.Loading ||
+              overlayResponseState.value is AiResponseState.Thinking ||
+              overlayResponseState.value is AiResponseState.Searching ||
+              overlayResponseState.value is AiResponseState.Streaming
+          if (isFloatingLivePopupMode.value && !isOverlayPaused.value && !isOverlayMuted.value && !busy) {
+            val settings = settingsRepository.getSettingsSnapshot()
+            voiceController.startListening(settings.voicePreferences.preferredLanguage)
+          }
+        }
+      }
     scope.launch {
       val settings = settingsRepository.getSettingsSnapshot()
       voiceController.interruptSpeakingAndListen(settings.voicePreferences.preferredLanguage)
@@ -3275,6 +3322,7 @@ open class MousomiOverlayService : Service() {
     imeHidePendingJob?.cancel()
     overlayQueryJob?.cancel()
     overlayVoiceCollectorJob?.cancel()
+    overlayTtsLoopJob?.cancel()
     hideDismissTargetOverlay()
     dismissPopupWindow()
     detachProfileQuickMenu()
@@ -3302,6 +3350,7 @@ open class MousomiOverlayService : Service() {
     const val ACTION_SHOW_ASSISTANT_PANEL = "com.example.action.SHOW_OVERLAY_ASSISTANT_PANEL"
     const val ACTION_ACTIVATE_ASSISTANT = "com.example.action.ACTIVATE_FLOATING_ASSISTANT"
     const val ACTION_START_FLOATING_LIVE = "com.example.action.START_FLOATING_LIVE"
+    const val ACTION_SYNC_BORDER_LIGHT = "com.example.action.SYNC_BORDER_LIGHT"
     const val EXTRA_PANEL_VOICE_AUTO = "extra_panel_voice_auto"
     const val EXTRA_EXPAND_PANEL = "extra_expand_panel"
     const val EXTRA_ACTIVATION_EDGE = "extra_activation_edge"
@@ -3312,6 +3361,11 @@ open class MousomiOverlayService : Service() {
     fun buildStartFloatingLiveIntent(context: Context): Intent =
       Intent(context, MousomiOverlayService::class.java).apply {
         action = ACTION_START_FLOATING_LIVE
+      }
+
+    fun buildSyncBorderLightIntent(context: Context): Intent =
+      Intent(context, MousomiOverlayService::class.java).apply {
+        action = ACTION_SYNC_BORDER_LIGHT
       }
 
     fun buildActivateAssistantIntent(
@@ -3394,46 +3448,96 @@ class MousomiNotificationListenerService : NotificationListenerService() {
   }
 }
 
+@AndroidEntryPoint
 class MousomiQuickTileService : TileService() {
+
+  @Inject lateinit var settingsRepository: SettingsRepository
+  private val tileScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
   override fun onStartListening() {
     super.onStartListening()
-    qsTile?.apply {
-      state = Tile.STATE_ACTIVE
-      label = "Mousomi AI"
-      updateTile()
+    tileScope.launch {
+      val cfg = runCatching { settingsRepository.getSettingsSnapshot().edgeLightConfig }.getOrNull()
+      val isActive = cfg != null && cfg.enabled && cfg.systemOverlayEnabled && Settings.canDrawOverlays(this@MousomiQuickTileService)
+      qsTile?.apply {
+        label = "Border Light"
+        state = if (isActive) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+        updateTile()
+      }
     }
   }
 
   override fun onClick() {
     super.onClick()
-    if (Settings.canDrawOverlays(this)) {
-      val overlayIntent =
-        MousomiOverlayService.buildActivateAssistantIntent(
-          context = this,
-          edge = EdgeActivationEdge.BOTTOM,
-          expandPanel = true,
-          autoVoice = false,
-        )
-      ContextCompat.startForegroundService(this, overlayIntent)
-    } else {
-      val launch =
-        Intent(this, MainActivity::class.java).apply {
-          action = Intent.ACTION_ASSIST
-          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+    tileScope.launch {
+      val settings = settingsRepository.getSettingsSnapshot()
+      val cfg = settings.edgeLightConfig
+      val currentlyActive = cfg.enabled && cfg.systemOverlayEnabled && Settings.canDrawOverlays(this@MousomiQuickTileService)
+      val nextActive = !currentlyActive
+
+      if (nextActive && !Settings.canDrawOverlays(this@MousomiQuickTileService)) {
+        qsTile?.apply {
+          label = "Border Light"
+          state = Tile.STATE_INACTIVE
+          updateTile()
         }
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-        val pending =
-          PendingIntent.getActivity(
-            this,
-            409,
-            launch,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-          )
-        startActivityAndCollapse(pending)
+        val permIntent =
+          Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:$packageName"),
+          ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+          val pending =
+            PendingIntent.getActivity(
+              this@MousomiQuickTileService,
+              409,
+              permIntent,
+              PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+          startActivityAndCollapse(pending)
+        } else {
+          legacyStartActivityAndCollapse(permIntent)
+        }
+        return@launch
+      }
+
+      val updatedConfig =
+        if (nextActive) {
+          cfg.copy(enabled = true, systemOverlayEnabled = true)
+        } else {
+          cfg.copy(systemOverlayEnabled = false)
+        }
+      settingsRepository.saveSettings(settings.copy(edgeLightConfig = updatedConfig))
+
+      qsTile?.apply {
+        label = "Border Light"
+        state = if (nextActive) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+        updateTile()
+      }
+
+      val syncIntent = MousomiOverlayService.buildSyncBorderLightIntent(this@MousomiQuickTileService)
+      if (nextActive) {
+        ContextCompat.startForegroundService(this@MousomiQuickTileService, syncIntent)
       } else {
-        @Suppress("DEPRECATION")
-        startActivityAndCollapse(launch)
+        runCatching { startService(syncIntent) }
       }
     }
+  }
+
+  @Suppress("DEPRECATION")
+  @SuppressLint("StartActivityAndCollapseDeprecated")
+  private fun legacyStartActivityAndCollapse(intent: Intent) {
+    startActivityAndCollapse(intent)
+  }
+
+  @Suppress("DEPRECATION")
+  @SuppressLint("StartActivityAndCollapseDeprecated")
+  private fun legacyStartActivityAndCollapse(intent: Intent) {
+    startActivityAndCollapse(intent)
+  }
+
+  override fun onDestroy() {
+    tileScope.cancel()
+    super.onDestroy()
   }
 }

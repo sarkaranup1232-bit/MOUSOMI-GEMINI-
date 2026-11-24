@@ -96,8 +96,15 @@ object EdgeLightStateMapper {
         forcePreview -> config.enabled || config.assistantEdgeGlowEnabled
         notificationAlertActive -> true
         isOverlayHost -> {
-          // System overlay never stays permanently stuck bright when assistant is idle/inactive/stopped
-          config.assistantEdgeGlowEnabled && (config.enabled || sessionActiveForGlow) && sessionActiveForGlow
+          val standaloneSystemBorderLight =
+            config.enabled &&
+              config.systemOverlayEnabled &&
+              scheduled &&
+              assistantSessionPhase != AssistantSessionPhase.PAUSED &&
+              assistantSessionPhase != AssistantSessionPhase.STOPPING
+          val assistantSessionGlow =
+            config.assistantEdgeGlowEnabled && (config.enabled || sessionActiveForGlow) && sessionActiveForGlow
+          standaloneSystemBorderLight || assistantSessionGlow
         }
         else -> config.enabled && scheduled
       }

@@ -40,13 +40,14 @@ import org.junit.Test
 class MasterUpgradeUnitTest {
 
   @Test
-  fun `all five operating modes exist including independent Task Mode`() {
+  fun `all six operating modes exist including independent Latest News and Task Mode`() {
     assertEquals(
       listOf(
         OperatingMode.NORMAL_CHAT,
         OperatingMode.ANALYSIS_THINK,
         OperatingMode.GOOGLE_AI_SEARCH,
         OperatingMode.DEEP_RESEARCH,
+        OperatingMode.LATEST_NEWS,
         OperatingMode.TASK_MODE,
       ),
       OperatingMode.entries,

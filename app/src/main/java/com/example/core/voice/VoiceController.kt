@@ -87,6 +87,14 @@ interface SpeechToTextGateway {
   fun release()
 }
 
+data class VoiceOptionInfo(
+  val name: String,
+  val localeTag: String,
+  val localeDisplayName: String,
+  val isNetworkConnectionRequired: Boolean,
+  val quality: Int,
+)
+
 interface TextToSpeechGateway {
   fun speak(
     messageId: String,
@@ -99,13 +107,15 @@ interface TextToSpeechGateway {
 
   fun setSpeechProgressListener(listener: (Float) -> Unit) {}
 
+  fun getAvailableVoices(preferredLanguage: ResponseLanguage? = null): List<VoiceOptionInfo> = emptyList()
+
   fun stop()
 
   fun release()
 }
 
 object SpeechRecognizerDiagnostics {
-  fun resolveExternalRecognitionComponent(context: Context): android.content.ComponentName? {
+  fun resolveAllExternalRecognitionComponents(context: Context): List<android.content.ComponentName> {
     val intent = Intent(android.speech.RecognitionService.SERVICE_INTERFACE)
     val pm = context.packageManager
     val candidates =
@@ -123,9 +133,9 @@ object SpeechRecognizerDiagnostics {
         .mapNotNull { it.serviceInfo }
         .filter { it.packageName != context.packageName && it.enabled }
 
-    if (externalServices.isEmpty()) return null
+    if (externalServices.isEmpty()) return emptyList()
 
-    val preferredPackages =
+    val preferredOrder =
       listOf(
         "com.google.android.googlequicksearchbox",
         "com.google.android.tts",
@@ -134,13 +144,16 @@ object SpeechRecognizerDiagnostics {
         "com.samsung.android.scs",
       )
 
-    val chosen =
-      preferredPackages.firstNotNullOfOrNull { pkg ->
-        externalServices.firstOrNull { it.packageName == pkg }
-      } ?: externalServices.first()
-
-    return android.content.ComponentName(chosen.packageName, chosen.name)
+    return externalServices
+      .sortedBy { svc ->
+        val idx = preferredOrder.indexOf(svc.packageName)
+        if (idx >= 0) idx else Int.MAX_VALUE
+      }
+      .map { android.content.ComponentName(it.packageName, it.name) }
   }
+
+  fun resolveExternalRecognitionComponent(context: Context): android.content.ComponentName? =
+    resolveAllExternalRecognitionComponents(context).firstOrNull()
 
   fun mapErrorToMessage(error: Int): Pair<String, Boolean> {
     val recoverableSilence =
@@ -192,6 +205,15 @@ class AndroidSpeechToTextEngine @Inject constructor(
   private var activeListenToken: Long = 0L
   private var pendingStartRunnable: Runnable? = null
 
+  private val listenAudioFocusListener =
+    AudioManager.OnAudioFocusChangeListener { focusChange ->
+      if (focusChange == AudioManager.AUDIOFOCUS_LOSS ||
+        focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
+      ) {
+        abandonListenAudioFocus()
+      }
+    }
+
   private fun requestListenAudioFocus() {
     val am = audioManager ?: return
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -203,13 +225,18 @@ class AndroidSpeechToTextEngine @Inject constructor(
               .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
               .build()
           )
+          .setOnAudioFocusChangeListener(listenAudioFocusListener, mainHandler)
           .build()
       listenFocusRequest = req
       runCatching { am.requestAudioFocus(req) }
     } else {
       @Suppress("DEPRECATION")
       runCatching {
-        am.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+        am.requestAudioFocus(
+          listenAudioFocusListener,
+          AudioManager.STREAM_MUSIC,
+          AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
+        )
       }
     }
   }
@@ -305,6 +332,7 @@ class AndroidSpeechToTextEngine @Inject constructor(
     token: Long,
     languageTag: String,
     preferOnDeviceFallback: Boolean,
+    componentIndex: Int = 0,
     onPartial: (String) -> Unit,
     onFinal: (String) -> Unit,
     onError: (message: String, isRecoverableSilence: Boolean) -> Unit,
@@ -312,12 +340,13 @@ class AndroidSpeechToTextEngine @Inject constructor(
   ) {
     if (token != activeListenToken) return
 
-    val externalComponent = SpeechRecognizerDiagnostics.resolveExternalRecognitionComponent(context)
+    val externalComponents = SpeechRecognizerDiagnostics.resolveAllExternalRecognitionComponents(context)
+    val externalComponent = externalComponents.getOrNull(componentIndex) ?: externalComponents.firstOrNull()
     val canOnDevice =
       Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
         SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
 
-    if (externalComponent == null && !canOnDevice && !SpeechRecognizer.isRecognitionAvailable(context)) {
+    if (externalComponents.isEmpty() && !canOnDevice && !SpeechRecognizer.isRecognitionAvailable(context)) {
       onRmsNormalized(0f)
       onError("No speech recognition service is available on this device.", false)
       return
@@ -333,16 +362,20 @@ class AndroidSpeechToTextEngine @Inject constructor(
               SpeechRecognizer.createSpeechRecognizer(context)
             }
           }.getOrNull()
+        componentIndex > 0 && componentIndex < externalComponents.size ->
+          runCatching { SpeechRecognizer.createSpeechRecognizer(context, externalComponents[componentIndex]) }.getOrNull()
         externalComponent != null ->
           runCatching { SpeechRecognizer.createSpeechRecognizer(context, externalComponent) }.getOrNull()
         canOnDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
           runCatching { SpeechRecognizer.createOnDeviceSpeechRecognizer(context) }.getOrNull()
+        SpeechRecognizer.isRecognitionAvailable(context) ->
+          runCatching { SpeechRecognizer.createSpeechRecognizer(context) }.getOrNull()
         else -> null
       }
 
     if (sr == null) {
       onRmsNormalized(0f)
-      onError("External speech recognition service is not installed or accessible.", false)
+      onError("Speech recognition service is unavailable or could not initialize.", false)
       return
     }
 
@@ -400,29 +433,57 @@ class AndroidSpeechToTextEngine @Inject constructor(
           abandonListenAudioFocus()
           destroyCurrentRecognizer()
 
-          // Retry once with Android 12 on-device recognizer on network/timeout errors (1 or 2)
-          val isNetworkFailure =
+          // Retry cleanly on network/timeout/client errors:
+          // 1) Android 12+ on-device recognizer fallback
+          // 2) Secondary installed RecognitionService (e.g. Google TTS / Samsung SCS)
+          val isTransientOrNetworkFailure =
             error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT ||
-              error == SpeechRecognizer.ERROR_NETWORK
-          if (isNetworkFailure && !retriedOnDevice && canOnDevice) {
-            retriedOnDevice = true
-            mainHandler.postDelayed(
-              {
-                if (token == activeListenToken) {
-                  launchRecognizerInternal(
-                    token = token,
-                    languageTag = languageTag,
-                    preferOnDeviceFallback = true,
-                    onPartial = onPartial,
-                    onFinal = onFinal,
-                    onError = onError,
-                    onRmsNormalized = onRmsNormalized,
-                  )
-                }
-              },
-              80L,
-            )
-            return
+              error == SpeechRecognizer.ERROR_NETWORK ||
+              error == SpeechRecognizer.ERROR_CLIENT ||
+              error == SpeechRecognizer.ERROR_SERVER
+          if (isTransientOrNetworkFailure) {
+            if (!retriedOnDevice && canOnDevice) {
+              retriedOnDevice = true
+              mainHandler.postDelayed(
+                {
+                  if (token == activeListenToken) {
+                    launchRecognizerInternal(
+                      token = token,
+                      languageTag = languageTag,
+                      preferOnDeviceFallback = true,
+                      componentIndex = componentIndex,
+                      onPartial = onPartial,
+                      onFinal = onFinal,
+                      onError = onError,
+                      onRmsNormalized = onRmsNormalized,
+                    )
+                  }
+                },
+                90L,
+              )
+              return
+            }
+            val nextIndex = componentIndex + 1
+            if (nextIndex < externalComponents.size && nextIndex <= 2) {
+              mainHandler.postDelayed(
+                {
+                  if (token == activeListenToken) {
+                    launchRecognizerInternal(
+                      token = token,
+                      languageTag = languageTag,
+                      preferOnDeviceFallback = false,
+                      componentIndex = nextIndex,
+                      onPartial = onPartial,
+                      onFinal = onFinal,
+                      onError = onError,
+                      onRmsNormalized = onRmsNormalized,
+                    )
+                  }
+                },
+                90L,
+              )
+              return
+            }
           }
 
           val (message, recoverableSilence) = SpeechRecognizerDiagnostics.mapErrorToMessage(error)
@@ -499,6 +560,16 @@ class AndroidTextToSpeechEngine @Inject constructor(
     onSpeechProgressListener = listener
   }
 
+  private val ttsMainHandler = Handler(Looper.getMainLooper())
+  private val ttsAudioFocusListener =
+    AudioManager.OnAudioFocusChangeListener { focusChange ->
+      if (focusChange == AudioManager.AUDIOFOCUS_LOSS ||
+        focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
+      ) {
+        stop()
+      }
+    }
+
   private fun requestAudioFocus() {
     val am = audioManager ?: return
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -510,13 +581,18 @@ class AndroidTextToSpeechEngine @Inject constructor(
               .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
               .build()
           )
+          .setOnAudioFocusChangeListener(ttsAudioFocusListener, ttsMainHandler)
           .build()
       focusRequest = req
       runCatching { am.requestAudioFocus(req) }
     } else {
       @Suppress("DEPRECATION")
       runCatching {
-        am.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+        am.requestAudioFocus(
+          ttsAudioFocusListener,
+          AudioManager.STREAM_MUSIC,
+          AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
+        )
       }
     }
   }
@@ -528,7 +604,7 @@ class AndroidTextToSpeechEngine @Inject constructor(
       focusRequest = null
     } else {
       @Suppress("DEPRECATION")
-      runCatching { am.abandonAudioFocus(null) }
+      runCatching { am.abandonAudioFocus(ttsAudioFocusListener) }
     }
   }
 
@@ -608,31 +684,87 @@ class AndroidTextToSpeechEngine @Inject constructor(
     ensureInitialized {
       val engine = tts ?: return@ensureInitialized
       requestAudioFocus()
-      val locale =
-        when (preferences.preferredLanguage) {
-          ResponseLanguage.BENGALI -> Locale.forLanguageTag("bn-BD")
-          ResponseLanguage.HINDI -> Locale.forLanguageTag("hi-IN")
-          ResponseLanguage.ENGLISH,
-          ResponseLanguage.AUTO -> Locale.US
+      val baseTag = preferences.preferredLanguage.effectiveLocaleTag()
+      val effectiveTag =
+        if (preferences.autoLanguageDetection || preferences.preferredLanguage == ResponseLanguage.AUTO) {
+          SpeechTextSanitizer.detectDominantLanguageTag(cleanText, baseTag)
+        } else {
+          baseTag
         }
+      val locale = Locale.forLanguageTag(effectiveTag)
       engine.language = locale
-      selectPreferredVoice(engine, locale, preferences.voiceGender)
+      selectPreferredVoice(
+        engine = engine,
+        locale = locale,
+        gender = preferences.voiceGender,
+        preferredVoiceName = preferences.preferredVoiceName,
+      )
       // Smooth pace & natural tone avoiding harsh robotic distortion
-      engine.setSpeechRate(preferences.speechRate.coerceIn(0.75f, 1.45f))
+      engine.setSpeechRate(preferences.speechRate.coerceIn(0.70f, 1.50f))
       val effectivePitch =
-        (preferences.pitch * preferences.voiceGender.preferredPitch).coerceIn(0.86f, 1.14f)
+        (preferences.pitch * preferences.voiceGender.preferredPitch).coerceIn(0.84f, 1.16f)
       engine.setPitch(effectivePitch)
-      engine.speak(cleanText, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+      val speechParams =
+        Bundle().apply {
+          putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, preferences.volume.coerceIn(0f, 1f))
+        }
+      engine.speak(cleanText, TextToSpeech.QUEUE_FLUSH, speechParams, utteranceId)
     }
+  }
+
+  override fun getAvailableVoices(preferredLanguage: ResponseLanguage?): List<VoiceOptionInfo> {
+    if (tts == null) {
+      ensureInitialized {}
+      return emptyList()
+    }
+    if (!isReady) return emptyList()
+    val engine = tts ?: return emptyList()
+    val filterLang =
+      preferredLanguage?.takeIf { it != ResponseLanguage.AUTO }?.let {
+        Locale.forLanguageTag(it.localeTag).language
+      }
+    return runCatching {
+      engine.voices.orEmpty()
+        .filter { v ->
+          filterLang.isNullOrBlank() || v.locale.language.equals(filterLang, ignoreCase = true)
+        }
+        .sortedWith(
+          compareByDescending<android.speech.tts.Voice> { !it.isNetworkConnectionRequired }
+            .thenByDescending { it.quality }
+            .thenBy { it.locale.toLanguageTag() }
+        )
+        .take(24)
+        .map { v ->
+          VoiceOptionInfo(
+            name = v.name,
+            localeTag = v.locale.toLanguageTag(),
+            localeDisplayName = v.locale.displayName,
+            isNetworkConnectionRequired = v.isNetworkConnectionRequired,
+            quality = v.quality,
+          )
+        }
+    }.getOrDefault(emptyList())
   }
 
   private fun selectPreferredVoice(
     engine: TextToSpeech,
     locale: Locale,
     gender: VoiceGender,
+    preferredVoiceName: String = "",
   ) {
     runCatching {
       val voices = engine.voices ?: return
+      if (preferredVoiceName.isNotBlank()) {
+        val exact =
+          voices.firstOrNull { v ->
+            v.name.equals(preferredVoiceName, ignoreCase = true) &&
+              v.locale.language.equals(locale.language, ignoreCase = true)
+          }
+        if (exact != null) {
+          engine.voice = exact
+          return
+        }
+      }
       val desiredMale = gender == VoiceGender.MALE
       val bestVoice =
         voices
@@ -646,6 +778,8 @@ class AndroidTextToSpeechEngine @Inject constructor(
               isNetworkRequired = v.isNetworkConnectionRequired,
               qualityScore = v.quality,
               latencyScore = v.latency,
+              localeCountry = v.locale.country,
+              targetCountry = locale.country,
             )
           }
       bestVoice?.let { engine.voice = it }
@@ -843,6 +977,25 @@ class VoiceController @Inject constructor(
     _ttsSpeechEnergy.value = 0f
     _audioRmsNormalized.value = 0f
     _voiceState.value = VoiceState.Idle
+  }
+
+  fun getAvailableVoices(preferredLanguage: ResponseLanguage? = null): List<VoiceOptionInfo> =
+    ttsGateway.getAvailableVoices(preferredLanguage)
+
+  fun previewVoice(preferences: VoicePreferences) {
+    val sampleText =
+      when (preferences.preferredLanguage) {
+        ResponseLanguage.BENGALI,
+        ResponseLanguage.BENGALI_IN,
+        ResponseLanguage.BENGALI_BD ->
+          "নমস্কার, আমি মৌসুমী। আপনার পছন্দ অনুযায়ী আমার কণ্ঠস্বর পরীক্ষা করা হচ্ছে।"
+        ResponseLanguage.HINDI,
+        ResponseLanguage.HINDI_IN ->
+          "नमस्ते, मैं मौसमी हूँ। आपकी चुनी हुई आवाज़ का पूर्वावलोकन चल रहा है।"
+        else ->
+          "Hello, I am Mousomi. This is a preview of your selected voice and speech rate."
+      }
+    speakResponse("voice_preview", sampleText, preferences)
   }
 
   fun playActivationChime(preferences: VoicePreferences) {

@@ -73,6 +73,9 @@ class SettingsDataStore @Inject constructor(
     val COMPOSER_GLOW_INTENSITY = floatPreferencesKey("composer_glow_intensity")
     val VOICE_GENDER = stringPreferencesKey("voice_gender")
     val ACTIVATION_SOUND_ENABLED = booleanPreferencesKey("activation_sound_enabled")
+    val PREFERRED_VOICE_NAME = stringPreferencesKey("preferred_voice_name")
+    val VOICE_VOLUME = floatPreferencesKey("voice_volume")
+    val AUTO_LANGUAGE_DETECTION = booleanPreferencesKey("auto_language_detection")
     val EDGE_LIGHT_JSON = stringPreferencesKey("edge_light_json")
     val FLOATING_ORB_JSON = stringPreferencesKey("floating_orb_json")
     val SCREEN_INTEL_JSON = stringPreferencesKey("screen_intel_json")
@@ -114,6 +117,9 @@ class SettingsDataStore @Inject constructor(
       prefs[Keys.COMPOSER_GLOW_INTENSITY] = settings.composerGlowIntensity
       prefs[Keys.VOICE_GENDER] = settings.voicePreferences.voiceGender.name
       prefs[Keys.ACTIVATION_SOUND_ENABLED] = settings.voicePreferences.activationSoundEnabled
+      prefs[Keys.PREFERRED_VOICE_NAME] = settings.voicePreferences.preferredVoiceName.trim()
+      prefs[Keys.VOICE_VOLUME] = settings.voicePreferences.volume.coerceIn(0.1f, 1.0f)
+      prefs[Keys.AUTO_LANGUAGE_DETECTION] = settings.voicePreferences.autoLanguageDetection
       prefs[Keys.EDGE_LIGHT_JSON] = json.encodeToString(settings.edgeLightConfig)
       prefs[Keys.FLOATING_ORB_JSON] = json.encodeToString(settings.floatingOrbConfig)
       prefs[Keys.SCREEN_INTEL_JSON] = json.encodeToString(settings.screenIntelligenceConfig)
@@ -157,6 +163,9 @@ class SettingsDataStore @Inject constructor(
           pitch = prefs[Keys.PITCH] ?: 1.0f,
           voiceGender = voiceGender,
           activationSoundEnabled = prefs[Keys.ACTIVATION_SOUND_ENABLED] ?: true,
+          preferredVoiceName = prefs[Keys.PREFERRED_VOICE_NAME].orEmpty(),
+          volume = (prefs[Keys.VOICE_VOLUME] ?: 1.0f).coerceIn(0.1f, 1.0f),
+          autoLanguageDetection = prefs[Keys.AUTO_LANGUAGE_DETECTION] ?: true,
         ),
       selectedModelOptionName = prefs[Keys.SELECTED_MODEL_OPTION] ?: "MOUSOMI_AUTO",
       hydrogenBackingModelId =

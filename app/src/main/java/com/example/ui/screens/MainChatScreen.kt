@@ -286,6 +286,7 @@ fun MainChatScreen(
           coroutineScope.launch { drawerState.close() }
         },
         onDeleteConversation = viewModel::onDeleteConversation,
+        onRenameConversation = viewModel::onRenameConversation,
         onNewChat = {
           viewModel.onNewChat()
           coroutineScope.launch { drawerState.close() }

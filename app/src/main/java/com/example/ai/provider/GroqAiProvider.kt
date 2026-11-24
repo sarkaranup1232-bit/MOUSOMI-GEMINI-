@@ -6,13 +6,14 @@ import com.example.ai.provider.dto.GroqMessage
 import com.example.ai.provider.dto.GroqStreamChunk
 import com.example.ai.sse.SseStreamParser
 import com.example.core.network.AiProviderException
+import com.example.core.network.RetryPolicy
 import com.example.domain.model.ProviderType
 import com.example.domain.model.TokenUsage
-import com.example.domain.model.VerifiedModelCatalog
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
 @Singleton
@@ -30,7 +31,7 @@ class GroqAiProvider @Inject constructor(
     }
     if (request.turns.any { it.images.isNotEmpty() } && !request.model.capabilities.supportsVision) {
       throw AiProviderException(
-        "${request.model.displayName} does not support image attachments."
+        "${request.model.displayName} (${request.model.id}) does not support image attachments."
       )
     }
 
@@ -48,35 +49,18 @@ class GroqAiProvider @Inject constructor(
       }
     }
 
-    val primaryModelId = request.model.id
-    val firstAttempt =
-      runCatching {
-        streamWithModelId(apiKey, primaryModelId, messages, request.temperature) { event ->
-          emit(event)
-        }
+    try {
+      streamWithModelId(apiKey, request.model.id, messages, request.temperature) { event ->
+        emit(event)
       }
-
-    if (firstAttempt.isFailure) {
-      val err = firstAttempt.exceptionOrNull()
-      val isModelAvailabilityError =
-        err is AiProviderException &&
-          (err.httpStatusCode == 400 || err.httpStatusCode == 404) &&
-          primaryModelId != VerifiedModelCatalog.FALLBACK_GROQ_MODEL_ID
-      if (isModelAvailabilityError) {
-        streamWithModelId(
-          apiKey,
-          VerifiedModelCatalog.FALLBACK_GROQ_MODEL_ID,
-          messages,
-          request.temperature,
-        ) { event ->
-          emit(event)
-        }
-      } else {
-        throw err!!
-      }
+      emit(AiStreamEvent.Completed)
+    } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+      throw e
+    } catch (e: AiProviderException) {
+      throw e
+    } catch (e: Throwable) {
+      throw RetryPolicy.mapThrowable(e)
     }
-
-    emit(AiStreamEvent.Completed)
   }
 
   private suspend fun streamWithModelId(
@@ -100,7 +84,12 @@ class GroqAiProvider @Inject constructor(
         request = payload,
       )
     }.collect { jsonChunk ->
-      val chunk = json.decodeFromString<GroqStreamChunk>(jsonChunk)
+      val chunk =
+        try {
+          json.decodeFromString<GroqStreamChunk>(jsonChunk)
+        } catch (se: SerializationException) {
+          throw RetryPolicy.mapThrowable(se)
+        }
       val delta = chunk.choices.firstOrNull()?.delta?.content.orEmpty()
       if (delta.isNotEmpty()) {
         onEvent(AiStreamEvent.Delta(delta))

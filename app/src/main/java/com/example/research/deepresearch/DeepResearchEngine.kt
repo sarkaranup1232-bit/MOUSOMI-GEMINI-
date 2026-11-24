@@ -65,11 +65,15 @@ class DeepResearchEngine @Inject constructor(
     val retrievedRaw = mutableListOf<SearchResultItem>()
     var verifiedSourcesSnapshot = emptyList<SearchResultItem>()
     var plannedQueries = emptyList<String>()
+    var resolvedSearchProvider = ""
+    val answerModelLabel = "${model.displayName} (${model.id})"
 
     fun buildSnapshot(
       headline: String,
       isActive: Boolean = true,
       isCancelled: Boolean = false,
+      isFailed: Boolean = false,
+      errorMessage: String? = null,
     ): ResearchActivitySnapshot =
       ResearchActivitySnapshot(
         query = question,
@@ -80,6 +84,12 @@ class DeepResearchEngine @Inject constructor(
         stages = ResearchStageId.entries.mapNotNull { stageMap[it] },
         liveSources = liveSources.toList(),
         retrievedSources = if (verifiedSourcesSnapshot.isNotEmpty()) verifiedSourcesSnapshot else retrievedRaw.toList(),
+        searchProvider = resolvedSearchProvider,
+        answerModel = answerModelLabel,
+        sourcesReturnedCount = retrievedRaw.size,
+        sourcesUsedCount = verifiedSourcesSnapshot.count { it.usedInAnswer },
+        isFailed = isFailed,
+        errorMessage = errorMessage,
       )
 
     fun updateStage(stage: ResearchStageId, status: ResearchStageStatus, detail: String = "") {
@@ -133,12 +143,17 @@ class DeepResearchEngine @Inject constructor(
               topic = topic,
               page = 1,
               pageSize = 6,
-              includePageContent = idx <= 1,
+              includePageContent = true,
+              bypassCache = true,
             ),
             settings,
           )
         if (res.isSuccess) {
-          val found = res.getOrThrow().results
+          val resp = res.getOrThrow()
+          if (resolvedSearchProvider.isBlank() && resp.providerUsed.isNotBlank()) {
+            resolvedSearchProvider = resp.providerUsed
+          }
+          val found = resp.results
           retrievedRaw += found
           found.forEach { item ->
             if (liveSources.none { it.url == item.url }) {
@@ -169,7 +184,7 @@ class DeepResearchEngine @Inject constructor(
           lastError?.message
             ?: "Unable to retrieve live web sources for deep research. Check your API key or Search configuration in Settings."
         updateStage(ResearchStageId.LIVE_SEARCH, ResearchStageStatus.FAILED, msg)
-        emit(DeepResearchProgress.StageUpdate(buildSnapshot("Live Search failed", isActive = false)))
+        emit(DeepResearchProgress.StageUpdate(buildSnapshot("Live Search failed", isActive = false, isFailed = true, errorMessage = msg)))
         emit(DeepResearchProgress.Failed(msg))
         return@flow
       }
@@ -217,7 +232,7 @@ class DeepResearchEngine @Inject constructor(
         val err =
           "Retrieved links failed HTTPS source verification (${verifiedBundle.rejectedCount} rejected). Refusing to fabricate research citations."
         updateStage(ResearchStageId.CROSS_VERIFICATION, ResearchStageStatus.FAILED, err)
-        emit(DeepResearchProgress.StageUpdate(buildSnapshot("Verification failed", isActive = false)))
+        emit(DeepResearchProgress.StageUpdate(buildSnapshot("Verification failed", isActive = false, isFailed = true, errorMessage = err)))
         emit(DeepResearchProgress.Failed(err))
         return@flow
       }
@@ -236,6 +251,29 @@ class DeepResearchEngine @Inject constructor(
       emit(DeepResearchProgress.StageUpdate(buildSnapshot("Synthesizing evidence & reconciling conflicts…")))
 
       val synthesis = synthesizeWithModel(question, plannedQueries, verifiedSources, model, settings)
+      val synthesisCombinedText =
+        listOf(
+          synthesis.executiveSummary,
+          synthesis.detailedAnalysis,
+          synthesis.conclusion,
+          synthesis.keyFindings.joinToString(" "),
+        ).joinToString(" ")
+      val citedNums =
+        Regex("\\[(?:#)?(\\d+)\\]")
+          .findAll(synthesisCombinedText)
+          .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
+          .toSet()
+      val attributedSources =
+        verifiedSources.mapIndexed { idx, src ->
+          val num = idx + 1
+          val domainMentioned =
+            src.sourceDomain.isNotBlank() && synthesisCombinedText.contains(src.sourceDomain, ignoreCase = true)
+          src.copy(
+            sourceNumber = num,
+            usedInAnswer = (num in citedNums) || domainMentioned || idx < 3,
+          )
+        }
+      verifiedSourcesSnapshot = attributedSources
       updateStage(ResearchStageId.ANALYSIS, ResearchStageStatus.COMPLETED, "Analysis ready")
 
       // Stage 7: Structured Final Report
@@ -249,14 +287,14 @@ class DeepResearchEngine @Inject constructor(
           researchObjectives = synthesis.objectives.ifEmpty {
             listOf(
               "Investigate verified current facts regarding: $question",
-              "Cross-check claims across ${verifiedSources.size} retrieved HTTPS sources",
+              "Cross-check claims across ${attributedSources.size} retrieved HTTPS sources",
             )
           },
           methodology = synthesis.methodology.ifBlank {
-            "Executed ${plannedQueries.size} live search queries, removed ${verifiedBundle.duplicatesRemoved} duplicate entries, verified HTTPS links, and compared claims across ${verifiedSources.size} distinct sources."
+            "Executed ${plannedQueries.size} live search queries via ${resolvedSearchProvider.ifBlank { "Google Search Grounding" }}, removed ${verifiedBundle.duplicatesRemoved} duplicate entries, verified HTTPS links, and synthesized using $answerModelLabel."
           },
           keyFindings = synthesis.keyFindings.ifEmpty {
-            verifiedSources.take(4).map { "[${it.publisher}] ${it.snippet.take(180)}" }
+            attributedSources.take(4).map { "[${it.publisher}] ${it.snippet.take(180)}" }
           },
           detailedAnalysis = synthesis.detailedAnalysis,
           sourceComparison = verifiedBundle.sourceComparisonNotes,
@@ -268,11 +306,11 @@ class DeepResearchEngine @Inject constructor(
             )
           },
           conclusion = synthesis.conclusion,
-          references = verifiedSources,
+          references = attributedSources,
           generatedAtMs = System.currentTimeMillis(),
         )
 
-      updateStage(ResearchStageId.FINAL_REPORT, ResearchStageStatus.COMPLETED, "${verifiedSources.size} citations attached")
+      updateStage(ResearchStageId.FINAL_REPORT, ResearchStageStatus.COMPLETED, "${attributedSources.size} citations attached")
       emit(DeepResearchProgress.StageUpdate(buildSnapshot("Research complete", isActive = false)))
       emit(DeepResearchProgress.Completed(report))
     } catch (e: CancellationException) {
@@ -284,14 +322,15 @@ class DeepResearchEngine @Inject constructor(
       }
       throw e
     } catch (e: Exception) {
+      val errText = e.localizedMessage ?: "Deep research encountered an error."
       ResearchStageId.entries.forEach { st ->
         val current = stageMap[st]
         if (current != null && current.status == ResearchStageStatus.ACTIVE) {
-          stageMap[st] = current.copy(status = ResearchStageStatus.FAILED, detail = e.localizedMessage ?: "Error")
+          stageMap[st] = current.copy(status = ResearchStageStatus.FAILED, detail = errText)
         }
       }
-      emit(DeepResearchProgress.StageUpdate(buildSnapshot("Research interrupted", isActive = false)))
-      emit(DeepResearchProgress.Failed(e.localizedMessage ?: "Deep research encountered an error."))
+      emit(DeepResearchProgress.StageUpdate(buildSnapshot("Research failed", isActive = false, isFailed = true, errorMessage = errText)))
+      emit(DeepResearchProgress.Failed(errText))
     }
   }
 

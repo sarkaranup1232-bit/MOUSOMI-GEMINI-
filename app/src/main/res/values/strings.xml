@@ -28,6 +28,7 @@
     <string name="mode_normal">Normal</string>
     <string name="mode_analysis">Analysis</string>
     <string name="mode_ai_search">AI Search</string>
+    <string name="mode_latest_news">Latest News</string>
     <string name="mode_deep_research">Deep Research</string>
     <string name="create_image_chip">Create Image</string>
     <string name="image_studio_title">Image Studio</string>
@@ -35,6 +36,7 @@
     <string name="input_placeholder_task">Assign a task to Mousomi...</string>
     <string name="input_placeholder_analysis">Ask Mousomi to analyze deeply...</string>
     <string name="input_placeholder_search">Search live web with Google AI Search...</string>
+    <string name="input_placeholder_latest_news">Get date-verified breaking news...</string>
     <string name="input_placeholder_research">Run 7-stage live Deep Research...</string>
 
     <string name="settings_title">Settings</string>

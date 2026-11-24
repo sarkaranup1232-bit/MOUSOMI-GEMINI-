@@ -224,10 +224,14 @@ class RealtimeIntelligenceRouter @Inject constructor(
 
     private val liveSearchKeywords =
       listOf(
-        "today's", "today ", "latest ", "current ", "news", "breaking", "recent ",
+        "today's", "today ", "latest ", "current ", "currently", "news", "breaking", "recent ",
         "this week", "this month", "search ", "serch ", "look up", "find today", "up to date",
-        "live price", "weather", "release date", "2026", "আজকের", "সর্বশেষ", "খবর", "khobor",
-        "ताज़ा", "समाचार",
+        "chief minister", "cm of ", "prime minister", "president of ", "governor of ",
+        "who is the current", "youtube trends", "trending on youtube", "trending videos",
+        "live score", "stock price", "share price", "exchange rate", "bitcoin price", "gold price",
+        "weather", "release date", "latest version", "current version", "2026",
+        "আজকের", "সর্বশেষ", "খবর", "khobor", "মুখ্যমন্ত্রী", "প্রধানমন্ত্রী",
+        "ताज़ा", "समाचार", "मुख्यमंत्री", "प्रधानमंत्री",
       )
 
     private val chartKeywords =

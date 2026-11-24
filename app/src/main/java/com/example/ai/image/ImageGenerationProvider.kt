@@ -373,7 +373,7 @@ class CompositeImageGenerationProvider @Inject constructor(
 
     if (key.isNotEmpty()) {
       executeViaGemini(request, modelId, key, sourceKind, this)
-    } else if (hasFirebaseAi && firebaseAiLogicService != null) {
+    } else if (hasFirebaseAi) {
       executeViaFirebaseAiLogic(request, modelId, firebaseAiLogicService, sourceKind, this)
     } else {
       emit(

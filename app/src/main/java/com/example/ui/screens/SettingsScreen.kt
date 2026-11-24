@@ -37,9 +37,10 @@ import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Visibility
@@ -86,15 +87,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.core.voice.HotwordCapabilityReport
 import com.example.core.voice.HotwordCapabilityState
+import com.example.core.voice.VoiceOptionInfo
 import com.example.domain.model.ActivationHealthStatus
 import com.example.domain.model.ConnectionMode
 import com.example.domain.model.DetectedProviderKind
+import com.example.domain.model.LiveDiscoveredModel
 import com.example.domain.model.OneTapActivationResult
+import com.example.domain.model.ProviderConnectionHealth
+import com.example.domain.model.ProviderTestReport
 import com.example.domain.model.ResponseLanguage
 import com.example.domain.model.VerifiedModelCatalog
 import com.example.domain.model.VoiceGender
@@ -156,6 +162,23 @@ fun SettingsScreen(
   hotwordCapabilityReport: HotwordCapabilityReport? = null,
   onOpenMemoryManager: () -> Unit = {},
   onRequestAssistantRole: () -> Unit = {},
+  isTestingGemini: Boolean = false,
+  isTestingGroq: Boolean = false,
+  geminiTestReport: ProviderTestReport? = null,
+  groqTestReport: ProviderTestReport? = null,
+  discoveredGeminiModels: List<LiveDiscoveredModel> = emptyList(),
+  discoveredGroqModels: List<LiveDiscoveredModel> = emptyList(),
+  availableTtsVoices: List<VoiceOptionInfo> = emptyList(),
+  onTestGeminiConnection: () -> Unit = {},
+  onTestGroqConnection: () -> Unit = {},
+  onSelectDiscoveredGeminiModel: (String) -> Unit = {},
+  onSelectDiscoveredGroqModel: (String) -> Unit = {},
+  onVoicePitchChange: (Float) -> Unit = {},
+  onVoiceVolumeChange: (Float) -> Unit = {},
+  onAutoLanguageDetectionChange: (Boolean) -> Unit = {},
+  onPreferredVoiceNameChange: (String) -> Unit = {},
+  onRefreshVoices: () -> Unit = {},
+  onPreviewVoice: () -> Unit = {},
   onBack: () -> Unit,
 ) {
   BackHandler(onBack = onBack)
@@ -167,7 +190,6 @@ fun SettingsScreen(
   var showOneTapKey by remember { mutableStateOf(false) }
   var showGeminiKey by remember { mutableStateOf(false) }
   var showGroqKey by remember { mutableStateOf(false) }
-  var showSearchKey by remember { mutableStateOf(false) }
   var advancedExpanded by remember { mutableStateOf(false) }
   val mergedBottomInsets = WindowInsets.navigationBars.union(WindowInsets.ime)
 
@@ -244,6 +266,56 @@ fun SettingsScreen(
           onActivate = { onActivateOneTap(oneTapApiKeyInput) },
           onVerifyConnection = onVerifyConnection,
           onDeactivate = onDeactivateCredentials,
+        )
+
+        // Separate Top-Level Google Gemini API Card (Strict Two-API Architecture)
+        ProviderConfigAndDiscoveryCard(
+          title = "Google Gemini API",
+          subtitle = "Responses, Vision, Live Voice & Google Search Grounding (powers live search for both Gemini & Groq)",
+          keyLabel = stringResource(R.string.settings_gemini_key_label),
+          keyPlaceholder = stringResource(R.string.settings_gemini_key_placeholder),
+          apiKey = geminiApiKey,
+          showKey = showGeminiKey,
+          onToggleShowKey = { showGeminiKey = !showGeminiKey },
+          onApiKeyChange = onGeminiApiKeyChange,
+          activeModelId = hydrogenBackingModelId,
+          isTesting = isTestingGemini,
+          report = geminiTestReport,
+          discoveredModels = discoveredGeminiModels,
+          onSaveKey = {
+            if (onSaveSettings()) {
+              scope.launch { snackbarHostState.showSnackbar("Google Gemini API key saved") }
+            }
+          },
+          onTestConnection = onTestGeminiConnection,
+          onSelectDiscoveredModel = onSelectDiscoveredGeminiModel,
+          keyFieldTestTag = "gemini_api_key_input",
+          testButtonTestTag = "test_gemini_connection_button",
+        )
+
+        // Separate Top-Level Groq API Card (Strict Two-API Architecture)
+        ProviderConfigAndDiscoveryCard(
+          title = "Groq API",
+          subtitle = "Ultra-fast reasoning & chat. Live search uses Gemini Google Search Grounding and feeds sources to your selected Groq model.",
+          keyLabel = stringResource(R.string.settings_groq_key_label),
+          keyPlaceholder = stringResource(R.string.settings_groq_key_placeholder),
+          apiKey = groqApiKey,
+          showKey = showGroqKey,
+          onToggleShowKey = { showGroqKey = !showGroqKey },
+          onApiKeyChange = onGroqApiKeyChange,
+          activeModelId = groqReasoningModelId,
+          isTesting = isTestingGroq,
+          report = groqTestReport,
+          discoveredModels = discoveredGroqModels,
+          onSaveKey = {
+            if (onSaveSettings()) {
+              scope.launch { snackbarHostState.showSnackbar("Groq API key saved") }
+            }
+          },
+          onTestConnection = onTestGroqConnection,
+          onSelectDiscoveredModel = onSelectDiscoveredGroqModel,
+          keyFieldTestTag = "groq_api_key_input",
+          testButtonTestTag = "test_groq_connection_button",
         )
 
         // Adaptive Theme Mode Section
@@ -376,68 +448,6 @@ fun SettingsScreen(
                 }
 
                 OutlinedTextField(
-                  value = geminiApiKey,
-                  onValueChange = onGeminiApiKeyChange,
-                  label = { Text(stringResource(R.string.settings_gemini_key_label)) },
-                  placeholder = { Text(stringResource(R.string.settings_gemini_key_placeholder)) },
-                  leadingIcon = { Icon(Icons.Outlined.Key, contentDescription = null) },
-                  trailingIcon = {
-                    IconButton(
-                      onClick = { showGeminiKey = !showGeminiKey },
-                      modifier = Modifier.minimumInteractiveComponentSize(),
-                    ) {
-                      Icon(
-                        imageVector =
-                          if (showGeminiKey) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                        contentDescription = stringResource(R.string.cd_toggle_visibility),
-                      )
-                    }
-                  },
-                  visualTransformation =
-                    if (showGeminiKey) VisualTransformation.None else PasswordVisualTransformation(),
-                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                  singleLine = true,
-                  shape = RoundedCornerShape(14.dp),
-                  colors =
-                    OutlinedTextFieldDefaults.colors(
-                      focusedBorderColor = MaterialTheme.colorScheme.primary,
-                      unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                    ),
-                  modifier = Modifier.fillMaxWidth().testTag("gemini_api_key_input"),
-                )
-
-                OutlinedTextField(
-                  value = groqApiKey,
-                  onValueChange = onGroqApiKeyChange,
-                  label = { Text(stringResource(R.string.settings_groq_key_label)) },
-                  placeholder = { Text(stringResource(R.string.settings_groq_key_placeholder)) },
-                  leadingIcon = { Icon(Icons.Outlined.Key, contentDescription = null) },
-                  trailingIcon = {
-                    IconButton(
-                      onClick = { showGroqKey = !showGroqKey },
-                      modifier = Modifier.minimumInteractiveComponentSize(),
-                    ) {
-                      Icon(
-                        imageVector =
-                          if (showGroqKey) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                        contentDescription = stringResource(R.string.cd_toggle_visibility),
-                      )
-                    }
-                  },
-                  visualTransformation =
-                    if (showGroqKey) VisualTransformation.None else PasswordVisualTransformation(),
-                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                  singleLine = true,
-                  shape = RoundedCornerShape(14.dp),
-                  colors =
-                    OutlinedTextFieldDefaults.colors(
-                      focusedBorderColor = MaterialTheme.colorScheme.primary,
-                      unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                    ),
-                  modifier = Modifier.fillMaxWidth().testTag("groq_api_key_input"),
-                )
-
-                OutlinedTextField(
                   value = hydrogenBackingModelId,
                   onValueChange = onHydrogenBackingModelIdChange,
                   label = { Text("Gemini 4 Hydrogen Backing Model ID") },
@@ -469,43 +479,6 @@ fun SettingsScreen(
                   shape = RoundedCornerShape(14.dp),
                   modifier = Modifier.fillMaxWidth().testTag("image_model_id_input"),
                 )
-
-                OutlinedTextField(
-                  value = externalSearchUrl,
-                  onValueChange = onExternalSearchUrlChange,
-                  label = { Text("External Search API HTTPS Endpoint (Optional)") },
-                  placeholder = { Text("https://google.serper.dev/search") },
-                  leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
-                  singleLine = true,
-                  shape = RoundedCornerShape(14.dp),
-                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                  modifier = Modifier.fillMaxWidth().testTag("external_search_url_input"),
-                )
-
-                if (externalSearchUrl.isNotBlank()) {
-                  OutlinedTextField(
-                    value = externalSearchApiKey,
-                    onValueChange = onExternalSearchApiKeyChange,
-                    label = { Text("External Search API Key") },
-                    trailingIcon = {
-                      IconButton(
-                        onClick = { showSearchKey = !showSearchKey },
-                        modifier = Modifier.minimumInteractiveComponentSize(),
-                      ) {
-                        Icon(
-                          imageVector =
-                            if (showSearchKey) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                          contentDescription = stringResource(R.string.cd_toggle_visibility),
-                        )
-                      }
-                    },
-                    visualTransformation =
-                      if (showSearchKey) VisualTransformation.None else PasswordVisualTransformation(),
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                  )
-                }
 
                 Row(
                   modifier = Modifier.fillMaxWidth(),
@@ -653,15 +626,122 @@ fun SettingsScreen(
 
             Column {
               Text(
-                text = "Speech rate: ${"%.1fx".format(voicePreferences.speechRate)}",
+                text = "Speech rate: ${"%.2fx".format(voicePreferences.speechRate)}",
                 style = MaterialTheme.typography.bodyMedium,
               )
               Slider(
-                value = voicePreferences.speechRate,
+                value = voicePreferences.speechRate.coerceIn(0.7f, 1.5f),
                 onValueChange = onSpeechRateChange,
                 valueRange = 0.7f..1.5f,
               )
             }
+
+            Column {
+              Text(
+                text = "Voice pitch: ${"%.2fx".format(voicePreferences.pitch)}",
+                style = MaterialTheme.typography.bodyMedium,
+              )
+              Slider(
+                value = voicePreferences.pitch.coerceIn(0.8f, 1.2f),
+                onValueChange = onVoicePitchChange,
+                valueRange = 0.8f..1.2f,
+              )
+            }
+
+            Column {
+              Text(
+                text = "Voice volume: ${(voicePreferences.volume * 100).toInt()}%",
+                style = MaterialTheme.typography.bodyMedium,
+              )
+              Slider(
+                value = voicePreferences.volume.coerceIn(0.2f, 1.0f),
+                onValueChange = onVoiceVolumeChange,
+                valueRange = 0.2f..1.0f,
+              )
+            }
+
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.SpaceBetween,
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              Column(modifier = Modifier.weight(1f)) {
+                Text(
+                  text = "Auto language detection",
+                  style = MaterialTheme.typography.bodyLarge,
+                )
+                Text(
+                  text = "Match Bengali, Hindi, or English TTS voice to reply script automatically",
+                  style = MaterialTheme.typography.labelSmall,
+                  color = colors.mutedText,
+                )
+              }
+              Switch(
+                checked = voicePreferences.autoLanguageDetection,
+                onCheckedChange = onAutoLanguageDetectionChange,
+              )
+            }
+
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.SpaceBetween,
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              Text(
+                text = "Device TTS Voice (${availableTtsVoices.size})",
+                style = MaterialTheme.typography.labelLarge,
+              )
+              TextButton(onClick = onRefreshVoices) {
+                Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Refresh")
+              }
+            }
+
+            if (availableTtsVoices.isNotEmpty()) {
+              FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+              ) {
+                FilterChip(
+                  selected = voicePreferences.preferredVoiceName.isBlank(),
+                  onClick = { onPreferredVoiceNameChange("") },
+                  label = { Text("Auto Natural") },
+                )
+                availableTtsVoices.take(8).forEach { opt ->
+                  val shortName =
+                    "${opt.localeTag} · ${opt.name.substringAfterLast('-').take(12)}"
+                  FilterChip(
+                    selected = voicePreferences.preferredVoiceName == opt.name,
+                    onClick = { onPreferredVoiceNameChange(opt.name) },
+                    label = { Text(shortName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                  )
+                }
+              }
+            } else {
+              Text(
+                text = "Tap Refresh once Android TTS finishes initializing on your device to list installed voices.",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.mutedText,
+              )
+            }
+
+            OutlinedButton(
+              onClick = onPreviewVoice,
+              shape = RoundedCornerShape(14.dp),
+              modifier = Modifier.fillMaxWidth().testTag("settings_preview_voice_button"),
+            ) {
+              Icon(Icons.Outlined.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+              Spacer(modifier = Modifier.width(6.dp))
+              Text("Play Voice Preview")
+            }
+
+            Text(
+              text = "Note: Chat voice & previews use your device's local Android / Google TTS engine; Gemini Live Duplex Voice uses cloud Gemini Live audio when active.",
+              style = MaterialTheme.typography.labelSmall,
+              color = colors.mutedText,
+            )
           }
         }
 
@@ -1094,6 +1174,197 @@ private fun OneTapApiActivationCard(
             modifier = Modifier.testTag("deactivate_api_button"),
           ) {
             Text("Deactivate", color = Color(0xFFFCA5A5))
+          }
+        }
+      }
+    }
+  }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ProviderConfigAndDiscoveryCard(
+  title: String,
+  subtitle: String,
+  keyLabel: String,
+  keyPlaceholder: String,
+  apiKey: String,
+  showKey: Boolean,
+  onToggleShowKey: () -> Unit,
+  onApiKeyChange: (String) -> Unit,
+  activeModelId: String,
+  isTesting: Boolean,
+  report: ProviderTestReport?,
+  discoveredModels: List<LiveDiscoveredModel>,
+  onSaveKey: () -> Unit,
+  onTestConnection: () -> Unit,
+  onSelectDiscoveredModel: (String) -> Unit,
+  keyFieldTestTag: String,
+  testButtonTestTag: String,
+) {
+  val colors = LocalMousomiColors.current
+  val healthColor =
+    when (report?.health) {
+      ProviderConnectionHealth.CONNECTED -> NeonGreen
+      ProviderConnectionHealth.RATE_LIMITED,
+      ProviderConnectionHealth.QUOTA_EXHAUSTED -> WarmAmber
+      ProviderConnectionHealth.AUTHENTICATION_FAILED,
+      ProviderConnectionHealth.DISCONNECTED,
+      ProviderConnectionHealth.TEMPORARILY_UNAVAILABLE -> Color(0xFFEF4444)
+      else -> if (apiKey.isNotBlank()) NeonCyan else colors.mutedText
+    }
+  val statusLabel =
+    report?.health?.name?.replace('_', ' ')
+      ?: if (apiKey.isNotBlank()) "KEY SAVED" else "NOT CONFIGURED"
+
+  Surface(
+    shape = RoundedCornerShape(20.dp),
+    color = MaterialTheme.colorScheme.surface,
+    border = BorderStroke(1.dp, healthColor.copy(alpha = 0.42f)),
+    tonalElevation = 3.dp,
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    Column(
+      modifier = Modifier.padding(18.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Text(
+          text = title,
+          fontFamily = DisplayFontFamily,
+          fontWeight = FontWeight.SemiBold,
+          fontSize = 17.sp,
+          modifier = Modifier.weight(1f),
+        )
+        Surface(
+          shape = CircleShape,
+          color = healthColor.copy(alpha = 0.16f),
+          border = BorderStroke(1.dp, healthColor.copy(alpha = 0.5f)),
+        ) {
+          Text(
+            text = statusLabel,
+            color = healthColor,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+          )
+        }
+      }
+
+      Text(
+        text = subtitle,
+        style = MaterialTheme.typography.bodySmall,
+        color = colors.mutedText,
+      )
+
+      Text(
+        text = "Selected backing model: $activeModelId",
+        style = MaterialTheme.typography.labelMedium,
+        color = NeonCyan,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+
+      OutlinedTextField(
+        value = apiKey,
+        onValueChange = onApiKeyChange,
+        label = { Text(keyLabel) },
+        placeholder = { Text(keyPlaceholder) },
+        leadingIcon = { Icon(Icons.Outlined.Key, contentDescription = null) },
+        trailingIcon = {
+          IconButton(
+            onClick = onToggleShowKey,
+            modifier = Modifier.minimumInteractiveComponentSize(),
+          ) {
+            Icon(
+              imageVector =
+                if (showKey) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+              contentDescription = stringResource(R.string.cd_toggle_visibility),
+            )
+          }
+        },
+        visualTransformation =
+          if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        singleLine = true,
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth().testTag(keyFieldTestTag),
+      )
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        OutlinedButton(
+          onClick = onSaveKey,
+          shape = RoundedCornerShape(14.dp),
+          modifier = Modifier.weight(1f),
+        ) {
+          Icon(Icons.Outlined.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.width(6.dp))
+          Text("Save Key", maxLines = 1)
+        }
+        Button(
+          onClick = onTestConnection,
+          enabled = !isTesting,
+          shape = RoundedCornerShape(14.dp),
+          colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
+          modifier = Modifier.weight(1f).testTag(testButtonTestTag),
+        ) {
+          if (isTesting) {
+            CircularProgressIndicator(
+              color = Color.White,
+              strokeWidth = 2.dp,
+              modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Testing…", color = Color.White, maxLines = 1)
+          } else {
+            Icon(Icons.Outlined.Refresh, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Test & Load", color = Color.White, maxLines = 1)
+          }
+        }
+      }
+
+      if (report != null) {
+        Text(
+          text = report.message,
+          style = MaterialTheme.typography.bodySmall,
+          color = healthColor,
+        )
+      }
+
+      if (discoveredModels.isNotEmpty()) {
+        Text(
+          text = "Live Discovered Models (${discoveredModels.size}) — tap to select:",
+          style = MaterialTheme.typography.labelMedium,
+          color = colors.mutedText,
+        )
+        FlowRow(
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          verticalArrangement = Arrangement.spacedBy(8.dp),
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          discoveredModels.take(18).forEach { model ->
+            val selected = model.id == activeModelId
+            val caps = buildList {
+              if (model.supportsGoogleSearchGrounding) add("Search")
+              if (model.supportsNativeBrowserSearch) add("Web")
+              if (model.supportsReasoning) add("Reason")
+              if (model.supportsVision) add("Vision")
+              if (model.supportsAudioInput) add("Audio")
+            }.joinToString("·")
+            val chipText = if (caps.isNotBlank()) "${model.id} ($caps)" else model.id
+            FilterChip(
+              selected = selected,
+              onClick = { onSelectDiscoveredModel(model.id) },
+              label = { Text(chipText, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            )
           }
         }
       }

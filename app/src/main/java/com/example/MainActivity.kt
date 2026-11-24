@@ -468,6 +468,13 @@ class MainActivity : ComponentActivity() {
                 onToggleSystemOverlay = { enabled ->
                   if (enabled && !Settings.canDrawOverlays(this@MainActivity)) {
                     startActivity(PermissionCenterHelper.createOverlaySettingsIntent(this@MainActivity))
+                  } else if (Settings.canDrawOverlays(this@MainActivity)) {
+                    val intent = MousomiOverlayService.buildSyncBorderLightIntent(this@MainActivity)
+                    if (enabled) {
+                      ContextCompat.startForegroundService(this@MainActivity, intent)
+                    } else {
+                      runCatching { this@MainActivity.startService(intent) }
+                    }
                   }
                 },
                 onLaunchFloatingControlBar = {
@@ -602,6 +609,23 @@ class MainActivity : ComponentActivity() {
                 onRequestAssistantRole = {
                   assistantRoleLauncher.launch(AssistantRoleHelper.createRequestAssistantIntent(this@MainActivity))
                 },
+                isTestingGemini = uiState.isTestingGemini,
+                isTestingGroq = uiState.isTestingGroq,
+                geminiTestReport = uiState.geminiTestReport,
+                groqTestReport = uiState.groqTestReport,
+                discoveredGeminiModels = uiState.discoveredGeminiModels,
+                discoveredGroqModels = uiState.discoveredGroqModels,
+                availableTtsVoices = uiState.availableTtsVoices,
+                onTestGeminiConnection = viewModel::onTestGeminiConnection,
+                onTestGroqConnection = viewModel::onTestGroqConnection,
+                onSelectDiscoveredGeminiModel = viewModel::onSelectDiscoveredGeminiModel,
+                onSelectDiscoveredGroqModel = viewModel::onSelectDiscoveredGroqModel,
+                onVoicePitchChange = viewModel::onUpdateVoicePitch,
+                onVoiceVolumeChange = viewModel::onUpdateVoiceVolume,
+                onAutoLanguageDetectionChange = viewModel::onUpdateAutoLanguageDetection,
+                onPreferredVoiceNameChange = viewModel::onUpdatePreferredVoiceName,
+                onRefreshVoices = viewModel::onRefreshAvailableVoices,
+                onPreviewVoice = viewModel::onPreviewVoice,
                 onBack = { navController.popBackStack() },
               )
             }

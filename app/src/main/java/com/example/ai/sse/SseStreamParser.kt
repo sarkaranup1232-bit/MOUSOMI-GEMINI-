@@ -20,9 +20,10 @@ object SseStreamParser {
         RetryPolicy.withExponentialBackoff {
           val res = executeCall()
           if (!res.isSuccessful) {
+            val retryAfter = res.headers()["Retry-After"]
             val errBody = res.errorBody()?.string()
             res.errorBody()?.close()
-            throw RetryPolicy.mapHttpError(res.code(), errBody)
+            throw RetryPolicy.mapHttpError(res.code(), errBody, retryAfter)
           }
           res
         }

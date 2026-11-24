@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.content.Intent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Science
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material.icons.outlined.TaskAlt
@@ -69,6 +71,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -627,6 +630,7 @@ private fun AssistantChatBubble(
 ) {
   val colors = LocalMousomiColors.current
   val onBg = MaterialTheme.colorScheme.onBackground
+  val context = LocalContext.current
   @Suppress("DEPRECATION")
   val clipboard = LocalClipboardManager.current
 
@@ -729,6 +733,26 @@ private fun AssistantChatBubble(
                   Icon(
                     imageVector = Icons.Outlined.ContentCopy,
                     contentDescription = "Copy response",
+                    tint = colors.mutedText,
+                    modifier = Modifier.size(16.dp),
+                  )
+                }
+                IconButton(
+                  onClick = {
+                    val shareIntent =
+                      Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, message.text)
+                      }
+                    runCatching {
+                      context.startActivity(Intent.createChooser(shareIntent, "Share response"))
+                    }
+                  },
+                  modifier = Modifier.size(34.dp).testTag("share_response_${message.id}"),
+                ) {
+                  Icon(
+                    imageVector = Icons.Outlined.Share,
+                    contentDescription = "Share response",
                     tint = colors.mutedText,
                     modifier = Modifier.size(16.dp),
                   )

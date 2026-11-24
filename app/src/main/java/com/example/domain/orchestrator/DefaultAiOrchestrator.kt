@@ -106,7 +106,8 @@ class DefaultAiOrchestrator @Inject constructor(
           IntelligenceIntent.IMAGE_GENERATION
         request.operatingMode == OperatingMode.DEEP_RESEARCH || request.deepResearchRequested ->
           IntelligenceIntent.DEEP_RESEARCH
-        request.operatingMode == OperatingMode.GOOGLE_AI_SEARCH ->
+        request.operatingMode == OperatingMode.GOOGLE_AI_SEARCH ||
+          request.operatingMode == OperatingMode.LATEST_NEWS ->
           IntelligenceIntent.LIVE_SEARCH
         else ->
           realtimeRouter?.classifyIntent(
@@ -114,7 +115,7 @@ class DefaultAiOrchestrator @Inject constructor(
             hasImages = request.currentTurnImages.isNotEmpty(),
             attachments = request.pendingMediaItems,
             deepResearchRequested = request.deepResearchRequested,
-            explicitImageEditRequested = request.activeEditTarget != null,
+            explicitImageEditRequested = false,
           ) ?: IntelligenceIntent.NORMAL_AI
       }
 
@@ -187,31 +188,30 @@ class DefaultAiOrchestrator @Inject constructor(
         PipelinePreparation.ContinueWithLlm()
       }
 
-    when (prep) {
-      is PipelinePreparation.Aborted -> {
-        emit(
-          OrchestrationEvent.StateChanged(
-            AiResponseState.Error(prep.errorMessage, recoverable = true)
-          )
-        )
-        return@flow
-      }
-      is PipelinePreparation.AlreadyCompleted -> {
-        emit(
-          OrchestrationEvent.StateChanged(
-            AiResponseState.Completed(
-              fullText = prep.fullText,
-              modelName = prep.modelName,
-              tokenUsage = prep.tokenUsage,
+    val llmPrep: PipelinePreparation.ContinueWithLlm =
+      when (prep) {
+        is PipelinePreparation.Aborted -> {
+          emit(
+            OrchestrationEvent.StateChanged(
+              AiResponseState.Error(prep.errorMessage, recoverable = true)
             )
           )
-        )
-        return@flow
+          return@flow
+        }
+        is PipelinePreparation.AlreadyCompleted -> {
+          emit(
+            OrchestrationEvent.StateChanged(
+              AiResponseState.Completed(
+                fullText = prep.fullText,
+                modelName = prep.modelName,
+                tokenUsage = prep.tokenUsage,
+              )
+            )
+          )
+          return@flow
+        }
+        is PipelinePreparation.ContinueWithLlm -> prep
       }
-      is PipelinePreparation.ContinueWithLlm -> Unit
-    }
-
-    val llmPrep = prep as PipelinePreparation.ContinueWithLlm
 
     val toolContextInput = ToolContextInput(prompt = cleanPrompt, category = decision.category)
     val verifiedToolNotes =
@@ -418,10 +418,32 @@ class DefaultAiOrchestrator @Inject constructor(
           )
         )
       } else {
+        val citedNums =
+          Regex("\\[(?:#)?(\\d+)\\]")
+            .findAll(finalText)
+            .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
+            .toSet()
+        val attributedPreBlocks =
+          preBlocksWithTasks.map { block ->
+            if (block is ResponseBlock.SourceCitations) {
+              val updatedSources =
+                block.sources.mapIndexed { idx, src ->
+                  val num = if (src.sourceNumber > 0) src.sourceNumber else idx + 1
+                  val mentioned =
+                    (num in citedNums) ||
+                      (src.sourceDomain.isNotBlank() && finalText.contains(src.sourceDomain, ignoreCase = true)) ||
+                      finalText.contains(src.url, ignoreCase = true)
+                  src.copy(sourceNumber = num, usedInAnswer = mentioned)
+                }
+              ResponseBlock.SourceCitations(updatedSources)
+            } else {
+              block
+            }
+          }
         val richCards = richLinkResolver?.extractRichCards("$cleanPrompt\n$finalText").orEmpty()
         val combinedBlocks =
           buildList {
-            addAll(preBlocksWithTasks)
+            addAll(attributedPreBlocks)
             if (richCards.isNotEmpty()) {
               add(ResponseBlock.RichLinkCardBlock(richCards))
             }
@@ -563,15 +585,22 @@ class DefaultAiOrchestrator @Inject constructor(
       when (language) {
         ResponseLanguage.AUTO ->
           append("Respond in the exact language used by the user (English, Bengali, or Hindi). ")
-        ResponseLanguage.BENGALI ->
+        ResponseLanguage.BENGALI,
+        ResponseLanguage.BENGALI_IN,
+        ResponseLanguage.BENGALI_BD ->
           append("Respond clearly in natural Bengali (বাংলা), keeping technical terms readable when helpful. ")
-        ResponseLanguage.HINDI ->
+        ResponseLanguage.HINDI,
+        ResponseLanguage.HINDI_IN ->
           append("Respond clearly in natural Hindi (हिन्दी). ")
-        ResponseLanguage.ENGLISH ->
+        ResponseLanguage.ENGLISH,
+        ResponseLanguage.ENGLISH_IN,
+        ResponseLanguage.ENGLISH_US ->
           append("Respond clearly in English. ")
       }
       if (operatingMode == OperatingMode.ANALYSIS_THINK) {
         append("The user selected Analysis / Think mode: verify logic rigorously, consider edge cases, and present a clear structured final answer without exposing raw internal scratchpad tags. ")
+      } else if (operatingMode == OperatingMode.LATEST_NEWS) {
+        append("The user selected Latest News mode: prioritize the most recently published verified sources, separate publish date from event date, and flag any disagreements across publishers. ")
       } else if (isTaskMode || operatingMode == OperatingMode.TASK_MODE) {
         append("The user is in Task Mode: deliver a clear structured plan with concrete deliverables, verification checks, and exact next steps. Never claim an external or unapproved device action was completed if it awaits user confirmation. ")
       }

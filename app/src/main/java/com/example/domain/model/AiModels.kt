@@ -34,6 +34,11 @@ enum class OperatingMode(
     shortLabel = "Deep Research",
     description = "7-stage live multi-source research, verification, and structured report",
   ),
+  LATEST_NEWS(
+    label = "Latest News",
+    shortLabel = "Latest News",
+    description = "Date-verified breaking news & real-time updates via Gemini Google Search Grounding",
+  ),
   TASK_MODE(
     label = "Task Mode",
     shortLabel = "Task Mode",
@@ -60,9 +65,14 @@ enum class LatencyTier {
 
 enum class ResponseLanguage(val label: String, val localeTag: String) {
   AUTO("Auto (Match Prompt)", "en-US"),
-  ENGLISH("English", "en-US"),
+  ENGLISH("English (Global)", "en-US"),
+  ENGLISH_IN("English (India · en-IN)", "en-IN"),
+  ENGLISH_US("English (US · en-US)", "en-US"),
   BENGALI("বাংলা (Bengali)", "bn-BD"),
-  HINDI("हिन्दी (Hindi)", "hi-IN");
+  BENGALI_IN("বাংলা (India · bn-IN)", "bn-IN"),
+  BENGALI_BD("বাংলা (Bangladesh · bn-BD)", "bn-BD"),
+  HINDI("हिन्दी (Hindi)", "hi-IN"),
+  HINDI_IN("हिन्दी (India · hi-IN)", "hi-IN");
 
   fun effectiveLocaleTag(): String =
     if (this == AUTO) {
@@ -214,6 +224,12 @@ object VerifiedModelCatalog {
 
   fun createGroqReasoningSpec(modelId: String = DEFAULT_GROQ_REASONING_MODEL_ID): AiModelSpec {
     val cleanId = modelId.trim().ifBlank { DEFAULT_GROQ_REASONING_MODEL_ID }
+    val lower = cleanId.lowercase()
+    val hasVision =
+      lower.contains("vision") ||
+        lower.contains("llama-4-scout") ||
+        lower.contains("llama-4-maverick")
+    val hasNativeSearch = lower.contains("compound") || lower.contains("browser")
     return AiModelSpec(
       id = cleanId,
       selectorSlotId = GROQ_REASONING_SLOT_ID,
@@ -224,15 +240,19 @@ object VerifiedModelCatalog {
       capabilities =
         AiCapabilities(
           supportsStreaming = true,
-          supportsVision = false,
-          supportsMultiImage = false,
+          supportsVision = hasVision,
+          supportsMultiImage = hasVision,
           supportsSystemInstruction = true,
           maxContextTokens = 131_072,
           supportsGoogleSearchGrounding = false,
           supportsAudioInput = false,
           supportsVideoFrameAnalysis = false,
         ),
-      description = "Fast Reasoning & Coding ($cleanId / $FALLBACK_GROQ_REASONING_MODEL_ID)",
+      description =
+        buildString {
+          append("Fast Reasoning & Coding ($cleanId)")
+          if (hasNativeSearch) append(" · Native Search")
+        },
       fallbackModelIds = listOf(FALLBACK_GROQ_REASONING_MODEL_ID, FALLBACK_GROQ_MODEL_ID),
     )
   }
@@ -450,6 +470,32 @@ data class VoicePreferences(
   val pitch: Float = 1.0f,
   val voiceGender: VoiceGender = VoiceGender.FEMALE,
   val activationSoundEnabled: Boolean = true,
+  val preferredVoiceName: String = "",
+  val volume: Float = 1.0f,
+  val autoLanguageDetection: Boolean = true,
+)
+
+data class LiveDiscoveredModel(
+  val id: String,
+  val displayName: String,
+  val provider: ProviderType,
+  val supportsStreaming: Boolean = true,
+  val supportsVision: Boolean = false,
+  val supportsAudioInput: Boolean = false,
+  val supportsGoogleSearchGrounding: Boolean = false,
+  val supportsReasoning: Boolean = false,
+  val supportsNativeBrowserSearch: Boolean = false,
+  val supportsLiveAudio: Boolean = false,
+  val ownedBy: String = "",
+)
+
+data class ProviderTestReport(
+  val provider: ProviderType,
+  val health: ProviderConnectionHealth,
+  val message: String,
+  val maskedKey: String = "",
+  val discoveredModels: List<LiveDiscoveredModel> = emptyList(),
+  val checkedAtMs: Long = System.currentTimeMillis(),
 )
 
 data class AppSettings(

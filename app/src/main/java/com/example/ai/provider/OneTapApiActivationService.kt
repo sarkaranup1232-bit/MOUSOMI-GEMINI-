@@ -5,6 +5,7 @@ import com.example.ai.provider.api.CloudflareWorkersAiService
 import com.example.ai.provider.api.GeminiApiService
 import com.example.ai.provider.api.GroqApiService
 import com.example.ai.provider.api.ProxyApiService
+import com.example.core.network.RetryPolicy
 import com.example.core.security.SecurityValidator
 import com.example.data.local.db.ImageProviderStatusEntity
 import com.example.data.local.db.ImageStudioDao
@@ -13,9 +14,12 @@ import com.example.domain.model.AppSettings
 import com.example.domain.model.CapabilityActivationBadge
 import com.example.domain.model.ConnectionMode
 import com.example.domain.model.DetectedProviderKind
+import com.example.domain.model.LiveDiscoveredModel
 import com.example.domain.model.OneTapActivationResult
 import com.example.domain.model.ProviderConnectionHealth
 import com.example.domain.model.ProviderHealthSnapshot
+import com.example.domain.model.ProviderTestReport
+import com.example.domain.model.ProviderType
 import com.example.domain.model.VerifiedModelCatalog
 import java.io.IOException
 import javax.inject.Inject
@@ -683,14 +687,20 @@ class OneTapApiActivationService @Inject constructor(
         200 -> {
           val models = response.body()?.data.orEmpty()
           val rawIds = models.map { it.id }.filter { it.isNotBlank() }
+          val preservedGroq =
+            rawIds.firstOrNull { it.equals(existingSettings.groqReasoningModelId, ignoreCase = true) }
           val preferredGroq =
-            rawIds.firstOrNull { it.contains("qwen", ignoreCase = true) }
+            preservedGroq
+              ?: rawIds.firstOrNull { it.contains("qwen", ignoreCase = true) }
               ?: rawIds.firstOrNull { it.contains("gpt-oss-120b", ignoreCase = true) }
               ?: rawIds.firstOrNull { it.contains("llama-3.3-70b", ignoreCase = true) }
               ?: rawIds.firstOrNull()
               ?: VerifiedModelCatalog.DEFAULT_GROQ_REASONING_MODEL_ID
+          val preservedHelper =
+            rawIds.firstOrNull { it.equals(existingSettings.groqHelperGuardModelId, ignoreCase = true) }
           val preferredHelper =
-            rawIds.firstOrNull { it.contains("gpt-oss-20b", ignoreCase = true) }
+            preservedHelper
+              ?: rawIds.firstOrNull { it.contains("gpt-oss-20b", ignoreCase = true) }
               ?: rawIds.firstOrNull { it.contains("safeguard-20b", ignoreCase = true) }
               ?: rawIds.firstOrNull { it.contains("prompt-guard", ignoreCase = true) }
               ?: existingSettings.groqHelperGuardModelId
@@ -701,8 +711,6 @@ class OneTapApiActivationService @Inject constructor(
               groqApiKey = apiKey,
               groqReasoningModelId = preferredGroq,
               groqHelperGuardModelId = preferredHelper,
-              selectedModelOptionName =
-                if (!hasGeminiConfigured) "GROQ_HIGH_SPEED_REASONING" else existingSettings.selectedModelOptionName,
             )
 
           val snapshot =
@@ -1072,6 +1080,230 @@ class OneTapApiActivationService @Inject constructor(
         detail = if (micGranted) "Microphone permitted" else "Grant mic permission when using Voice",
       ),
     )
+
+  suspend fun testGeminiConnection(
+    apiKey: String,
+    existingSettings: AppSettings,
+    hasMicPermission: Boolean = true,
+  ): Pair<ProviderTestReport, AppSettings?> {
+    val cleanKey = apiKey.trim()
+    val now = System.currentTimeMillis()
+    if (cleanKey.isBlank()) {
+      return ProviderTestReport(
+        provider = ProviderType.GEMINI,
+        health = ProviderConnectionHealth.NOT_CONFIGURED,
+        message = "Enter your Google Gemini API key to test and discover models.",
+        checkedAtMs = now,
+      ) to null
+    }
+    return try {
+      val response = geminiApiService.listModels(apiKey = cleanKey)
+      if (response.isSuccessful) {
+        val rawModels = response.body()?.models.orEmpty()
+        val discovered =
+          rawModels
+            .mapNotNull { dto ->
+              val id = dto.name.removePrefix("models/").trim()
+              if (id.isBlank()) return@mapNotNull null
+              val methods = dto.supportedGenerationMethods
+              val supportsGenerate =
+                methods.isEmpty() || methods.any { it.contains("generateContent", ignoreCase = true) || it.contains("bidi", ignoreCase = true) }
+              if (!supportsGenerate) return@mapNotNull null
+              val lower = id.lowercase()
+              val isLive = lower.contains("live") || methods.any { it.contains("bidiGenerateContent", ignoreCase = true) }
+              val isImageOnly = lower.contains("imagen") || lower.contains("-image") || lower.contains("nano-banana")
+              LiveDiscoveredModel(
+                id = id,
+                displayName = dto.displayName.ifBlank { id },
+                provider = ProviderType.GEMINI,
+                supportsStreaming = !isImageOnly,
+                supportsVision = !lower.contains("embedding") && !lower.contains("aqa"),
+                supportsAudioInput = lower.contains("gemini"),
+                supportsGoogleSearchGrounding = !isImageOnly && lower.contains("gemini"),
+                supportsReasoning = lower.contains("pro") || lower.contains("hydrogen") || lower.contains("2.5") || lower.contains("3."),
+                supportsLiveAudio = isLive,
+                ownedBy = "Google Gemini",
+              )
+            }
+            .distinctBy { it.id }
+
+        val updatedSettings =
+          existingSettings.copy(
+            connectionMode = ConnectionMode.DIRECT_DEV_KEYS,
+            geminiApiKey = cleanKey,
+          )
+        persistProviderStatusesSafe(
+          listOf(
+            ProviderHealthSnapshot(
+              providerId = "gemini",
+              displayName = "Google Gemini API",
+              status = ProviderConnectionHealth.CONNECTED,
+              activeModelId = existingSettings.hydrogenBackingModelId,
+              quotaDetail = "${discovered.size} live models ready",
+              isFreeTier = true,
+              lastCheckedAtMs = now,
+            )
+          )
+        )
+        ProviderTestReport(
+          provider = ProviderType.GEMINI,
+          health = ProviderConnectionHealth.CONNECTED,
+          message = "Connected to Google Gemini API (${discovered.size} active models verified).",
+          maskedKey = maskKey(cleanKey),
+          discoveredModels = discovered,
+          checkedAtMs = now,
+        ) to updatedSettings
+      } else {
+        val errBody = response.errorBody()?.string()
+        response.errorBody()?.close()
+        val mapped = RetryPolicy.mapHttpError(response.code(), errBody, response.headers()["Retry-After"])
+        val health =
+          when (response.code()) {
+            401, 403 -> ProviderConnectionHealth.AUTHENTICATION_FAILED
+            429 -> ProviderConnectionHealth.RATE_LIMITED
+            else -> ProviderConnectionHealth.TEMPORARILY_UNAVAILABLE
+          }
+        persistProviderStatusesSafe(
+          listOf(
+            ProviderHealthSnapshot(
+              providerId = "gemini",
+              displayName = "Google Gemini API",
+              status = health,
+              quotaDetail = mapped.message,
+              lastCheckedAtMs = now,
+            )
+          )
+        )
+        ProviderTestReport(
+          provider = ProviderType.GEMINI,
+          health = health,
+          message = mapped.message,
+          maskedKey = maskKey(cleanKey),
+          checkedAtMs = now,
+        ) to null
+      }
+    } catch (t: Throwable) {
+      val mapped = RetryPolicy.mapThrowable(t)
+      ProviderTestReport(
+        provider = ProviderType.GEMINI,
+        health = ProviderConnectionHealth.DISCONNECTED,
+        message = mapped.message,
+        maskedKey = maskKey(cleanKey),
+        checkedAtMs = now,
+      ) to null
+    }
+  }
+
+  suspend fun testGroqConnection(
+    apiKey: String,
+    existingSettings: AppSettings,
+    hasMicPermission: Boolean = true,
+  ): Pair<ProviderTestReport, AppSettings?> {
+    val cleanKey = apiKey.trim()
+    val now = System.currentTimeMillis()
+    if (cleanKey.isBlank()) {
+      return ProviderTestReport(
+        provider = ProviderType.GROQ,
+        health = ProviderConnectionHealth.NOT_CONFIGURED,
+        message = "Enter your Groq API key to test and discover models.",
+        checkedAtMs = now,
+      ) to null
+    }
+    return try {
+      val response = groqApiService.listModels(authorization = "Bearer $cleanKey")
+      if (response.isSuccessful) {
+        val rawModels = response.body()?.data.orEmpty()
+        val discovered =
+          rawModels
+            .filter { it.id.isNotBlank() && it.active }
+            .map { dto ->
+              val lower = dto.id.lowercase()
+              val isWhisper = lower.contains("whisper")
+              val isTts = lower.contains("tts") || lower.contains("playai") || lower.contains("orpheus")
+              val isVision = lower.contains("vision") || lower.contains("llama-4-scout") || lower.contains("llama-4-maverick")
+              val isReasoning = lower.contains("qwen") || lower.contains("gpt-oss") || lower.contains("deepseek") || lower.contains("r1")
+              val isBrowserSearch = lower.contains("compound") || lower.contains("browser")
+              LiveDiscoveredModel(
+                id = dto.id,
+                displayName = dto.id,
+                provider = ProviderType.GROQ,
+                supportsStreaming = !isWhisper && !isTts,
+                supportsVision = isVision,
+                supportsAudioInput = isWhisper,
+                supportsGoogleSearchGrounding = false,
+                supportsReasoning = isReasoning,
+                supportsNativeBrowserSearch = isBrowserSearch,
+                ownedBy = dto.ownedBy.ifBlank { "Groq" },
+              )
+            }
+            .distinctBy { it.id }
+
+        val updatedSettings =
+          existingSettings.copy(
+            connectionMode = ConnectionMode.DIRECT_DEV_KEYS,
+            groqApiKey = cleanKey,
+          )
+        persistProviderStatusesSafe(
+          listOf(
+            ProviderHealthSnapshot(
+              providerId = "groq",
+              displayName = "Groq Cloud",
+              status = ProviderConnectionHealth.CONNECTED,
+              activeModelId = existingSettings.groqReasoningModelId,
+              quotaDetail = "${discovered.size} live models ready",
+              isFreeTier = true,
+              lastCheckedAtMs = now,
+            )
+          )
+        )
+        ProviderTestReport(
+          provider = ProviderType.GROQ,
+          health = ProviderConnectionHealth.CONNECTED,
+          message = "Connected to Groq Cloud (${discovered.size} active models verified).",
+          maskedKey = maskKey(cleanKey),
+          discoveredModels = discovered,
+          checkedAtMs = now,
+        ) to updatedSettings
+      } else {
+        val errBody = response.errorBody()?.string()
+        response.errorBody()?.close()
+        val mapped = RetryPolicy.mapHttpError(response.code(), errBody, response.headers()["Retry-After"])
+        val health =
+          when (response.code()) {
+            401, 403 -> ProviderConnectionHealth.AUTHENTICATION_FAILED
+            429 -> ProviderConnectionHealth.RATE_LIMITED
+            else -> ProviderConnectionHealth.TEMPORARILY_UNAVAILABLE
+          }
+        persistProviderStatusesSafe(
+          listOf(
+            ProviderHealthSnapshot(
+              providerId = "groq",
+              displayName = "Groq Cloud",
+              status = health,
+              quotaDetail = mapped.message,
+              lastCheckedAtMs = now,
+            )
+          )
+        )
+        ProviderTestReport(
+          provider = ProviderType.GROQ,
+          health = health,
+          message = mapped.message,
+          maskedKey = maskKey(cleanKey),
+          checkedAtMs = now,
+        ) to null
+      }
+    } catch (t: Throwable) {
+      val mapped = RetryPolicy.mapThrowable(t)
+      ProviderTestReport(
+        provider = ProviderType.GROQ,
+        health = ProviderConnectionHealth.DISCONNECTED,
+        message = mapped.message,
+        maskedKey = maskKey(cleanKey),
+        checkedAtMs = now,
+      ) to null
+    }
+  }
 
   private fun maskKey(key: String): String {
     val clean = key.trim()

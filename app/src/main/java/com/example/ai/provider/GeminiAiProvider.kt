@@ -70,40 +70,53 @@ class GeminiAiProvider @Inject constructor(
 
     var lastUsage: TokenUsage? = null
 
-    SseStreamParser.parseDataEvents {
-      apiService.streamGenerateContent(
-        model = request.model.id,
-        apiKey = apiKey,
-        request = payload,
-      )
-    }.collect { jsonChunk ->
-      val parsed = json.decodeFromString<GeminiGenerateResponse>(jsonChunk)
-      val deltaText =
-        parsed.candidates
-          .firstOrNull()
-          ?.content
-          ?.parts
-          ?.mapNotNull { it.text }
-          ?.joinToString(separator = "")
-          .orEmpty()
+    try {
+      SseStreamParser.parseDataEvents {
+        apiService.streamGenerateContent(
+          model = request.model.id,
+          apiKey = apiKey,
+          request = payload,
+        )
+      }.collect { jsonChunk ->
+        val parsed =
+          try {
+            json.decodeFromString<GeminiGenerateResponse>(jsonChunk)
+          } catch (se: kotlinx.serialization.SerializationException) {
+            throw com.example.core.network.RetryPolicy.mapThrowable(se)
+          }
+        val deltaText =
+          parsed.candidates
+            .firstOrNull()
+            ?.content
+            ?.parts
+            ?.mapNotNull { it.text }
+            ?.joinToString(separator = "")
+            .orEmpty()
 
-      if (deltaText.isNotEmpty()) {
-        emit(AiStreamEvent.Delta(deltaText))
+        if (deltaText.isNotEmpty()) {
+          emit(AiStreamEvent.Delta(deltaText))
+        }
+
+        parsed.usageMetadata?.let { meta ->
+          val usage =
+            TokenUsage(
+              promptTokens = meta.promptTokenCount,
+              completionTokens = meta.candidatesTokenCount,
+              totalTokens = meta.totalTokenCount,
+            )
+          lastUsage = usage
+          emit(AiStreamEvent.Usage(usage))
+        }
       }
 
-      parsed.usageMetadata?.let { meta ->
-        val usage =
-          TokenUsage(
-            promptTokens = meta.promptTokenCount,
-            completionTokens = meta.candidatesTokenCount,
-            totalTokens = meta.totalTokenCount,
-          )
-        lastUsage = usage
-        emit(AiStreamEvent.Usage(usage))
-      }
+      lastUsage?.let { emit(AiStreamEvent.Usage(it)) }
+      emit(AiStreamEvent.Completed)
+    } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+      throw e
+    } catch (e: AiProviderException) {
+      throw e
+    } catch (e: Throwable) {
+      throw com.example.core.network.RetryPolicy.mapThrowable(e)
     }
-
-    lastUsage?.let { emit(AiStreamEvent.Usage(it)) }
-    emit(AiStreamEvent.Completed)
   }
 }

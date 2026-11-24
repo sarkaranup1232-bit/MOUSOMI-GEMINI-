@@ -55,6 +55,7 @@ import androidx.compose.material.icons.outlined.OpenInFull
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Science
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.TextFields
@@ -158,6 +159,7 @@ fun MousomiDrawerContent(
   activeConversationId: String,
   onSelectConversation: (String) -> Unit,
   onDeleteConversation: (String) -> Unit,
+  onRenameConversation: (String, String) -> Unit = { _, _ -> },
   onNewChat: () -> Unit,
   onPreviewChatBubbles: () -> Unit,
   onOpenSettings: () -> Unit,
@@ -170,6 +172,16 @@ fun MousomiDrawerContent(
 ) {
   val colors = LocalMousomiColors.current
   val onSurface = MaterialTheme.colorScheme.onSurface
+  var searchQuery by remember { mutableStateOf("") }
+  var renamingConversation by remember { mutableStateOf<DomainConversation?>(null) }
+  var renameTitleDraft by remember { mutableStateOf("") }
+
+  val filteredConversations =
+    remember(conversations, searchQuery) {
+      val q = searchQuery.trim()
+      if (q.isEmpty()) conversations
+      else conversations.filter { it.title.contains(q, ignoreCase = true) }
+    }
 
   ModalDrawerSheet(
     drawerContainerColor = MaterialTheme.colorScheme.surface,
@@ -193,7 +205,7 @@ fun MousomiDrawerContent(
             color = onSurface,
           )
           Text(
-            text = "Multi-Model Multimodal Platform",
+            text = "Two-API Gemini + Groq Platform",
             style = MaterialTheme.typography.labelSmall,
             color = colors.mutedText,
           )
@@ -232,9 +244,33 @@ fun MousomiDrawerContent(
         modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
       )
 
-      if (conversations.isEmpty()) {
+      OutlinedTextField(
+        value = searchQuery,
+        onValueChange = { searchQuery = it },
+        placeholder = { Text("Search conversations…", style = MaterialTheme.typography.bodySmall) },
+        leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+        trailingIcon =
+          if (searchQuery.isNotBlank()) {
+            {
+              IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Rounded.Close, contentDescription = "Clear search", modifier = Modifier.size(16.dp))
+              }
+            }
+          } else null,
+        singleLine = true,
+        shape = RoundedCornerShape(14.dp),
+        modifier =
+          Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 6.dp)
+            .testTag("drawer_conversation_search"),
+      )
+
+      if (filteredConversations.isEmpty()) {
         Text(
-          text = "Your conversation history appears here.",
+          text =
+            if (conversations.isEmpty()) "Your conversation history appears here."
+            else "No matching conversations.",
           style = MaterialTheme.typography.bodyMedium,
           color = colors.mutedText,
           modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -245,7 +281,7 @@ fun MousomiDrawerContent(
           modifier = Modifier.weight(1f).fillMaxWidth(),
           verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-          items(conversations, key = { it.id }) { conv ->
+          items(filteredConversations, key = { it.id }) { conv ->
             val selected = conv.id == activeConversationId
             NavigationDrawerItem(
               label = {
@@ -258,21 +294,75 @@ fun MousomiDrawerContent(
               selected = selected,
               onClick = { onSelectConversation(conv.id) },
               badge = {
-                IconButton(
-                  onClick = { onDeleteConversation(conv.id) },
-                  modifier = Modifier.size(30.dp),
+                Row(
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                  Icon(
-                    imageVector = Icons.Outlined.DeleteOutline,
-                    contentDescription = "Delete conversation",
-                    tint = colors.mutedText,
-                    modifier = Modifier.size(16.dp),
-                  )
+                  IconButton(
+                    onClick = {
+                      renamingConversation = conv
+                      renameTitleDraft = conv.title
+                    },
+                    modifier = Modifier.size(28.dp).testTag("rename_conversation_${conv.id}"),
+                  ) {
+                    Icon(
+                      imageVector = Icons.Outlined.Edit,
+                      contentDescription = "Rename conversation",
+                      tint = colors.mutedText,
+                      modifier = Modifier.size(15.dp),
+                    )
+                  }
+                  IconButton(
+                    onClick = { onDeleteConversation(conv.id) },
+                    modifier = Modifier.size(28.dp).testTag("delete_conversation_${conv.id}"),
+                  ) {
+                    Icon(
+                      imageVector = Icons.Outlined.DeleteOutline,
+                      contentDescription = "Delete conversation",
+                      tint = colors.mutedText,
+                      modifier = Modifier.size(16.dp),
+                    )
+                  }
                 }
               },
             )
           }
         }
+      }
+
+      renamingConversation?.let { conv ->
+        AlertDialog(
+          onDismissRequest = { renamingConversation = null },
+          title = { Text("Rename Conversation") },
+          text = {
+            OutlinedTextField(
+              value = renameTitleDraft,
+              onValueChange = { renameTitleDraft = it },
+              label = { Text("Title") },
+              singleLine = true,
+              modifier = Modifier.fillMaxWidth().testTag("rename_conversation_input"),
+            )
+          },
+          confirmButton = {
+            Button(
+              onClick = {
+                val trimmed = renameTitleDraft.trim()
+                if (trimmed.isNotBlank()) {
+                  onRenameConversation(conv.id, trimmed)
+                }
+                renamingConversation = null
+              },
+              modifier = Modifier.testTag("rename_conversation_confirm"),
+            ) {
+              Text("Save")
+            }
+          },
+          dismissButton = {
+            TextButton(onClick = { renamingConversation = null }) {
+              Text("Cancel")
+            }
+          },
+        )
       }
 
       HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))

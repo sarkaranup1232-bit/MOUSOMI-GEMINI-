@@ -74,6 +74,7 @@ import com.example.core.voice.LiveVoiceSessionManager
 import com.example.core.voice.LiveVoiceSessionStatus
 import com.example.core.voice.OrbReactiveFrame
 import com.example.core.voice.VoiceController
+import com.example.core.voice.VoiceOptionInfo
 import com.example.core.voice.VoiceState
 import com.example.data.remote.firestore.FirestoreCloudSyncRepository
 import com.example.data.repository.AddOnRepository
@@ -106,6 +107,7 @@ import com.example.domain.model.GeneratedVideoResult
 import com.example.domain.model.ImageGenerationStatus
 import com.example.domain.model.LensAnalysisResult
 import com.example.domain.model.LensFollowUpTurn
+import com.example.domain.model.LiveDiscoveredModel
 import com.example.domain.model.ManagedTaskItem
 import com.example.domain.model.MediaAttachmentKind
 import com.example.domain.model.MemoryCategory
@@ -119,6 +121,7 @@ import com.example.domain.model.OrbQuickAction
 import com.example.domain.model.PendingMediaItem
 import com.example.domain.model.PrivacyAndPerformanceConfig
 import com.example.domain.model.ProcessedImagePayload
+import com.example.domain.model.ProviderTestReport
 import com.example.domain.model.ReminderItemType
 import com.example.domain.model.ResponseBlock
 import com.example.domain.model.ResponseLanguage
@@ -561,6 +564,7 @@ class MousomiViewModel @Inject constructor(
             notificationConfig = settings.notificationConfig,
             privacyPerformanceConfig = settings.privacyPerformanceConfig,
             activationResult = hydratedActivation,
+            availableTtsVoices = voiceController.getAvailableVoices(settings.voicePreferences.preferredLanguage),
           )
         }
       }
@@ -2091,12 +2095,23 @@ class MousomiViewModel @Inject constructor(
                 }
                 is OrchestrationEvent.BlocksUpdated -> {
                   latestBlocks = event.blocks
+                  val citations =
+                    event.blocks.filterIsInstance<ResponseBlock.SourceCitations>().firstOrNull()?.sources.orEmpty()
                   _uiState.update { ui ->
                     val updated =
                       ui.messages.map { msg ->
                         if (msg.id == assistantMsgId) msg.copy(blocks = latestBlocks) else msg
                       }
-                    ui.copy(messages = updated)
+                    val updatedResearch =
+                      ui.researchActivity?.let { snap ->
+                        if (citations.isNotEmpty()) {
+                          snap.copy(
+                            sourcesReturnedCount = maxOf(snap.sourcesReturnedCount, citations.size),
+                            sourcesUsedCount = citations.count { it.usedInAnswer },
+                          )
+                        } else snap
+                      }
+                    ui.copy(messages = updated, researchActivity = updatedResearch)
                   }
                 }
                 is OrchestrationEvent.StateChanged -> {
@@ -3069,6 +3084,15 @@ class MousomiViewModel @Inject constructor(
     }
   }
 
+  fun onRenameConversation(conversationId: String, newTitle: String) {
+    val clean = newTitle.trim().take(80)
+    if (clean.isBlank()) return
+    viewModelScope.launch {
+      chatRepository.updateConversationTitle(conversationId, clean)
+      _uiState.update { it.copy(statusToastMessage = "Renamed conversation to \"$clean\"") }
+    }
+  }
+
   fun onLoadSampleConversation() {
     val convId = "conv_${UUID.randomUUID()}"
     val now = System.currentTimeMillis()
@@ -3667,7 +3691,7 @@ class MousomiViewModel @Inject constructor(
             liveAssistantTranscript = "",
           )
         }
-        geminiLiveVoiceEngine!!.startSession(
+        geminiLiveVoiceEngine.startSession(
           preferences = prefs,
           allowInterruptions = allowInterrupt,
           onFallbackRequired = { reason ->
@@ -3996,9 +4020,14 @@ class MousomiViewModel @Inject constructor(
   }
 
   fun onUpdatePreferredLanguage(language: ResponseLanguage) {
+    val voices = voiceController.getAvailableVoices(language)
     _uiState.update {
-      it.copy(voicePreferences = it.voicePreferences.copy(preferredLanguage = language))
+      it.copy(
+        voicePreferences = it.voicePreferences.copy(preferredLanguage = language),
+        availableTtsVoices = voices,
+      )
     }
+    persistCurrentSettings()
   }
 
   fun onUpdateVoiceGender(gender: VoiceGender) {
@@ -4012,18 +4041,58 @@ class MousomiViewModel @Inject constructor(
     _uiState.update {
       it.copy(voicePreferences = it.voicePreferences.copy(activationSoundEnabled = enabled))
     }
+    persistCurrentSettings()
   }
 
   fun onUpdateAutoSpeak(enabled: Boolean) {
     _uiState.update {
       it.copy(voicePreferences = it.voicePreferences.copy(autoSpeakResponses = enabled))
     }
+    persistCurrentSettings()
   }
 
   fun onUpdateSpeechRate(rate: Float) {
     _uiState.update {
-      it.copy(voicePreferences = it.voicePreferences.copy(speechRate = rate))
+      it.copy(voicePreferences = it.voicePreferences.copy(speechRate = rate.coerceIn(0.7f, 1.6f)))
     }
+    persistCurrentSettings()
+  }
+
+  fun onUpdateVoicePitch(pitch: Float) {
+    _uiState.update {
+      it.copy(voicePreferences = it.voicePreferences.copy(pitch = pitch.coerceIn(0.75f, 1.25f)))
+    }
+    persistCurrentSettings()
+  }
+
+  fun onUpdateVoiceVolume(volume: Float) {
+    _uiState.update {
+      it.copy(voicePreferences = it.voicePreferences.copy(volume = volume.coerceIn(0.2f, 1.0f)))
+    }
+    persistCurrentSettings()
+  }
+
+  fun onUpdateAutoLanguageDetection(enabled: Boolean) {
+    _uiState.update {
+      it.copy(voicePreferences = it.voicePreferences.copy(autoLanguageDetection = enabled))
+    }
+    persistCurrentSettings()
+  }
+
+  fun onUpdatePreferredVoiceName(voiceName: String) {
+    _uiState.update {
+      it.copy(voicePreferences = it.voicePreferences.copy(preferredVoiceName = voiceName))
+    }
+    persistCurrentSettings()
+  }
+
+  fun onRefreshAvailableVoices() {
+    val voices = voiceController.getAvailableVoices(_uiState.value.voicePreferences.preferredLanguage)
+    _uiState.update { it.copy(availableTtsVoices = voices) }
+  }
+
+  fun onPreviewVoice() {
+    voiceController.previewVoice(_uiState.value.voicePreferences)
   }
 
   fun onSaveSettings(): Boolean {
@@ -4150,6 +4219,10 @@ class MousomiViewModel @Inject constructor(
           groqApiKey = "",
           externalSearchApiKey = "",
           oneTapApiKeyInput = "",
+          geminiTestReport = null,
+          groqTestReport = null,
+          discoveredGeminiModels = emptyList(),
+          discoveredGroqModels = emptyList(),
           activationResult =
             OneTapActivationResult(
               status = ActivationHealthStatus.UNCONFIGURED,
@@ -4160,6 +4233,76 @@ class MousomiViewModel @Inject constructor(
         )
       }
     }
+  }
+
+  fun onTestGeminiConnection() {
+    val service = oneTapApiActivationService ?: return
+    if (_uiState.value.isTestingGemini) return
+    val currentSettings = buildCurrentAppSettingsSnapshot()
+    val hasMic = _uiState.value.hasAudioPermission
+    viewModelScope.launch {
+      _uiState.update { it.copy(isTestingGemini = true, settingsErrorMessage = null) }
+      val (report, updatedSettings) =
+        service.testGeminiConnection(_uiState.value.geminiApiKey, currentSettings, hasMic)
+      if (updatedSettings != null) {
+        settingsRepository.saveSettings(updatedSettings)
+      }
+      _uiState.update {
+        it.copy(
+          isTestingGemini = false,
+          geminiTestReport = report,
+          discoveredGeminiModels = report.discoveredModels,
+          statusToastMessage = report.message,
+        )
+      }
+    }
+  }
+
+  fun onTestGroqConnection() {
+    val service = oneTapApiActivationService ?: return
+    if (_uiState.value.isTestingGroq) return
+    val currentSettings = buildCurrentAppSettingsSnapshot()
+    val hasMic = _uiState.value.hasAudioPermission
+    viewModelScope.launch {
+      _uiState.update { it.copy(isTestingGroq = true, settingsErrorMessage = null) }
+      val (report, updatedSettings) =
+        service.testGroqConnection(_uiState.value.groqApiKey, currentSettings, hasMic)
+      if (updatedSettings != null) {
+        settingsRepository.saveSettings(updatedSettings)
+      }
+      _uiState.update {
+        it.copy(
+          isTestingGroq = false,
+          groqTestReport = report,
+          discoveredGroqModels = report.discoveredModels,
+          statusToastMessage = report.message,
+        )
+      }
+    }
+  }
+
+  fun onSelectDiscoveredGeminiModel(modelId: String) {
+    val clean = modelId.trim()
+    if (clean.isBlank()) return
+    _uiState.update {
+      it.copy(
+        hydrogenBackingModelId = clean,
+        statusToastMessage = "Selected Gemini model: $clean",
+      )
+    }
+    persistCurrentSettings()
+  }
+
+  fun onSelectDiscoveredGroqModel(modelId: String) {
+    val clean = modelId.trim()
+    if (clean.isBlank()) return
+    _uiState.update {
+      it.copy(
+        groqReasoningModelId = clean,
+        statusToastMessage = "Selected Groq model: $clean",
+      )
+    }
+    persistCurrentSettings()
   }
 
   private fun deriveActivationResultFromStoredSettings(

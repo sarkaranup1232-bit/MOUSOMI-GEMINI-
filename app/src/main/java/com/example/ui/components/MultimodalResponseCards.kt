@@ -660,21 +660,52 @@ private fun SourceCitationsBlockCard(
   sources: List<SearchResultItem>,
   modifier: Modifier = Modifier,
 ) {
-  if (sources.isEmpty()) return
   val uriHandler = LocalUriHandler.current
   val colors = LocalMousomiColors.current
+
+  if (sources.isEmpty()) {
+    Surface(
+      shape = RoundedCornerShape(14.dp),
+      color = colors.activeChipContainer.copy(alpha = 0.55f),
+      border = BorderStroke(1.dp, WarmAmber.copy(alpha = 0.4f)),
+      modifier = modifier.fillMaxWidth().testTag("source_citations_empty_state"),
+    ) {
+      Row(
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        Icon(
+          imageVector = Icons.Outlined.Public,
+          contentDescription = null,
+          tint = WarmAmber,
+          modifier = Modifier.size(16.dp),
+        )
+        Text(
+          text = "No verified web sources were returned for this search.",
+          color = colors.mutedText,
+          style = MaterialTheme.typography.bodySmall,
+        )
+      }
+    }
+    return
+  }
 
   Column(
     modifier = modifier.fillMaxWidth().testTag("source_citations_list"),
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
+    val usedCount = sources.count { it.usedInAnswer }
     Text(
-      text = "Verified Sources (${sources.size})",
+      text =
+        if (usedCount > 0) "Verified Sources (${sources.size} returned • $usedCount cited)"
+        else "Verified Sources (${sources.size})",
       color = colors.mutedText,
       style = MaterialTheme.typography.labelMedium,
       fontWeight = FontWeight.SemiBold,
     )
-    sources.take(8).forEachIndexed { idx, src ->
+    sources.forEachIndexed { idx, src ->
+      val sourceNum = if (src.sourceNumber > 0) src.sourceNumber else idx + 1
       val isMapLink =
         src.url.contains("maps.google", ignoreCase = true) ||
           src.url.contains("google.com/maps", ignoreCase = true)
@@ -689,7 +720,13 @@ private fun SourceCitationsBlockCard(
         onClick = { if (canOpen) runCatching { uriHandler.openUri(src.url) } },
         shape = RoundedCornerShape(14.dp),
         color = colors.activeChipContainer.copy(alpha = 0.72f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+        border =
+          BorderStroke(
+            width = 1.dp,
+            color =
+              if (src.usedInAnswer) NeonCyan.copy(alpha = 0.55f)
+              else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+          ),
         modifier = Modifier.fillMaxWidth().testTag("source_citation_card_$idx"),
       ) {
         Column(
@@ -734,13 +771,45 @@ private fun SourceCitationsBlockCard(
               }
             }
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-              Text(
-                text = publisherLabel,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-              )
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+              ) {
+                Surface(
+                  shape = RoundedCornerShape(6.dp),
+                  color = NeonCyan.copy(alpha = 0.16f),
+                ) {
+                  Text(
+                    text = "#$sourceNum",
+                    color = NeonCyan,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                  )
+                }
+                Text(
+                  text = publisherLabel,
+                  style = MaterialTheme.typography.labelLarge,
+                  fontWeight = FontWeight.SemiBold,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                  modifier = Modifier.weight(1f, fill = false),
+                )
+                if (src.usedInAnswer) {
+                  Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = NeonGreen.copy(alpha = 0.16f),
+                  ) {
+                    Text(
+                      text = "Used in answer",
+                      color = NeonGreen,
+                      style = MaterialTheme.typography.labelSmall,
+                      fontWeight = FontWeight.SemiBold,
+                      modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                    )
+                  }
+                }
+              }
               Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -755,10 +824,8 @@ private fun SourceCitationsBlockCard(
                   text =
                     buildString {
                       append(src.sourceDomain)
-                      if (!src.publishedTimestamp.isNullOrBlank()) {
-                        append(" • ")
-                        append(src.publishedTimestamp)
-                      }
+                      append(" • ")
+                      append(src.publishedTimestamp?.takeIf { it.isNotBlank() } ?: "Date unverified")
                       append(" • ")
                       append(src.verificationStatus.label)
                     },
@@ -781,10 +848,10 @@ private fun SourceCitationsBlockCard(
 
           if (src.snippet.isNotBlank()) {
             Text(
-              text = src.snippet.take(150),
+              text = src.snippet.take(180),
               color = colors.mutedText.copy(alpha = 0.92f),
               style = MaterialTheme.typography.bodySmall,
-              maxLines = 2,
+              maxLines = 3,
               overflow = TextOverflow.Ellipsis,
             )
           }

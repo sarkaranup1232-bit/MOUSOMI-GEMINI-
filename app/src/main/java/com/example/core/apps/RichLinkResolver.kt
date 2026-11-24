@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import android.os.Build
+import android.os.Build
 import com.example.domain.model.RichLinkKind
 import com.example.domain.model.RichLinkMetadata
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -130,15 +132,14 @@ class RichLinkResolver @Inject constructor(
 
   private fun isAppInstalled(packageName: String): Boolean =
     runCatching {
-      context.packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
-      true
-    }.getOrElse {
-      runCatching {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        context.packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+      } else {
         @Suppress("DEPRECATION")
         context.packageManager.getPackageInfo(packageName, 0)
-        true
-      }.getOrDefault(false)
-    }
+      }
+      true
+    }.getOrDefault(false)
 
   private fun resolveAppLabel(packageName: String): String? =
     runCatching {

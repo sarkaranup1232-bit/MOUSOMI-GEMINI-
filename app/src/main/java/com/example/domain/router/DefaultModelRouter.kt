@@ -73,14 +73,16 @@ class DefaultModelRouter @Inject constructor(
       )
     }
 
-    if ((operatingMode == OperatingMode.GOOGLE_AI_SEARCH || operatingMode == OperatingMode.DEEP_RESEARCH) &&
+    if ((operatingMode == OperatingMode.GOOGLE_AI_SEARCH ||
+        operatingMode == OperatingMode.DEEP_RESEARCH ||
+        operatingMode == OperatingMode.LATEST_NEWS) &&
       !explicitSpec.capabilities.supportsGoogleSearchGrounding &&
-      hasGemini
+      !hasGemini
     ) {
       return ModelSubstitutionPrompt(
-        title = "Search Grounding Unavailable on ${explicitSpec.displayName}",
+        title = "Live Web Search Requires Gemini Grounding",
         message =
-          "${operatingMode.label} needs grounded search synthesis. Allow switching to ${hydrogenSpec.displayName}?",
+          "${operatingMode.label} needs Google Search Grounding (provided by Gemini). Configure a Gemini key or switch to Normal Chat / Analysis to continue with ${explicitSpec.displayName}.",
         requestedModelId = explicitSpec.id,
         suggestedModelId = hydrogenSpec.selectorSlotId,
         suggestedModelDisplayName = hydrogenSpec.displayName,
@@ -266,7 +268,8 @@ class DefaultModelRouter @Inject constructor(
       when {
         hasImages -> listOf(hydrogenSpec, flashLiteSpec, imageSpec)
         operatingMode == OperatingMode.DEEP_RESEARCH ||
-          operatingMode == OperatingMode.GOOGLE_AI_SEARCH ->
+          operatingMode == OperatingMode.GOOGLE_AI_SEARCH ||
+          operatingMode == OperatingMode.LATEST_NEWS ->
           listOf(hydrogenSpec, flashLiteSpec, groqReasoningSpec)
         operatingMode == OperatingMode.ANALYSIS_THINK ||
           operatingMode == OperatingMode.TASK_MODE ->

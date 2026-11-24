@@ -64,6 +64,9 @@ data class SearchResultItem(
   val relevanceScore: Double = 1.0,
   val pageExcerpt: String? = null,
   val faviconUrl: String? = null,
+  val sourceNumber: Int = 0,
+  val usedInAnswer: Boolean = false,
+  val isLatestNews: Boolean = false,
 )
 
 @Serializable
@@ -202,6 +205,12 @@ data class ResearchActivitySnapshot(
     ResearchStageId.entries.map { ResearchStageItem(stage = it, status = ResearchStageStatus.WAITING) },
   val liveSources: List<LiveSourceTelemetry> = emptyList(),
   val retrievedSources: List<SearchResultItem> = emptyList(),
+  val searchProvider: String = "",
+  val answerModel: String = "",
+  val sourcesReturnedCount: Int = 0,
+  val sourcesUsedCount: Int = 0,
+  val isFailed: Boolean = false,
+  val errorMessage: String? = null,
 )
 
 sealed interface DeepResearchProgress {

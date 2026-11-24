@@ -118,9 +118,14 @@ fun ResearchActivityPanel(
             )
           } else {
             Icon(
-              imageVector = Icons.Outlined.Science,
+              imageVector = if (snapshot.isFailed) Icons.Outlined.Close else Icons.Outlined.Science,
               contentDescription = null,
-              tint = if (snapshot.isCancelled) WarmAmber else NeonGreen,
+              tint =
+                when {
+                  snapshot.isFailed -> Color(0xFFEF4444)
+                  snapshot.isCancelled -> WarmAmber
+                  else -> NeonGreen
+                },
               modifier = Modifier.size(18.dp),
             )
           }
@@ -129,17 +134,38 @@ fun ResearchActivityPanel(
               text = snapshot.currentHeadline,
               style = MaterialTheme.typography.titleSmall,
               fontWeight = FontWeight.SemiBold,
-              color = MaterialTheme.colorScheme.onBackground,
+              color =
+                if (snapshot.isFailed) Color(0xFFEF4444)
+                else MaterialTheme.colorScheme.onBackground,
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
               modifier = Modifier.testTag("research_headline_pill"),
             )
+            val totalStages = snapshot.stages.size.coerceAtLeast(1)
+            val returnedLabel =
+              if (snapshot.sourcesReturnedCount > 0) "${snapshot.sourcesReturnedCount} returned"
+              else "${snapshot.liveSources.size} live"
+            val usedLabel =
+              if (snapshot.sourcesUsedCount > 0) " • ${snapshot.sourcesUsedCount} used" else ""
             Text(
-              text =
-                "${snapshot.stages.count { it.status == ResearchStageStatus.COMPLETED }}/7 stages • ${snapshot.liveSources.size} sources",
+              text = "${snapshot.stages.count { it.status == ResearchStageStatus.COMPLETED }}/$totalStages stages • $returnedLabel$usedLabel",
               style = MaterialTheme.typography.labelSmall,
               color = colors.mutedText,
             )
+            if (snapshot.searchProvider.isNotBlank() || snapshot.answerModel.isNotBlank()) {
+              Text(
+                text =
+                  buildString {
+                    if (snapshot.searchProvider.isNotBlank()) append("Search: ${snapshot.searchProvider}")
+                    if (snapshot.searchProvider.isNotBlank() && snapshot.answerModel.isNotBlank()) append(" • ")
+                    if (snapshot.answerModel.isNotBlank()) append("Model: ${snapshot.answerModel}")
+                  },
+                style = MaterialTheme.typography.labelSmall,
+                color = NeonCyan.copy(alpha = 0.88f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
           }
           Icon(
             imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
@@ -255,9 +281,48 @@ fun ResearchActivityPanel(
         }
       }
 
+      if (snapshot.isFailed && !snapshot.errorMessage.isNullOrBlank()) {
+        Surface(
+          shape = RoundedCornerShape(12.dp),
+          color = Color(0xFF7F1D1D).copy(alpha = 0.28f),
+          border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.55f)),
+          modifier = Modifier.fillMaxWidth().testTag("research_error_banner"),
+        ) {
+          Text(
+            text = snapshot.errorMessage,
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFFFCA5A5),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+          )
+        }
+      }
+
       AnimatedVisibility(visible = expanded) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
           HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+          if (snapshot.plannedQueries.isNotEmpty()) {
+            Row(
+              modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              snapshot.plannedQueries.forEach { q ->
+                Surface(
+                  shape = CircleShape,
+                  color = NeonPurple.copy(alpha = 0.14f),
+                  border = BorderStroke(0.8.dp, NeonPurple.copy(alpha = 0.38f)),
+                ) {
+                  Text(
+                    text = q,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NeonCyan,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                  )
+                }
+              }
+            }
+          }
           snapshot.stages.forEach { stage ->
             val tint =
               when (stage.status) {
