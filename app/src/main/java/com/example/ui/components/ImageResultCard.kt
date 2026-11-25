@@ -9,6 +9,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,6 +25,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -93,6 +99,7 @@ fun ImageResultCard(
   var selectedVersionFilePath by remember(image.mediaId) { mutableStateOf(image.filePath) }
   var selectedVersionNumber by remember(image.mediaId) { mutableStateOf(image.versionNumber) }
   var saveConfirmed by remember(image.mediaId) { mutableStateOf(false) }
+  var isLightboxOpen by remember(image.mediaId) { mutableStateOf(false) }
 
   val displayedPath = selectedVersionFilePath.ifBlank { image.filePath }
   val displayedResult =
@@ -266,7 +273,8 @@ fun ImageResultCard(
                   .fillMaxWidth()
                   .height(200.dp)
                   .clip(RoundedCornerShape(16.dp))
-                  .background(Color(0xFF0A0F1E)),
+                  .background(Color(0xFF0A0F1E))
+                  .clickable { isLightboxOpen = true },
             ) {
               AsyncImage(
                 model = File(displayedPath),
@@ -367,6 +375,67 @@ fun ImageResultCard(
               onClick = { onRegenerateImage(displayedResult) },
               testTag = "image_action_regenerate",
             )
+            ImageActionPill(
+              icon = Icons.Outlined.AutoAwesome,
+              label = "Remix",
+              accent = NeonMagenta,
+              onClick = {
+                onRegenerateImage(
+                  displayedResult.copy(
+                    prompt = "${displayedResult.prompt}, cinematic variation"
+                  )
+                )
+              },
+              testTag = "image_action_remix",
+            )
+          }
+        }
+      }
+    }
+  }
+
+  if (isLightboxOpen && displayedPath.isNotBlank()) {
+    var zoomScale by remember { mutableStateOf(1f) }
+    Dialog(
+      onDismissRequest = { isLightboxOpen = false },
+      properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+      Box(
+        modifier =
+          Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.94f))
+            .clickable { isLightboxOpen = false }
+            .testTag("image_lightbox_dialog"),
+        contentAlignment = Alignment.Center,
+      ) {
+        AsyncImage(
+          model = File(displayedPath),
+          contentDescription = "Fullscreen preview",
+          contentScale = ContentScale.Fit,
+          modifier =
+            Modifier
+              .fillMaxSize()
+              .padding(16.dp)
+              .pointerInput(Unit) {
+                detectTransformGestures { _, _, zoom, _ ->
+                  zoomScale = (zoomScale * zoom).coerceIn(1f, 4f)
+                }
+              }
+              .graphicsLayer(scaleX = zoomScale, scaleY = zoomScale),
+        )
+        Row(
+          modifier = Modifier.align(Alignment.BottomCenter).padding(20.dp),
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          OutlinedButton(onClick = { onSaveImage(displayedResult) }) {
+            Text("Save", color = Color.White)
+          }
+          OutlinedButton(onClick = { onShareImage(displayedResult) }) {
+            Text("Share", color = Color.White)
+          }
+          Button(onClick = { isLightboxOpen = false }) {
+            Text("Close")
           }
         }
       }

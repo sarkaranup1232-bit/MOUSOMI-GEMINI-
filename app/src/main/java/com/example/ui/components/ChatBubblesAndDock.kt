@@ -458,6 +458,7 @@ fun ChatMessagesList(
   onShareVideo: (GeneratedVideoResult) -> Unit = {},
   onSaveMusic: (GeneratedMusicResult) -> Unit = {},
   onShareMusic: (GeneratedMusicResult) -> Unit = {},
+  onFollowUpSuggestionClick: (String) -> Unit = {},
 ) {
   val listState = rememberLazyListState()
   val lastTextLen = messages.lastOrNull()?.text?.length ?: 0
@@ -530,6 +531,7 @@ fun ChatMessagesList(
           onShareVideo = onShareVideo,
           onSaveMusic = onSaveMusic,
           onShareMusic = onShareMusic,
+          onFollowUpSuggestionClick = onFollowUpSuggestionClick,
         )
       }
     }
@@ -627,6 +629,7 @@ private fun AssistantChatBubble(
   onShareVideo: (GeneratedVideoResult) -> Unit = {},
   onSaveMusic: (GeneratedMusicResult) -> Unit = {},
   onShareMusic: (GeneratedMusicResult) -> Unit = {},
+  onFollowUpSuggestionClick: (String) -> Unit = {},
 ) {
   val colors = LocalMousomiColors.current
   val onBg = MaterialTheme.colorScheme.onBackground
@@ -814,6 +817,33 @@ private fun AssistantChatBubble(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
               )
+            }
+          }
+
+          if (!message.isError && message.followUpSuggestions.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(
+              modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              message.followUpSuggestions.take(3).forEachIndexed { idx, suggestion ->
+                Surface(
+                  onClick = { onFollowUpSuggestionClick(suggestion) },
+                  shape = CircleShape,
+                  color = colors.activeChipContainer.copy(alpha = 0.72f),
+                  border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.35f)),
+                  modifier = Modifier.testTag("follow_up_chip_$idx"),
+                ) {
+                  Text(
+                    text = suggestion,
+                    color = onBg,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                  )
+                }
+              }
             }
           }
         }

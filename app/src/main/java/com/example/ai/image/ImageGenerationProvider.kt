@@ -68,6 +68,10 @@ data class ImageGenerationRequest(
   val requiresMaskInpainting: Boolean = false,
   val featureType: ImageEditFeatureType = ImageEditFeatureType.TEXT_TO_IMAGE,
   val conversationId: String = "studio",
+  val aspectWidth: Int = 1024,
+  val aspectHeight: Int = 1024,
+  val seed: Long? = null,
+  val enhancePrompt: Boolean = false,
 )
 
 sealed interface ImageGenerationEvent {
@@ -91,6 +95,21 @@ object ImageProviderCatalog {
 
   fun getCapabilitiesCatalog(settings: AppSettings): List<ImageProviderCapabilities> =
     listOf(
+      ImageProviderCapabilities(
+        providerId = "pollinations_flux",
+        displayName = "Pollinations.ai — Flux Studio",
+        modelId = VerifiedModelCatalog.POLLINATIONS_FLUX_ID,
+        supportsTextToImage = true,
+        supportsImageToImage = false,
+        supportsInpaintingMask = false,
+        supportsBackgroundRemoval = false,
+        supportsPortraitEnhancement = false,
+        isFreeTierEligible = true,
+        requiresBilling = false,
+        maxInputBytes = 4L * 1024L * 1024L,
+        supportedFormats = setOf("image/png", "image/jpeg"),
+        billingNotice = "Zero-key free public tier via Pollinations.ai Flux.",
+      ),
       ImageProviderCapabilities(
         providerId = "cloudflare_flux",
         displayName = "Cloudflare Workers AI (Free-Tier)",
@@ -282,6 +301,7 @@ class CompositeImageGenerationProvider @Inject constructor(
   private val firebaseAiLogicService: FirebaseAiLogicService? = null,
   private val cloudflareWorkersAiService: CloudflareWorkersAiService? = null,
   private val imageStudioDao: ImageStudioDao? = null,
+  private val pollinationsImageService: PollinationsImageService? = null,
 ) : ImageGenerationProvider {
 
   private val json = Json { ignoreUnknownKeys = true }
@@ -336,6 +356,21 @@ class CompositeImageGenerationProvider @Inject constructor(
 
     emit(ImageGenerationEvent.Stage(ImageGenerationStatus.CHECKING_FREE_PROVIDER))
 
+    val isPureTextToImage =
+      request.featureType == ImageEditFeatureType.TEXT_TO_IMAGE &&
+        request.sourceImage == null &&
+        !request.requiresMaskInpainting
+    val explicitlyRequestedFlux =
+      modelId.equals(VerifiedModelCatalog.POLLINATIONS_FLUX_ID, ignoreCase = true)
+
+    // Layer A Step 0: Explicit Pollinations.ai Flux Studio mode for pure text-to-image
+    if (isPureTextToImage && explicitlyRequestedFlux && pollinationsImageService != null) {
+      val pollinationsOk = executeViaPollinations(request, this)
+      if (pollinationsOk || (settings.strictFreeImageOnly && !settings.allowPaidImageFallbackApproved)) {
+        return@flow
+      }
+    }
+
     // Layer A Step 1: Free-Tier First -> Cloudflare Workers AI (when configured)
     val hasCloudflare =
       cloudflareWorkersAiService != null &&
@@ -351,14 +386,24 @@ class CompositeImageGenerationProvider @Inject constructor(
       }
     }
 
+    // Layer A Step 2: Zero-key free-tier Pollinations.ai Flux fallback for pure text-to-image
+    if (isPureTextToImage && !explicitlyRequestedFlux && pollinationsImageService != null) {
+      val pollinationsOk = executeViaPollinations(request, this)
+      if (pollinationsOk || (settings.strictFreeImageOnly && !settings.allowPaidImageFallbackApproved)) {
+        return@flow
+      }
+    }
+
     val key = settings.geminiApiKey.trim()
     val hasFirebaseAi = firebaseAiLogicService?.isAvailable() == true
 
     // Strict Free-First Gate check: Firebase AI Logic Nano Banana requires Blaze billing; block silent paid invocation unless approved or user explicitly provided AI Studio key
     if (key.isEmpty() && settings.strictFreeImageOnly && !settings.allowPaidImageFallbackApproved) {
       val reason =
-        if (!hasCloudflare) {
+        if (!hasCloudflare && !isPureTextToImage) {
           "Strict Free-Only mode is enabled. Add free-tier Cloudflare Workers AI credentials in Settings -> Connections, enter a Gemini AI Studio API key, or allow paid fallback in Settings."
+        } else if (isPureTextToImage) {
+          "Pollinations.ai Flux could not complete the request right now. Check your network connection or try again."
         } else {
           "Free-tier provider failed and paid fallback is disabled by Strict Free-Only policy."
         }
@@ -378,10 +423,49 @@ class CompositeImageGenerationProvider @Inject constructor(
     } else {
       emit(
         ImageGenerationEvent.Failure(
-          "No active cloud image provider configured. Add Cloudflare Workers AI or a Gemini API key in Settings."
+          "No active cloud image editing provider configured. Add Cloudflare Workers AI or a Gemini API key in Settings."
         )
       )
     }
+  }
+
+  private suspend fun executeViaPollinations(
+    request: ImageGenerationRequest,
+    collector: FlowCollector<ImageGenerationEvent>,
+  ): Boolean {
+    val service = pollinationsImageService ?: return false
+    val result =
+      service.generateImage(
+        prompt = request.prompt,
+        width = request.aspectWidth,
+        height = request.aspectHeight,
+        seed = request.seed,
+        enhancePromptEnabled = request.enhancePrompt,
+        settings = request.settings,
+        parentMediaId = request.parentMediaId,
+        rootMediaId = request.rootMediaId,
+        nextVersionNumber = request.nextVersionNumber,
+        editInstruction = request.editInstruction,
+        onStage = { stage -> collector.emit(ImageGenerationEvent.Stage(stage)) },
+      )
+    return result.fold(
+      onSuccess = { generated ->
+        persistTaskAndAssetSafe(request, generated, "pollinations_flux", "pollinations:flux")
+        collector.emit(ImageGenerationEvent.Success(generated))
+        true
+      },
+      onFailure = { err ->
+        if (request.settings.strictFreeImageOnly && !request.settings.allowPaidImageFallbackApproved) {
+          collector.emit(
+            ImageGenerationEvent.Failure(
+              message = err.localizedMessage ?: "Pollinations.ai image generation failed.",
+              terminalStatus = ImageGenerationStatus.FAILED,
+            )
+          )
+        }
+        false
+      },
+    )
   }
 
   private suspend fun executeViaCloudflare(

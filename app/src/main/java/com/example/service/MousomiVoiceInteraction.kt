@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.service.voice.VoiceInteractionService
 import android.service.voice.VoiceInteractionSession
@@ -411,6 +412,7 @@ class MousomiAssistantSession(
       setViewTreeLifecycleOwner(this@MousomiAssistantSession)
       setViewTreeSavedStateRegistryOwner(this@MousomiAssistantSession)
       setContent {
+        val settings by settingsRepo.observeSettings().collectAsState(initial = null)
         val surfaceState by sessionState.surfaceState.collectAsState()
         val orbXFraction by sessionState.orbXFraction.collectAsState()
         val orbYFraction by sessionState.orbYFraction.collectAsState()
@@ -422,6 +424,7 @@ class MousomiAssistantSession(
         val liveMuted by liveVoiceMgr.isMuted.collectAsState()
         val voiceState by voiceCtrl.voiceState.collectAsState()
         val voiceRms by voiceCtrl.audioRmsNormalized.collectAsState()
+        val ttsCompletedTick by voiceCtrl.ttsCompletedTick.collectAsState()
         val screenShareStatus by screenShareMgr.status.collectAsState()
         val screenRecordingState by ep.screenRecordingManager().state.collectAsState()
         val liveAssistantTranscript by liveEngine.assistantTranscript.collectAsState()
@@ -442,17 +445,23 @@ class MousomiAssistantSession(
             userTranscriptState = liveUserTranscript
           }
         }
+        LaunchedEffect(ttsCompletedTick) {
+          if (ttsCompletedTick > 0L &&
+            visualState == AssistantVisualState.LIVE_ASSISTANT &&
+            !usingLiveSocketState &&
+            !livePaused &&
+            !liveMuted &&
+            hasMicPermission()
+          ) {
+            val lang = settings?.voicePreferences?.preferredLanguage
+              ?: settingsRepo.getSettingsSnapshot().voicePreferences.preferredLanguage
+            voiceCtrl.interruptSpeakingAndListen(lang)
+          }
+        }
 
-        val edgeConfig =
-          EdgeLightConfig(
-            enabled = true,
-            assistantEdgeGlowEnabled = true,
-            preset = EdgeLightPreset.GEMINI_FLOW,
-            intensity = EdgeLightIntensity.BRIGHT,
-            brightness = 0.96f,
-            borderThicknessDp = 5.5f,
-            cornerRadiusDp = 34f,
-          )
+        val powerMgr = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val isPowerSave = powerMgr?.isPowerSaveMode == true
+        val edgeConfig = settings?.edgeLightConfig ?: EdgeLightConfig()
         val edgeParams =
           EdgeLightStateMapper.resolve(
             config = edgeConfig,
@@ -461,11 +470,12 @@ class MousomiAssistantSession(
             voiceRmsNormalized = maxOf(voiceRms, reactiveFrame.reactiveAmplitude),
             screenShareStatus = screenShareStatus,
             notificationAlertActive = false,
-            isSystemPowerSave = false,
+            isSystemPowerSave = isPowerSave,
             currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY),
-            forcePreview = true,
+            forcePreview = false,
             assistantSessionPhase = sessionPhase,
             edgeActivationSignal = edgeSignal,
+            isAssistantSession = true,
           )
 
         val effectiveSurfaceState =

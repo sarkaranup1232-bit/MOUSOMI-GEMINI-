@@ -6,7 +6,6 @@ import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
-import android.os.Build
 import com.example.domain.model.RichLinkKind
 import com.example.domain.model.RichLinkMetadata
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -61,39 +60,44 @@ class RichLinkResolver @Inject constructor(
         )
     }
 
-    // Also match explicit known app launch references if prompt/reply mentions opening an installed app
+    // Match known app launch references only when prompt/reply shows actionable intent (avoid casual prose mentions)
     val lower = text.lowercase()
-    val appCandidates =
-      listOf(
-        "youtube" to "com.google.android.youtube",
-        "whatsapp" to "com.whatsapp",
-        "instagram" to "com.instagram.android",
-        "play store" to "com.android.vending",
-      )
-    appCandidates.forEach { (keyword, pkg) ->
-      if (keyword in lower && cards.none { it.packageName == pkg }) {
-        val label = resolveAppLabel(pkg)
-        if (label != null) {
-          val kind =
-            when (pkg) {
-              "com.android.vending" -> RichLinkKind.PLAY_STORE
-              "com.google.android.youtube" -> RichLinkKind.YOUTUBE
-              "com.instagram.android" -> RichLinkKind.INSTAGRAM
-              "com.whatsapp" -> RichLinkKind.WHATSAPP
-              else -> RichLinkKind.ANDROID_APP
-            }
-          cards +=
-            RichLinkMetadata(
-              id = "rich_${UUID.randomUUID()}",
-              kind = kind,
-              title = label,
-              subtitle = "Installed Android app ($pkg)",
-              url = fallbackHttpsForKind(kind),
-              packageName = pkg,
-              domain = null,
-              isInstalledApp = true,
-              actionLabel = "Launch $label",
-            )
+    val hasActionableContext =
+      Regex("\\b(?:open|launch|install|download|watch on|use|check on|via|on)\\s+(?:youtube|whatsapp|instagram|google play|play store)\\b")
+        .containsMatchIn(lower)
+    if (hasActionableContext) {
+      val appCandidates =
+        listOf(
+          "youtube" to "com.google.android.youtube",
+          "whatsapp" to "com.whatsapp",
+          "instagram" to "com.instagram.android",
+          "play store" to "com.android.vending",
+        )
+      appCandidates.forEach { (keyword, pkg) ->
+        if (keyword in lower && cards.none { it.packageName == pkg }) {
+          val label = resolveAppLabel(pkg)
+          if (label != null) {
+            val kind =
+              when (pkg) {
+                "com.android.vending" -> RichLinkKind.PLAY_STORE
+                "com.google.android.youtube" -> RichLinkKind.YOUTUBE
+                "com.instagram.android" -> RichLinkKind.INSTAGRAM
+                "com.whatsapp" -> RichLinkKind.WHATSAPP
+                else -> RichLinkKind.ANDROID_APP
+              }
+            cards +=
+              RichLinkMetadata(
+                id = "rich_${UUID.randomUUID()}",
+                kind = kind,
+                title = label,
+                subtitle = "Installed Android app ($pkg)",
+                url = fallbackHttpsForKind(kind),
+                packageName = pkg,
+                domain = null,
+                isInstalledApp = true,
+                actionLabel = "Launch $label",
+              )
+          }
         }
       }
     }

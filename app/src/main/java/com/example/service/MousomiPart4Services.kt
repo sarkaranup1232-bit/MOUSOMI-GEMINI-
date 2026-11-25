@@ -1367,8 +1367,8 @@ open class MousomiOverlayService : Service() {
           val baseCfg = settings?.edgeLightConfig ?: EdgeLightConfig()
           val effectiveConfig =
             baseCfg.copy(
-              enabled = screenOn && !paused && (baseCfg.enabled || floatingLiveActive),
-              systemOverlayEnabled = baseCfg.systemOverlayEnabled || floatingLiveActive,
+              enabled = screenOn && !paused && baseCfg.enabled,
+              systemOverlayEnabled = baseCfg.systemOverlayEnabled || (floatingLiveActive && baseCfg.assistantEdgeGlowEnabled),
               reducedMotion = baseCfg.reducedMotion || !screenOn,
               scheduleEnabled = if (floatingLiveActive) false else baseCfg.scheduleEnabled,
             )
@@ -2370,11 +2370,21 @@ open class MousomiOverlayService : Service() {
       updatePanelLayoutForInsets(v, params, wm)
       insets
     }
-    container.viewTreeObserver.addOnGlobalLayoutListener {
-      if (assistantPanelContainer === container) {
-        updatePanelLayoutForInsets(container, params, wm)
+    val globalLayoutListener =
+      android.view.ViewTreeObserver.OnGlobalLayoutListener {
+        if (assistantPanelContainer === container) {
+          updatePanelLayoutForInsets(container, params, wm)
+        }
       }
-    }
+    container.viewTreeObserver.addOnGlobalLayoutListener(globalLayoutListener)
+    container.addOnAttachStateChangeListener(
+      object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(v: View) = Unit
+        override fun onViewDetachedFromWindow(v: View) {
+          runCatching { v.viewTreeObserver.removeOnGlobalLayoutListener(globalLayoutListener) }
+        }
+      }
+    )
 
     runCatching {
       wm.addView(container, params)
@@ -2561,11 +2571,23 @@ open class MousomiOverlayService : Service() {
           val aiLiveTranscript by geminiLiveVoiceEngine.assistantTranscript.collectAsState()
           val paused by isOverlayPaused.collectAsState()
           val muted by isOverlayMuted.collectAsState()
+          val ttsCompletedTick by voiceController.ttsCompletedTick.collectAsState()
           val responseState by overlayResponseState.collectAsState()
           val audioMetrics by voiceController.audioMetrics.collectAsState()
           val rms by voiceController.audioRmsNormalized.collectAsState()
           val elapsed by liveVoiceSessionManager.elapsedSeconds.collectAsState()
           val recordingState by screenRecordingManager.state.collectAsState()
+
+          LaunchedEffect(ttsCompletedTick) {
+            if (ttsCompletedTick > 0L &&
+              isFloatingLivePopupMode.value &&
+              liveStatus !is LiveVoiceSessionStatus.Active &&
+              !paused &&
+              !muted
+            ) {
+              startOverlayFallbackStt()
+            }
+          }
           val hasMicPermission =
             ContextCompat.checkSelfPermission(this@MousomiOverlayService, Manifest.permission.RECORD_AUDIO) ==
               PackageManager.PERMISSION_GRANTED
@@ -3309,6 +3331,18 @@ open class MousomiOverlayService : Service() {
         updatePanelLayoutForInsets(container, params, wm)
       }
     }
+
+    floatingLiveContainer?.let { popup ->
+      floatingLiveParams?.let { params ->
+        val w = popup.width.takeIf { it > 32 } ?: (316f * geo.density).roundToInt()
+        val h = popup.height.takeIf { it > 32 } ?: (240f * geo.density).roundToInt()
+        val maxX = (geo.screenWidthPx - geo.safeRightPx - w).coerceAtLeast(geo.safeLeftPx + 8)
+        val maxY = (geo.screenHeightPx - geo.safeBottomWithoutImePx - h).coerceAtLeast(geo.safeTopPx + 12)
+        params.x = (geo.safeLeftPx + livePopupXFraction * (maxX - geo.safeLeftPx)).roundToInt().coerceIn(geo.safeLeftPx, maxX)
+        params.y = (geo.safeTopPx + livePopupYFraction * (maxY - geo.safeTopPx)).roundToInt().coerceIn(geo.safeTopPx + 8, maxY)
+        runCatching { wm.updateViewLayout(popup, params) }
+      }
+    }
   }
 
   override fun onDestroy() {
@@ -3522,12 +3556,6 @@ class MousomiQuickTileService : TileService() {
         runCatching { startService(syncIntent) }
       }
     }
-  }
-
-  @Suppress("DEPRECATION")
-  @SuppressLint("StartActivityAndCollapseDeprecated")
-  private fun legacyStartActivityAndCollapse(intent: Intent) {
-    startActivityAndCollapse(intent)
   }
 
   @Suppress("DEPRECATION")

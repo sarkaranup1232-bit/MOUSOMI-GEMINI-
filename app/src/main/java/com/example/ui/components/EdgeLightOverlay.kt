@@ -34,6 +34,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
@@ -99,39 +100,13 @@ fun EdgeLightPerimeterOverlay(
   }
 
   val shouldAnimate = isAppForeground && params.speedMultiplier > 0f
-  val transition = rememberInfiniteTransition(label = "edge_light_transition")
   val durationMs = (3200f / params.speedMultiplier.coerceAtLeast(0.25f)).toInt().coerceIn(950, 9000)
 
-  val phase by
+  val (phase, pulse) =
     if (shouldAnimate) {
-      transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec =
-          infiniteRepeatable(
-            animation = tween(durationMillis = durationMs, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-          ),
-        label = "edge_phase",
-      )
+      rememberAnimatedEdgePhaseAndPulse(durationMs = durationMs)
     } else {
-      remember { mutableFloatStateOf(32f) }
-    }
-
-  val pulse by
-    if (shouldAnimate) {
-      transition.animateFloat(
-        initialValue = 0.88f,
-        targetValue = 1.0f,
-        animationSpec =
-          infiniteRepeatable(
-            animation = tween(durationMillis = (durationMs / 2).coerceIn(700, 2800), easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-          ),
-        label = "edge_pulse",
-      )
-    } else {
-      remember { mutableFloatStateOf(0.96f) }
+      32f to 0.96f
     }
 
   val intColors =
@@ -180,9 +155,10 @@ fun EdgeLightPerimeterOverlay(
     return blurCache.getOrPut(bucket) { BlurMaskFilter(bucket / 2f, BlurMaskFilter.Blur.NORMAL) }
   }
 
-  // Query hardware rounded corners once per config change when running inside Android window
+  val orientation = LocalConfiguration.current.orientation
+  // Query hardware rounded corners once per config/orientation change when running inside Android window
   val resolvedCornerRadii4: FloatArray =
-    remember(perCornerRadiiPx, params.cornerRadiusDp, density) {
+    remember(perCornerRadiiPx, params.cornerRadiusDp, density, orientation) {
       if (perCornerRadiiPx != null && perCornerRadiiPx.size == 4) {
         perCornerRadiiPx
       } else {
@@ -326,4 +302,32 @@ fun EdgeLightPerimeterOverlay(
       )
     }
   }
+}
+
+@Composable
+private fun rememberAnimatedEdgePhaseAndPulse(durationMs: Int): Pair<Float, Float> {
+  val transition = rememberInfiniteTransition(label = "edge_light_transition")
+  val phase by
+    transition.animateFloat(
+      initialValue = 0f,
+      targetValue = 360f,
+      animationSpec =
+        infiniteRepeatable(
+          animation = tween(durationMillis = durationMs, easing = LinearEasing),
+          repeatMode = RepeatMode.Restart,
+        ),
+      label = "edge_phase",
+    )
+  val pulse by
+    transition.animateFloat(
+      initialValue = 0.88f,
+      targetValue = 1.0f,
+      animationSpec =
+        infiniteRepeatable(
+          animation = tween(durationMillis = (durationMs / 2).coerceIn(700, 2800), easing = LinearEasing),
+          repeatMode = RepeatMode.Reverse,
+        ),
+      label = "edge_pulse",
+    )
+  return phase to pulse
 }

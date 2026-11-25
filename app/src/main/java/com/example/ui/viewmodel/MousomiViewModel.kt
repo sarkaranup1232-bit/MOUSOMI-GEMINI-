@@ -39,6 +39,7 @@ import com.example.core.device.PhoneActionController
 import com.example.core.device.ResolvedContact
 import com.example.core.device.SocialIntegrationManager
 import com.example.core.image.ImageProcessor
+import com.example.core.image.ImageStudioFacade
 import com.example.core.notifications.NotificationIntelligenceEngine
 import com.example.core.performance.SmartPerformanceMonitor
 import com.example.core.permissions.EmergencyStopController
@@ -95,6 +96,7 @@ import com.example.domain.model.AppSettings
 import com.example.domain.model.AutomationTaskRecord
 import com.example.domain.model.AutomationWorkflowType
 import com.example.domain.model.CapabilityActivationBadge
+import com.example.domain.model.BackgroundReplaceStyle
 import com.example.domain.model.ConnectionMode
 import com.example.domain.model.DetectedProviderKind
 import com.example.domain.model.DomainMessage
@@ -104,7 +106,10 @@ import com.example.domain.model.FloatingOrbConfig
 import com.example.domain.model.GeneratedImageResult
 import com.example.domain.model.GeneratedMusicResult
 import com.example.domain.model.GeneratedVideoResult
+import com.example.domain.model.ImageAdjustmentParams
+import com.example.domain.model.ImageEditFeatureType
 import com.example.domain.model.ImageGenerationStatus
+import com.example.domain.model.ImageProcessingSource
 import com.example.domain.model.LensAnalysisResult
 import com.example.domain.model.LensFollowUpTurn
 import com.example.domain.model.LiveDiscoveredModel
@@ -119,6 +124,7 @@ import com.example.domain.model.OperatingMode
 import com.example.domain.model.OrbPopupAction
 import com.example.domain.model.OrbQuickAction
 import com.example.domain.model.PendingMediaItem
+import com.example.domain.model.PosterDesignSpec
 import com.example.domain.model.PrivacyAndPerformanceConfig
 import com.example.domain.model.ProcessedImagePayload
 import com.example.domain.model.ProviderTestReport
@@ -220,6 +226,7 @@ class MousomiViewModel @Inject constructor(
   private val preferenceDiscoveryEngine: PreferenceDiscoveryEngine? = null,
   private val hotwordCapabilityManager: HotwordCapabilityManager? = null,
   private val calendarReminderService: CalendarReminderService? = null,
+  private val imageStudioFacade: ImageStudioFacade? = null,
 ) : ViewModel() {
 
   constructor(
@@ -282,6 +289,7 @@ class MousomiViewModel @Inject constructor(
     preferenceDiscoveryEngine = null,
     hotwordCapabilityManager = null,
     calendarReminderService = null,
+    imageStudioFacade = null,
   )
 
   val geometryEngineForUi: SelectionGeometryEngine by lazy {
@@ -763,6 +771,18 @@ class MousomiViewModel @Inject constructor(
         }
       }
     }
+    imageStudioFacade?.batchProcessor?.let { batch ->
+      viewModelScope.launch {
+        batch.items.collectLatest { items ->
+          _uiState.update { it.copy(batchImageItems = items) }
+        }
+      }
+      viewModelScope.launch {
+        batch.isRunning.collectLatest { running ->
+          _uiState.update { it.copy(isBatchRunning = running) }
+        }
+      }
+    }
   }
 
   private fun observeAddOnStreams() {
@@ -1092,6 +1112,35 @@ class MousomiViewModel @Inject constructor(
     persistCurrentSettings()
   }
 
+  fun onSelectFlagshipModelMode(modelId: String, option: AiModelOption) {
+    _uiState.update { state ->
+      when (modelId) {
+        VerifiedModelCatalog.POLLINATIONS_FLUX_ID ->
+          state.copy(
+            selectedModel = AiModelOption.GEMINI_IMAGE_STUDIO,
+            imageModelId = VerifiedModelCatalog.POLLINATIONS_FLUX_ID,
+            resolvedAutoModelName = "Pollinations.ai • Flux Studio",
+            isModelMenuOpen = false,
+          )
+        else -> {
+          val flagshipName =
+            when (modelId) {
+              VerifiedModelCatalog.FLAGSHIP_FLASH_38_ID -> VerifiedModelCatalog.createFlash38Spec().displayName
+              VerifiedModelCatalog.BALANCED_CODING_36_ID -> VerifiedModelCatalog.createFlash36Spec().displayName
+              else -> VerifiedModelCatalog.createHydrogenSpec(modelId).displayName
+            }
+          state.copy(
+            selectedModel = option,
+            hydrogenBackingModelId = modelId,
+            resolvedAutoModelName = flagshipName,
+            isModelMenuOpen = false,
+          )
+        }
+      }
+    }
+    persistCurrentSettings()
+  }
+
   fun onToggleAttachmentSheet(open: Boolean) {
     _uiState.update { it.copy(isAttachmentSheetOpen = open) }
   }
@@ -1209,6 +1258,9 @@ class MousomiViewModel @Inject constructor(
     when (actionId) {
       "open_image_tools" -> {
         _uiState.update { it.copy(isImageToolsSheetOpen = true) }
+      }
+      "open_image_studio" -> {
+        openImageStudio(ImageEditFeatureType.TEXT_TO_IMAGE)
       }
       "open_more_tools" -> {
         _uiState.update { it.copy(isMoreToolsSheetOpen = true) }
@@ -2136,6 +2188,7 @@ class MousomiViewModel @Inject constructor(
                         }
                         is AiResponseState.Completed -> {
                           latestUsage = stateVal.tokenUsage ?: latestUsage
+                          val followUps = buildFollowUpSuggestions(userText, stateVal.fullText, latestBlocks)
                           ui.messages.map { msg ->
                             if (msg.id == assistantMsgId) {
                               msg.copy(
@@ -2145,6 +2198,7 @@ class MousomiViewModel @Inject constructor(
                                 tokenUsage = latestUsage,
                                 isStreaming = false,
                                 blocks = latestBlocks,
+                                followUpSuggestions = followUps,
                               )
                             } else msg
                           }
@@ -4438,6 +4492,609 @@ class MousomiViewModel @Inject constructor(
       isStreaming = false,
       blocks = domain.blocks,
     )
+  }
+
+  fun onFollowUpSuggestionClick(suggestion: String) {
+    if (suggestion == "Open in Creative Image Studio") {
+      val latestPath =
+        _uiState.value.messages
+          .asReversed()
+          .flatMap { it.blocks }
+          .filterIsInstance<ResponseBlock.GeneratedImageBlock>()
+          .firstOrNull { it.image.filePath.isNotBlank() }
+          ?.image
+          ?.filePath
+      openImageStudio(
+        featureType = if (latestPath != null) ImageEditFeatureType.CREATIVE_AI_EDIT else ImageEditFeatureType.TEXT_TO_IMAGE,
+        initialImagePath = latestPath,
+      )
+      return
+    }
+    _uiState.update { it.copy(inputText = suggestion) }
+    onSendMessage()
+  }
+
+  private fun buildFollowUpSuggestions(
+    userPrompt: String,
+    assistantText: String,
+    blocks: List<ResponseBlock>,
+  ): List<String> {
+    if (assistantText.isBlank() && blocks.isEmpty()) return emptyList()
+    return when {
+      blocks.any { it is ResponseBlock.GeneratedImageBlock } ->
+        listOf(
+          "Remix this image with cinematic neon lighting",
+          "Open in Creative Image Studio",
+          "Generate a 16:9 widescreen variation",
+        )
+      blocks.any { it is ResponseBlock.SourceCitations } ->
+        listOf(
+          "Summarize key findings in 3 bullets",
+          "What are the main pros and cons?",
+          "Share the latest developments",
+        )
+      assistantText.contains("```") || userPrompt.contains("code", ignoreCase = true) ->
+        listOf(
+          "Add unit tests for this code",
+          "Explain edge cases & complexity",
+          "Refactor for cleaner readability",
+        )
+      else ->
+        listOf(
+          "Explain this in simpler terms",
+          "Give a practical example",
+          "What should I do next?",
+        )
+    }
+  }
+
+  fun openImageStudio(
+    featureType: ImageEditFeatureType = ImageEditFeatureType.TEXT_TO_IMAGE,
+    initialImagePath: String? = null,
+    initialPrompt: String? = null,
+  ) {
+    _uiState.update { state ->
+      val source =
+        initialImagePath
+          ?: state.imageStudioState.sourceUriOrPath
+          ?: state.pendingAttachments.filterIsInstance<AttachmentPreview.PickedPhotoUri>().lastOrNull()?.uri
+      state.copy(
+        isImageToolsSheetOpen = false,
+        isMoreToolsSheetOpen = false,
+        pendingNavigateToImageStudio = true,
+        imageStudioState =
+          state.imageStudioState.copy(
+            activeFeature = featureType,
+            sourceUriOrPath = source,
+            promptInput = initialPrompt ?: state.imageStudioState.promptInput,
+            errorMessage = null,
+          ),
+      )
+    }
+  }
+
+  fun onConsumeNavigateToImageStudio() {
+    _uiState.update { it.copy(pendingNavigateToImageStudio = false) }
+  }
+
+  fun onSelectStudioFeature(feature: ImageEditFeatureType) {
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(activeFeature = feature, errorMessage = null))
+    }
+  }
+
+  fun onUpdateStudioPrompt(prompt: String) {
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(promptInput = prompt, errorMessage = null))
+    }
+  }
+
+  fun onUpdateStudioAspectRatio(label: String) {
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(aspectRatioLabel = label))
+    }
+  }
+
+  fun onUpdateStudioSeed(seed: String) {
+    val clean = seed.filter { ch -> ch.isDigit() }.take(12)
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(seedText = clean))
+    }
+  }
+
+  fun onToggleStudioEnhancePrompt(enabled: Boolean) {
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(enhancePromptEnabled = enabled))
+    }
+  }
+
+  fun onEnhanceStudioPrompt() {
+    val facade = imageStudioFacade ?: return
+    val raw = _uiState.value.imageStudioState.promptInput.trim()
+    if (raw.isBlank()) return
+    viewModelScope.launch {
+      _uiState.update { it.copy(imageStudioState = it.imageStudioState.copy(isEnhancingPrompt = true, errorMessage = null)) }
+      val improved = facade.enhancePrompt(raw, buildCurrentAppSettingsSnapshot())
+      _uiState.update {
+        it.copy(
+          imageStudioState =
+            it.imageStudioState.copy(
+              promptInput = improved.ifBlank { raw },
+              isEnhancingPrompt = false,
+            )
+        )
+      }
+    }
+  }
+
+  fun onStudioPickSourcePhoto(uri: String) {
+    _uiState.update {
+      it.copy(
+        imageStudioState =
+          it.imageStudioState.copy(
+            sourceUriOrPath = uri,
+            beforeFilePath = uri,
+            outputFilePath = null,
+            maskPaths = emptyList(),
+            errorMessage = null,
+          )
+      )
+    }
+  }
+
+  fun onStudioPickCustomBackdrop(uri: String) {
+    _uiState.update { state ->
+      val studio = state.imageStudioState
+      state.copy(
+        imageStudioState =
+          studio.copy(
+            customBackdropUri = uri,
+            posterSpec = studio.posterSpec.copy(backgroundPhotoPath = uri),
+          )
+      )
+    }
+  }
+
+  fun onStudioGenerateFluxImage(remix: Boolean = false) {
+    val facade = imageStudioFacade ?: return
+    val currentStudio = _uiState.value.imageStudioState
+    val nextSeed = if (remix) ((System.currentTimeMillis() % 900_000L) + 100_000L) else null
+    viewModelScope.launch {
+      _uiState.update {
+        it.copy(
+          imageStudioState =
+            currentStudio.copy(
+              isBusy = true,
+              status = ImageGenerationStatus.PREPARING_PROMPT,
+              errorMessage = null,
+              seedText = nextSeed?.toString() ?: currentStudio.seedText,
+            )
+        )
+      }
+      val result =
+        facade.generateTextToImage(
+          state = _uiState.value.imageStudioState,
+          settings = buildCurrentAppSettingsSnapshot(),
+          overrideSeed = nextSeed,
+        ) { stage ->
+          _uiState.update { it.copy(imageStudioState = it.imageStudioState.copy(status = stage)) }
+        }
+      result.fold(
+        onSuccess = { generated ->
+          _uiState.update {
+            it.copy(
+              imageStudioState =
+                it.imageStudioState.copy(
+                  isBusy = false,
+                  status = ImageGenerationStatus.COMPLETED,
+                  outputFilePath = generated.filePath,
+                  beforeFilePath = null,
+                  outputHasTransparency = generated.hasTransparency,
+                  outputSourceBadge = generated.sourceBadge,
+                  outputWidthPx = generated.width,
+                  outputHeightPx = generated.height,
+                  errorMessage = null,
+                )
+            )
+          }
+        },
+        onFailure = { err ->
+          _uiState.update {
+            it.copy(
+              imageStudioState =
+                it.imageStudioState.copy(
+                  isBusy = false,
+                  status = ImageGenerationStatus.FAILED,
+                  errorMessage = err.message ?: "Failed to generate image.",
+                )
+            )
+          }
+        },
+      )
+    }
+  }
+
+  fun onUpdateStudioAdjustments(adjustments: ImageAdjustmentParams) {
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(adjustments = adjustments))
+    }
+  }
+
+  fun onRotateStudioImage() {
+    _uiState.update {
+      val next = (it.imageStudioState.rotateDegrees + 90f) % 360f
+      it.copy(imageStudioState = it.imageStudioState.copy(rotateDegrees = next))
+    }
+  }
+
+  fun onFlipStudioImage() {
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(flipHorizontal = !it.imageStudioState.flipHorizontal))
+    }
+  }
+
+  fun onApplyStudioPhotoEnhance() {
+    val facade = imageStudioFacade ?: return
+    viewModelScope.launch {
+      _uiState.update {
+        it.copy(imageStudioState = it.imageStudioState.copy(isBusy = true, status = ImageGenerationStatus.GENERATING, errorMessage = null))
+      }
+      val res = facade.runPhotoEnhance(_uiState.value.imageStudioState)
+      res.fold(
+        onSuccess = { file ->
+          _uiState.update {
+            it.copy(
+              imageStudioState =
+                it.imageStudioState.copy(
+                  isBusy = false,
+                  status = ImageGenerationStatus.COMPLETED,
+                  beforeFilePath = it.imageStudioState.sourceUriOrPath,
+                  outputFilePath = file.absolutePath,
+                  outputHasTransparency = false,
+                  outputSourceBadge = ImageProcessingSource.LOCAL_EDITING.badgeLabel,
+                )
+            )
+          }
+        },
+        onFailure = { err ->
+          _uiState.update {
+            it.copy(imageStudioState = it.imageStudioState.copy(isBusy = false, status = ImageGenerationStatus.FAILED, errorMessage = err.message))
+          }
+        },
+      )
+    }
+  }
+
+  fun onUpdateStudioPortraitSettings(bokeh: Float, feather: Float, style: BackgroundReplaceStyle) {
+    _uiState.update {
+      it.copy(
+        imageStudioState =
+          it.imageStudioState.copy(
+            portraitBokehAmount = bokeh,
+            edgeFeatherPx = feather,
+            backgroundStyle = style,
+          )
+      )
+    }
+  }
+
+  fun onApplyStudioPortraitOrBg() {
+    val facade = imageStudioFacade ?: return
+    viewModelScope.launch {
+      _uiState.update {
+        it.copy(imageStudioState = it.imageStudioState.copy(isBusy = true, status = ImageGenerationStatus.GENERATING, errorMessage = null))
+      }
+      val res = facade.runSubjectIsolation(_uiState.value.imageStudioState)
+      res.fold(
+        onSuccess = { cutout ->
+          _uiState.update {
+            it.copy(
+              imageStudioState =
+                it.imageStudioState.copy(
+                  isBusy = false,
+                  status = ImageGenerationStatus.COMPLETED,
+                  beforeFilePath = it.imageStudioState.sourceUriOrPath,
+                  outputFilePath = cutout.outputFilePath,
+                  outputHasTransparency = cutout.hasTransparency,
+                  outputWidthPx = cutout.width,
+                  outputHeightPx = cutout.height,
+                  outputSourceBadge =
+                    if (cutout.usedMlKitSegmentation) "ML Kit Subject AI (On-Device)" else ImageProcessingSource.LOCAL_EDITING.badgeLabel,
+                )
+            )
+          }
+        },
+        onFailure = { err ->
+          _uiState.update {
+            it.copy(imageStudioState = it.imageStudioState.copy(isBusy = false, status = ImageGenerationStatus.FAILED, errorMessage = err.message))
+          }
+        },
+      )
+    }
+  }
+
+  fun onUpdateStudioBrushRadius(radius: Float) {
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(maskBrushRadiusNorm = radius))
+    }
+  }
+
+  fun onAddStudioMaskStroke(points: List<NormPoint>) {
+    if (points.isEmpty()) return
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(maskPaths = it.imageStudioState.maskPaths + listOf(points)))
+    }
+  }
+
+  fun onUndoStudioMaskStroke() {
+    _uiState.update {
+      val dropped = it.imageStudioState.maskPaths.dropLast(1)
+      it.copy(imageStudioState = it.imageStudioState.copy(maskPaths = dropped))
+    }
+  }
+
+  fun onClearStudioMask() {
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(maskPaths = emptyList()))
+    }
+  }
+
+  fun onApplyStudioObjectRemove() {
+    val facade = imageStudioFacade ?: return
+    viewModelScope.launch {
+      _uiState.update {
+        it.copy(imageStudioState = it.imageStudioState.copy(isBusy = true, status = ImageGenerationStatus.PREPARING_PROMPT, errorMessage = null))
+      }
+      val res =
+        facade.runObjectMaskInpaint(
+          state = _uiState.value.imageStudioState,
+          settings = buildCurrentAppSettingsSnapshot(),
+        ) { stage ->
+          _uiState.update { it.copy(imageStudioState = it.imageStudioState.copy(status = stage)) }
+        }
+      res.fold(
+        onSuccess = { generated ->
+          _uiState.update {
+            it.copy(
+              imageStudioState =
+                it.imageStudioState.copy(
+                  isBusy = false,
+                  status = ImageGenerationStatus.COMPLETED,
+                  beforeFilePath = generated.beforeFilePath,
+                  outputFilePath = generated.filePath,
+                  outputWidthPx = generated.width,
+                  outputHeightPx = generated.height,
+                  outputSourceBadge = generated.sourceBadge,
+                )
+            )
+          }
+        },
+        onFailure = { err ->
+          _uiState.update {
+            it.copy(imageStudioState = it.imageStudioState.copy(isBusy = false, status = ImageGenerationStatus.FAILED, errorMessage = err.message))
+          }
+        },
+      )
+    }
+  }
+
+  fun onApplyStudioCreativeEdit() {
+    val facade = imageStudioFacade ?: return
+    viewModelScope.launch {
+      _uiState.update {
+        it.copy(imageStudioState = it.imageStudioState.copy(isBusy = true, status = ImageGenerationStatus.PREPARING_PROMPT, errorMessage = null))
+      }
+      val (plan, res) =
+        facade.runCreativeEditOrPlan(
+          state = _uiState.value.imageStudioState,
+          settings = buildCurrentAppSettingsSnapshot(),
+        ) { stage ->
+          _uiState.update { it.copy(imageStudioState = it.imageStudioState.copy(status = stage)) }
+        }
+      res.fold(
+        onSuccess = { generated ->
+          _uiState.update {
+            it.copy(
+              imageStudioState =
+                it.imageStudioState.copy(
+                  isBusy = false,
+                  status = ImageGenerationStatus.COMPLETED,
+                  lastEditPlan = plan,
+                  beforeFilePath = generated.beforeFilePath,
+                  outputFilePath = generated.filePath,
+                  outputHasTransparency = generated.hasTransparency,
+                  outputWidthPx = generated.width,
+                  outputHeightPx = generated.height,
+                  outputSourceBadge = generated.sourceBadge,
+                )
+            )
+          }
+        },
+        onFailure = { err ->
+          _uiState.update {
+            it.copy(
+              imageStudioState =
+                it.imageStudioState.copy(
+                  isBusy = false,
+                  status = ImageGenerationStatus.FAILED,
+                  lastEditPlan = plan,
+                  errorMessage = err.message,
+                )
+            )
+          }
+        },
+      )
+    }
+  }
+
+  fun onUpdatePosterSpec(spec: PosterDesignSpec) {
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(posterSpec = spec))
+    }
+  }
+
+  fun onRenderStudioPoster() {
+    val facade = imageStudioFacade ?: return
+    viewModelScope.launch {
+      _uiState.update {
+        it.copy(imageStudioState = it.imageStudioState.copy(isBusy = true, status = ImageGenerationStatus.GENERATING, errorMessage = null))
+      }
+      val res = facade.renderPoster(_uiState.value.imageStudioState)
+      res.fold(
+        onSuccess = { file ->
+          val ratio = _uiState.value.imageStudioState.posterSpec.aspectRatio
+          _uiState.update {
+            it.copy(
+              imageStudioState =
+                it.imageStudioState.copy(
+                  isBusy = false,
+                  status = ImageGenerationStatus.COMPLETED,
+                  beforeFilePath = null,
+                  outputFilePath = file.absolutePath,
+                  outputHasTransparency = false,
+                  outputWidthPx = ratio.widthPx,
+                  outputHeightPx = ratio.heightPx,
+                  outputSourceBadge = ImageProcessingSource.LOCAL_TEXT_COMPOSITING.badgeLabel,
+                )
+            )
+          }
+        },
+        onFailure = { err ->
+          _uiState.update {
+            it.copy(imageStudioState = it.imageStudioState.copy(isBusy = false, status = ImageGenerationStatus.FAILED, errorMessage = err.message))
+          }
+        },
+      )
+    }
+  }
+
+  fun onStudioSetBatchPhotos(uris: List<String>) {
+    val facade = imageStudioFacade ?: return
+    val labeled = uris.mapIndexed { idx, uri -> uri to "Photo ${idx + 1}" }
+    facade.batchProcessor.setPhotos(labeled)
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(collageUris = uris, errorMessage = null))
+    }
+  }
+
+  fun onStudioStartBatch(operation: ImageEditFeatureType) {
+    val facade = imageStudioFacade ?: return
+    val studio = _uiState.value.imageStudioState
+    facade.batchProcessor.startBatch(
+      featureType = operation,
+      adjustments = studio.adjustments,
+      backgroundStyle = studio.backgroundStyle,
+    )
+  }
+
+  fun onStudioCancelBatch() {
+    imageStudioFacade?.batchProcessor?.cancelAll()
+  }
+
+  fun onStudioRetryBatchItem(itemId: String, operation: ImageEditFeatureType) {
+    val studio = _uiState.value.imageStudioState
+    imageStudioFacade?.batchProcessor?.retryItem(
+      itemId = itemId,
+      featureType = operation,
+      adjustments = studio.adjustments,
+      backgroundStyle = studio.backgroundStyle,
+    )
+  }
+
+  fun onStudioSaveBatchItem(itemId: String) {
+    val facade = imageStudioFacade ?: return
+    viewModelScope.launch {
+      val msg = facade.batchProcessor.exportItemToGallery(itemId).fold(
+        onSuccess = { it },
+        onFailure = { it.message ?: "Unable to export batch photo." },
+      )
+      _uiState.update { it.copy(statusToastMessage = msg) }
+    }
+  }
+
+  fun onStudioCreateCollage() {
+    val facade = imageStudioFacade ?: return
+    val uris =
+      _uiState.value.batchImageItems.map { it.sourceUri }.ifEmpty { _uiState.value.imageStudioState.collageUris }
+    if (uris.size < 2) return
+    viewModelScope.launch {
+      _uiState.update {
+        it.copy(imageStudioState = it.imageStudioState.copy(isBusy = true, status = ImageGenerationStatus.GENERATING, errorMessage = null))
+      }
+      facade.createGridCollage(uris).fold(
+        onSuccess = { file ->
+          _uiState.update {
+            it.copy(
+              imageStudioState =
+                it.imageStudioState.copy(
+                  isBusy = false,
+                  status = ImageGenerationStatus.COMPLETED,
+                  beforeFilePath = null,
+                  outputFilePath = file.absolutePath,
+                  outputWidthPx = 1080,
+                  outputHeightPx = 1080,
+                  outputSourceBadge = ImageProcessingSource.LOCAL_EDITING.badgeLabel,
+                )
+            )
+          }
+        },
+        onFailure = { err ->
+          _uiState.update {
+            it.copy(imageStudioState = it.imageStudioState.copy(isBusy = false, status = ImageGenerationStatus.FAILED, errorMessage = err.message))
+          }
+        },
+      )
+    }
+  }
+
+  fun onSaveStudioOutputToGallery() {
+    val studio = _uiState.value.imageStudioState
+    val path = studio.outputFilePath ?: return
+    val facade = imageStudioFacade ?: return
+    viewModelScope.launch {
+      val toast =
+        facade.saveToGallery(
+          filePath = path,
+          title = studio.promptInput.ifBlank { "Mousomi Studio Artwork" },
+          hasTransparency = studio.outputHasTransparency,
+        ).fold(
+          onSuccess = { it },
+          onFailure = { it.message ?: "Unable to save output." },
+        )
+      _uiState.update { it.copy(statusToastMessage = toast) }
+    }
+  }
+
+  fun onShareStudioOutput(context: Context) {
+    val path = _uiState.value.imageStudioState.outputFilePath ?: return
+    val facade = imageStudioFacade
+    runCatching {
+      val uri =
+        facade?.getShareableUri(path)
+          ?: FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(path))
+      val intent =
+        Intent(Intent.ACTION_SEND).apply {
+          type = "image/png"
+          putExtra(Intent.EXTRA_STREAM, uri)
+          putExtra(Intent.EXTRA_TEXT, _uiState.value.imageStudioState.promptInput)
+          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+      context.startActivity(Intent.createChooser(intent, "Share Studio Artwork"))
+    }.onFailure { err ->
+      _uiState.update { it.copy(statusToastMessage = "Unable to share image: ${err.localizedMessage}") }
+    }
+  }
+
+  fun onOpenStudioOutputInChat() {
+    val path = _uiState.value.imageStudioState.outputFilePath ?: return
+    val uriStr = Uri.fromFile(File(path)).toString()
+    onAttachPickedPhoto(uriStr)
+  }
+
+  fun onSetStudioLightboxPath(path: String?) {
+    _uiState.update {
+      it.copy(imageStudioState = it.imageStudioState.copy(lightboxImagePath = path))
+    }
   }
 
   private fun formatTime(timestampMs: Long): String {

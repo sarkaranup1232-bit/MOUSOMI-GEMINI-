@@ -427,9 +427,38 @@ fun ModelSelectionBottomSheet(
   selectedModel: AiModelOption,
   onSelectModel: (AiModelOption) -> Unit,
   onDismiss: () -> Unit,
+  activeHydrogenBackingId: String = com.example.domain.model.VerifiedModelCatalog.DEFAULT_HYDROGEN_BACKING_MODEL_ID,
+  activeImageModelId: String = com.example.domain.model.VerifiedModelCatalog.DEFAULT_IMAGE_MODEL_ID,
+  onSelectFlagshipMode: (modelId: String, option: AiModelOption) -> Unit = { _, opt -> onSelectModel(opt) },
 ) {
   val colors = LocalMousomiColors.current
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+  val flagshipModes =
+    remember {
+      listOf(
+        Triple(
+          com.example.domain.model.VerifiedModelCatalog.DEFAULT_HYDROGEN_BACKING_MODEL_ID,
+          "Hydrogen Mode" to "Flagship Deep Research, Reasoning & Vision",
+          AiModelOption.GEMINI_4_HYDROGEN,
+        ),
+        Triple(
+          com.example.domain.model.VerifiedModelCatalog.FLAGSHIP_FLASH_38_ID,
+          "3.8 Flash Mode" to "Ultra-Fast Live News, Multimodal & Voice",
+          AiModelOption.GEMINI_4_HYDROGEN,
+        ),
+        Triple(
+          com.example.domain.model.VerifiedModelCatalog.BALANCED_CODING_36_ID,
+          "3.6 Flash Mode" to "Balanced Coding & Smart Tasks",
+          AiModelOption.GEMINI_4_HYDROGEN,
+        ),
+        Triple(
+          com.example.domain.model.VerifiedModelCatalog.POLLINATIONS_FLUX_ID,
+          "Pollinations.ai — Flux Studio" to "Creative Image Generation Mode",
+          AiModelOption.GEMINI_IMAGE_STUDIO,
+        ),
+      )
+    }
+
   ModalBottomSheet(
     onDismissRequest = onDismiss,
     sheetState = sheetState,
@@ -445,6 +474,66 @@ fun ModelSelectionBottomSheet(
           .padding(bottom = 28.dp),
       verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+      Text(
+        text = "Flagship 4-Mode Switcher",
+        fontFamily = DisplayFontFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 18.sp,
+      )
+      Row(
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        flagshipModes.forEach { (modelId, titleAndBadge, mappedOption) ->
+          val isActive =
+            when (modelId) {
+              com.example.domain.model.VerifiedModelCatalog.POLLINATIONS_FLUX_ID ->
+                selectedModel == AiModelOption.GEMINI_IMAGE_STUDIO &&
+                  activeImageModelId == com.example.domain.model.VerifiedModelCatalog.POLLINATIONS_FLUX_ID
+              else ->
+                selectedModel == AiModelOption.GEMINI_4_HYDROGEN && activeHydrogenBackingId == modelId
+            }
+          Surface(
+            onClick = { onSelectFlagshipMode(modelId, mappedOption) },
+            shape = RoundedCornerShape(14.dp),
+            color =
+              if (isActive) colors.activeChipContainer
+              else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+            border =
+              BorderStroke(
+                width = if (isActive) 1.5.dp else 1.dp,
+                color = if (isActive) NeonCyan else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+              ),
+            modifier = Modifier.width(196.dp).testTag("flagship_mode_$modelId"),
+          ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+              Text(
+                text = titleAndBadge.first,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = if (isActive) NeonCyan else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+              Text(
+                text = modelId,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.mutedText,
+                maxLines = 1,
+              )
+              Text(
+                text = titleAndBadge.second,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.mutedText,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
+          }
+        }
+      }
+
+      Spacer(modifier = Modifier.height(4.dp))
       Text(
         text = "Choose model",
         fontFamily = DisplayFontFamily,
@@ -667,6 +756,16 @@ fun ImageToolsBottomSheet(
         fontWeight = FontWeight.Medium,
         fontSize = 20.sp,
       )
+      Button(
+        onClick = { onSelectImageAction("open_image_studio") },
+        colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth().testTag("open_full_image_studio_button"),
+      ) {
+        Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+        Spacer(modifier = Modifier.width(8.dp))
+        Text("Open Creative Image Studio (Flux + 8 Tools)", color = Color.White, fontWeight = FontWeight.SemiBold)
+      }
       Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         AttachmentTile(
           icon = Icons.Outlined.AutoAwesome,

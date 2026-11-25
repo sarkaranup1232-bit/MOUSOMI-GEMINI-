@@ -54,6 +54,7 @@ import com.example.ui.screens.AccessibilityOnboardingScreen
 import com.example.ui.screens.AssistantHubScreen
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.ControlCenterScreen
+import com.example.ui.screens.ImageStudioScreen
 import com.example.ui.screens.MainChatScreen
 import com.example.ui.screens.MemoryManagementScreen
 import com.example.ui.screens.MousomiLensScreen
@@ -77,6 +78,7 @@ object MousomiRoutes {
   const val LENS = "lens"
   const val ACCESSIBILITY = "accessibility"
   const val MEMORY_MANAGEMENT = "my_memory"
+  const val IMAGE_STUDIO = "image_studio"
 }
 
 @AndroidEntryPoint
@@ -395,6 +397,9 @@ class MainActivity : ComponentActivity() {
                 onNavigateToLens = {
                   navController.navigate(MousomiRoutes.LENS) { launchSingleTop = true }
                 },
+                onNavigateToImageStudio = {
+                  navController.navigate(MousomiRoutes.IMAGE_STUDIO) { launchSingleTop = true }
+                },
               )
             }
 
@@ -634,6 +639,14 @@ class MainActivity : ComponentActivity() {
               val memoryViewModel: MemoryManagementViewModel = hiltViewModel()
               MemoryManagementScreen(
                 viewModel = memoryViewModel,
+                onBack = { navController.popBackStack() },
+              )
+            }
+
+            composable(MousomiRoutes.IMAGE_STUDIO) {
+              ImageStudioScreen(
+                uiState = uiState,
+                viewModel = viewModel,
                 onBack = { navController.popBackStack() },
               )
             }

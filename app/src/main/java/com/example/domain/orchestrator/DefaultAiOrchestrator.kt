@@ -98,11 +98,16 @@ class DefaultAiOrchestrator @Inject constructor(
       return@flow
     }
 
+    val isImageStudioSelected =
+      request.requestedModelId == com.example.domain.model.VerifiedModelCatalog.IMAGE_STUDIO_SLOT_ID ||
+        request.requestedModelId == com.example.domain.model.VerifiedModelCatalog.POLLINATIONS_FLUX_ID ||
+        request.requestedModelId == "GEMINI_IMAGE_STUDIO"
+
     val effectiveTaskMode = request.isTaskMode || request.operatingMode == OperatingMode.TASK_MODE
     val intent =
       when {
         request.activeEditTarget != null -> IntelligenceIntent.IMAGE_EDITING
-        request.imageGenerationRequested && request.currentTurnImages.isEmpty() ->
+        (request.imageGenerationRequested || isImageStudioSelected) && request.currentTurnImages.isEmpty() ->
           IntelligenceIntent.IMAGE_GENERATION
         request.operatingMode == OperatingMode.DEEP_RESEARCH || request.deepResearchRequested ->
           IntelligenceIntent.DEEP_RESEARCH

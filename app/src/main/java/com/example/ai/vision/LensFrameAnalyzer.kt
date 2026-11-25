@@ -34,7 +34,9 @@ class LensFrameAnalyzer(
   private val detector: ObjectDetector = ObjectDetection.getClient(options)
   private val isProcessing = AtomicBoolean(false)
   private var lastAnalyzedMs = 0L
-  private var previousLumaGrid: FloatArray? = null
+  private var previousLumaGrid = FloatArray(LUMA_GRID_SIZE)
+  private var currentLumaGrid = FloatArray(LUMA_GRID_SIZE)
+  private var hasPreviousGrid = false
 
   @SuppressLint("UnsafeOptInUsageError")
   override fun analyze(imageProxy: ImageProxy) {
@@ -56,9 +58,17 @@ class LensFrameAnalyzer(
         rawWidth.toFloat() to rawHeight.toFloat()
       }
 
-    val (avgLuma, currentGrid) = sampleYPlaneGrid(imageProxy)
-    val motionDelta = LensAutoScanTracker.estimateMotionDelta(previousLumaGrid, currentGrid)
-    previousLumaGrid = currentGrid
+    val avgLuma = sampleYPlaneGridInto(imageProxy, currentLumaGrid)
+    val motionDelta =
+      if (hasPreviousGrid) {
+        LensAutoScanTracker.estimateMotionDelta(previousLumaGrid, currentLumaGrid)
+      } else {
+        0f
+      }
+    val tmp = previousLumaGrid
+    previousLumaGrid = currentLumaGrid
+    currentLumaGrid = tmp
+    hasPreviousGrid = true
 
     val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
     val isFront = isFrontCameraProvider()
@@ -137,18 +147,17 @@ class LensFrameAnalyzer(
     )
   }
 
-  private fun sampleYPlaneGrid(imageProxy: ImageProxy): Pair<Float, FloatArray> {
-    val plane = imageProxy.planes.firstOrNull() ?: return 128f to FloatArray(0)
+  private fun sampleYPlaneGridInto(imageProxy: ImageProxy, outGrid: FloatArray): Float {
+    val plane = imageProxy.planes.firstOrNull() ?: return 128f
     val buffer = plane.buffer
     val rowStride = plane.rowStride
     val pixelStride = plane.pixelStride
     val w = imageProxy.width
     val h = imageProxy.height
-    if (w <= 0 || h <= 0) return 128f to FloatArray(0)
+    if (w <= 0 || h <= 0) return 128f
 
     val cols = 12
     val rows = 9
-    val grid = FloatArray(cols * rows)
     var sum = 0f
     var count = 0
 
@@ -163,13 +172,16 @@ class LensFrameAnalyzer(
           } else {
             128f
           }
-        grid[gy * cols + gx] = luma
+        outGrid[gy * cols + gx] = luma
         sum += luma
         count++
       }
     }
 
-    val avg = if (count > 0) sum / count else 128f
-    return avg to grid
+    return if (count > 0) sum / count else 128f
+  }
+
+  companion object {
+    private const val LUMA_GRID_SIZE = 12 * 9
   }
 }

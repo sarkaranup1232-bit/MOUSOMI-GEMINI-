@@ -1310,8 +1310,9 @@ private fun CornerGestureNeonFeedbackArcs(
 
   val localView = LocalView.current
   val density = LocalDensity.current.density
+  val orientation = androidx.compose.ui.platform.LocalConfiguration.current.orientation
   val cornerRadii =
-    remember(density, activationSignal.token) {
+    remember(density, activationSignal.token, orientation) {
       val fallback = 34f * density
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val insets = localView.rootWindowInsets
@@ -1376,6 +1377,7 @@ private fun CornerGestureNeonFeedbackArcs(
       cachedShaderH = h
       val colorsLeft =
         intArrayOf(
+          0xFFFFFFFF.toInt(), // Crisp Luminous White corner highlight
           0xFF22D3EE.toInt(), // Cyan
           0xFF3B82F6.toInt(), // Electric Blue
           0xFF8B5CF6.toInt(), // Violet
@@ -1389,6 +1391,7 @@ private fun CornerGestureNeonFeedbackArcs(
           0xFF8B5CF6.toInt(), // Violet
           0xFF3B82F6.toInt(), // Electric Blue
           0xFF22D3EE.toInt(), // Cyan
+          0xFFFFFFFF.toInt(), // Crisp Luminous White corner highlight
         )
       cachedLeftShader =
         LinearGradient(

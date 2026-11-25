@@ -15,6 +15,7 @@ object SpeechTextSanitizer {
   private val BLOCKQUOTE_PREFIX_REGEX = Regex("^\\s*>+\\s?", RegexOption.MULTILINE)
   private val BULLET_PREFIX_REGEX = Regex("^\\s*(?:[-*•]|\\d+\\.)\\s+", RegexOption.MULTILINE)
   private val SYMBOL_NOISE_REGEX = Regex("[*_~`#|<>^{}\\[\\]\\\\=]+")
+  private val EMOJI_AND_PICTOGRAPH_REGEX = Regex("[\\p{So}\\p{Cs}\\uFE0E\\uFE0F\\u200D\\u20E3]+")
   private val MULTI_PUNCT_REGEX = Regex("([!?.]){2,}")
   private val MULTI_SPACE_REGEX = Regex("\\s+")
 
@@ -37,6 +38,7 @@ object SpeechTextSanitizer {
     text = text.replace(HEADER_PREFIX_REGEX, "")
     text = text.replace(BLOCKQUOTE_PREFIX_REGEX, "")
     text = text.replace(BULLET_PREFIX_REGEX, ". ")
+    text = text.replace(EMOJI_AND_PICTOGRAPH_REGEX, " ")
     text = text.replace(SYMBOL_NOISE_REGEX, " ")
     text = text.replace(MULTI_PUNCT_REGEX, "$1")
     text = text.replace(MULTI_SPACE_REGEX, " ").trim()

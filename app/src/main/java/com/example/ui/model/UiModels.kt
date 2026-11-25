@@ -157,6 +157,7 @@ data class ChatMessage(
   val isError: Boolean = false,
   val isStreaming: Boolean = false,
   val blocks: List<ResponseBlock> = emptyList(),
+  val followUpSuggestions: List<String> = emptyList(),
 ) {
   val imageAttachment: AttachmentPreview?
     get() = attachments.firstOrNull()
@@ -165,6 +166,10 @@ data class ChatMessage(
 data class ImageStudioUiState(
   val activeFeature: ImageEditFeatureType = ImageEditFeatureType.TEXT_TO_IMAGE,
   val promptInput: String = "",
+  val aspectRatioLabel: String = "1:1 Square",
+  val seedText: String = "",
+  val enhancePromptEnabled: Boolean = true,
+  val isEnhancingPrompt: Boolean = false,
   val sourceUriOrPath: String? = null,
   val sourceWidthPx: Int = 1024,
   val sourceHeightPx: Int = 1024,
@@ -175,6 +180,7 @@ data class ImageStudioUiState(
   val outputSourceBadge: String? = null,
   val outputWidthPx: Int = 0,
   val outputHeightPx: Int = 0,
+  val lightboxImagePath: String? = null,
   val isBusy: Boolean = false,
   val status: ImageGenerationStatus? = null,
   val errorMessage: String? = null,

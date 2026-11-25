@@ -522,6 +522,9 @@ class Part3IntelligencePipeline @Inject constructor(
           rootMediaId = target?.rootMediaId,
           nextVersionNumber = nextVersion,
           editInstruction = if (sourceImage != null) cleanPrompt else null,
+          featureType =
+            if (sourceImage != null) com.example.domain.model.ImageEditFeatureType.CREATIVE_AI_EDIT
+            else com.example.domain.model.ImageEditFeatureType.TEXT_TO_IMAGE,
         )
       )
       .collect { event ->

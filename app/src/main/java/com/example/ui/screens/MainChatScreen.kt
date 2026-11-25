@@ -104,6 +104,7 @@ fun MainChatScreen(
   onCancelScreenRecording: () -> Unit = {},
   onNavigateToAssistantHub: (Int) -> Unit = {},
   onNavigateToLens: () -> Unit = {},
+  onNavigateToImageStudio: () -> Unit = {},
 ) {
   val context = LocalContext.current
   val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
@@ -117,6 +118,13 @@ fun MainChatScreen(
     if (uiState.pendingNavigateToLens) {
       viewModel.onConsumeNavigateToLens()
       onNavigateToLens()
+    }
+  }
+
+  LaunchedEffect(uiState.pendingNavigateToImageStudio) {
+    if (uiState.pendingNavigateToImageStudio) {
+      viewModel.onConsumeNavigateToImageStudio()
+      onNavigateToImageStudio()
     }
   }
 
@@ -416,6 +424,7 @@ fun MainChatScreen(
                   onShareVideo = { vid -> viewModel.onShareGeneratedVideo(context, vid) },
                   onSaveMusic = viewModel::onSaveGeneratedMusic,
                   onShareMusic = { mus -> viewModel.onShareGeneratedMusic(context, mus) },
+                  onFollowUpSuggestionClick = viewModel::onFollowUpSuggestionClick,
                 )
               }
             }
@@ -618,6 +627,9 @@ fun MainChatScreen(
           selectedModel = uiState.selectedModel,
           onSelectModel = viewModel::onSelectModel,
           onDismiss = { viewModel.onToggleModelMenu(false) },
+          activeHydrogenBackingId = uiState.hydrogenBackingModelId,
+          activeImageModelId = uiState.imageModelId,
+          onSelectFlagshipMode = viewModel::onSelectFlagshipModelMode,
         )
       }
 

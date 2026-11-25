@@ -40,6 +40,7 @@ class AudioOutputAnalyzer @Inject constructor(
 
   fun startMonitoring(audioSessionId: Int = 0) {
     _isAiAudioPlaying.value = true
+    if (audioSessionId <= 0) return
     if (isMonitoring.get()) return
     val hasMic =
       ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==

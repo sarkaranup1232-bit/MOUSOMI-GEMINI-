@@ -52,6 +52,23 @@ enum class VoiceSubsystemPhase {
   ERROR,
 }
 
+/**
+ * Validated unified high-level Assistant lifecycle state combining UI surface and Live voice phase.
+ */
+enum class AssistantLifecycleState {
+  CLOSED,
+  INITIAL_ASSISTANT,
+  LIVE_CONNECTING,
+  LIVE_LISTENING,
+  LIVE_PROCESSING,
+  LIVE_SPEAKING,
+  LIVE_PAUSED,
+  COLLAPSED_ORB,
+  DRAWING,
+  STOPPING,
+  ERROR,
+}
+
 enum class EdgeActivationEdge {
   NONE,
   BOTTOM,
@@ -127,6 +144,9 @@ class AssistantSessionStateManager @Inject constructor() {
 
   private val _currentPhase = MutableStateFlow(AssistantSessionPhase.INACTIVE)
   val currentPhase: StateFlow<AssistantSessionPhase> = _currentPhase.asStateFlow()
+
+  private val _lifecycleState = MutableStateFlow(AssistantLifecycleState.CLOSED)
+  val lifecycleState: StateFlow<AssistantLifecycleState> = _lifecycleState.asStateFlow()
 
   private var lastTriggerAtMs: Long = 0L
   private var activationTokenCounter: Long = 0L
@@ -336,6 +356,9 @@ class AssistantSessionStateManager @Inject constructor() {
     edge: EdgeActivationEdge = EdgeActivationEdge.BOTTOM,
     nowMs: Long = System.currentTimeMillis(),
   ) {
+    if (_surfaceState.value == AssistantSurfaceState.DRAWING || _isDrawingActive.value) {
+      return
+    }
     activationTokenCounter += 1L
     _isStopping.value = false
     _isPaused.value = false
@@ -436,6 +459,7 @@ class AssistantSessionStateManager @Inject constructor() {
     recomputePhase()
   }
 
+  @Synchronized
   fun onBubbleShown(visible: Boolean) {
     _isBubbleVisible.value = visible
     if (visible && !_isStopping.value) {
@@ -447,26 +471,29 @@ class AssistantSessionStateManager @Inject constructor() {
     recomputePhase()
   }
 
+  @Synchronized
   fun onPanelExpandedChanged(expanded: Boolean) {
+    if (_isDrawingActive.value || _surfaceState.value == AssistantSurfaceState.DRAWING) {
+      recomputePhase()
+      return
+    }
     _isPanelExpanded.value = expanded
     if (expanded) {
       _isStopping.value = false
       _isSessionActive.value = true
-      _isBubbleVisible.value = true
       if (_visualState.value == AssistantVisualState.HIDDEN) {
         _visualState.value = AssistantVisualState.STANDARD_ASSISTANT
       }
-      if (!_isDrawingActive.value) {
-        _surfaceState.value = AssistantSurfaceState.EXPANDED
+      if (_visualState.value == AssistantVisualState.LIVE_ASSISTANT) {
+        _isBubbleVisible.value = true
       }
+      _surfaceState.value = AssistantSurfaceState.EXPANDED
     } else {
       // Closing panel collapses only UI panel & IME; leaves Voice & Screen Share untouched
       _isKeyboardVisible.value = false
-      if (!_isDrawingActive.value) {
-        _surfaceState.value =
-          if (_isBubbleVisible.value || _isSessionActive.value) AssistantSurfaceState.COLLAPSED_ORB
-          else AssistantSurfaceState.CLOSED
-      }
+      _surfaceState.value =
+        if (_isBubbleVisible.value || _isSessionActive.value) AssistantSurfaceState.COLLAPSED_ORB
+        else AssistantSurfaceState.CLOSED
     }
     recomputePhase()
   }
@@ -606,5 +633,22 @@ class AssistantSessionStateManager @Inject constructor() {
         else -> AssistantSessionPhase.INACTIVE
       }
     _currentPhase.value = next
+
+    val nextLifecycle =
+      when {
+        _isStopping.value -> AssistantLifecycleState.STOPPING
+        _lastError.value != null -> AssistantLifecycleState.ERROR
+        _surfaceState.value == AssistantSurfaceState.CLOSED && !_isSessionActive.value -> AssistantLifecycleState.CLOSED
+        _surfaceState.value == AssistantSurfaceState.DRAWING || _isDrawingActive.value -> AssistantLifecycleState.DRAWING
+        _isPaused.value -> AssistantLifecycleState.LIVE_PAUSED
+        _surfaceState.value == AssistantSurfaceState.COLLAPSED_ORB -> AssistantLifecycleState.COLLAPSED_ORB
+        _voicePhase.value == VoiceSubsystemPhase.CONNECTING -> AssistantLifecycleState.LIVE_CONNECTING
+        _voicePhase.value == VoiceSubsystemPhase.AI_RESPONDING -> AssistantLifecycleState.LIVE_SPEAKING
+        _voicePhase.value == VoiceSubsystemPhase.USER_SPEAKING -> AssistantLifecycleState.LIVE_PROCESSING
+        _voicePhase.value == VoiceSubsystemPhase.LISTENING -> AssistantLifecycleState.LIVE_LISTENING
+        _isSessionActive.value -> AssistantLifecycleState.INITIAL_ASSISTANT
+        else -> AssistantLifecycleState.CLOSED
+      }
+    _lifecycleState.value = nextLifecycle
   }
 }

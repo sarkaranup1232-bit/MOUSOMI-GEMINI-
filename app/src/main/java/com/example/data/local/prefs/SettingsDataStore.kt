@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.BuildConfig
 import com.example.core.security.KeystoreCryptoManager
 import com.example.domain.model.AgentBudgetConfig
 import com.example.domain.model.AppSettings
@@ -144,10 +145,20 @@ class SettingsDataStore @Inject constructor(
         ?.let { runCatching { VoiceGender.valueOf(it) }.getOrNull() }
         ?: VoiceGender.FEMALE
 
+    val savedGemini = cryptoManager.decryptIfEncrypted(prefs[Keys.GEMINI_API_KEY].orEmpty()).trim()
+    val buildConfigGemini =
+      BuildConfig.GEMINI_API_KEY.trim().takeIf { key ->
+        key.isNotBlank() &&
+          !key.equals("your_api_key_here", ignoreCase = true) &&
+          !key.equals("GEMINI_API_KEY_DEFAULT_VALUE", ignoreCase = true) &&
+          !key.contains("placeholder", ignoreCase = true)
+      }.orEmpty()
+    val effectiveGemini = savedGemini.ifBlank { buildConfigGemini }
+
     return AppSettings(
       connectionMode = mode,
       proxyBaseUrl = prefs[Keys.PROXY_BASE_URL].orEmpty(),
-      geminiApiKey = cryptoManager.decryptIfEncrypted(prefs[Keys.GEMINI_API_KEY].orEmpty()),
+      geminiApiKey = effectiveGemini,
       groqApiKey = cryptoManager.decryptIfEncrypted(prefs[Keys.GROQ_API_KEY].orEmpty()),
       cloudflareAccountId = cryptoManager.decryptIfEncrypted(prefs[Keys.CLOUDFLARE_ACCOUNT_ID].orEmpty()),
       cloudflareApiToken = cryptoManager.decryptIfEncrypted(prefs[Keys.CLOUDFLARE_API_TOKEN].orEmpty()),

@@ -56,6 +56,7 @@ object EdgeLightStateMapper {
     assistantSessionPhase: AssistantSessionPhase = AssistantSessionPhase.INACTIVE,
     edgeActivationSignal: EdgeActivationSignal = EdgeActivationSignal(),
     isOverlayHost: Boolean = false,
+    isAssistantSession: Boolean = false,
   ): EdgeLightRenderParams {
     val visualState =
       when {
@@ -95,6 +96,18 @@ object EdgeLightStateMapper {
       when {
         forcePreview -> config.enabled || config.assistantEdgeGlowEnabled
         notificationAlertActive -> true
+        isAssistantSession -> {
+          val standalone =
+            config.enabled &&
+              scheduled &&
+              assistantSessionPhase != AssistantSessionPhase.PAUSED &&
+              assistantSessionPhase != AssistantSessionPhase.STOPPING
+          val assistantGlow =
+            config.assistantEdgeGlowEnabled &&
+              scheduled &&
+              sessionActiveForGlow
+          standalone || assistantGlow
+        }
         isOverlayHost -> {
           val standaloneSystemBorderLight =
             config.enabled &&

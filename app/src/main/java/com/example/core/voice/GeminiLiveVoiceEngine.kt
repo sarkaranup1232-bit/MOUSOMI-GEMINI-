@@ -29,6 +29,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 sealed interface LiveVoiceSessionStatus {
   data object Disconnected : LiveVoiceSessionStatus
@@ -72,6 +74,7 @@ class GeminiLiveVoiceEngine @Inject constructor(
   private var reconnectJob: Job? = null
   private var outputDecayJob: Job? = null
   private var focusRequest: AudioFocusRequest? = null
+  private val sessionMutex = Mutex()
 
   private val isUserPaused = AtomicBoolean(false)
   private val isUserMuted = AtomicBoolean(false)
@@ -215,12 +218,6 @@ class GeminiLiveVoiceEngine @Inject constructor(
           ) {
             throw SecurityException("Microphone permission is required for Live Voice.")
           }
-          if (
-            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
-              PackageManager.PERMISSION_GRANTED
-          ) {
-            throw SecurityException("Microphone permission is required for Live Voice.")
-          }
           session.startAudioConversation(conversationConfig)
         } catch (ce: CancellationException) {
           throw ce
@@ -305,12 +302,6 @@ class GeminiLiveVoiceEngine @Inject constructor(
             ) {
               throw SecurityException("Microphone permission is required for Live Voice.")
             }
-            if (
-              ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
-                PackageManager.PERMISSION_GRANTED
-            ) {
-              throw SecurityException("Microphone permission is required for Live Voice.")
-            }
             existing.startAudioConversation(
               liveAudioConversationConfig {
                 enableInterruptions = lastAllowInterruptions
@@ -355,7 +346,11 @@ class GeminiLiveVoiceEngine @Inject constructor(
     isUserMuted.set(muted)
     liveVoiceSessionManager.setMuted(muted)
     if (muted) {
-      runCatching { activeSession?.stopAudioConversation() }
+      scope.launch {
+        sessionMutex.withLock {
+          runCatching { activeSession?.stopAudioConversation() }
+        }
+      }
       if (!isUserPaused.get()) {
         _status.value = LiveVoiceSessionStatus.Paused
         sessionStateManager.onVoicePhaseChanged(VoiceSubsystemPhase.PAUSED)
@@ -396,8 +391,10 @@ class GeminiLiveVoiceEngine @Inject constructor(
     liveVoiceSessionManager.onEnded(keepScreenShare = keepScreenShare)
     if (toClose != null) {
       scope.launch {
-        runCatching { toClose.stopAudioConversation() }
-        runCatching { toClose.close() }
+        sessionMutex.withLock {
+          runCatching { toClose.stopAudioConversation() }
+          runCatching { toClose.close() }
+        }
       }
     }
   }
@@ -425,10 +422,12 @@ class GeminiLiveVoiceEngine @Inject constructor(
   }
 
   private suspend fun closeExistingSessionQuietly() {
-    val existing = activeSession ?: return
-    activeSession = null
-    runCatching { existing.stopAudioConversation() }
-    runCatching { existing.close() }
+    sessionMutex.withLock {
+      val existing = activeSession ?: return@withLock
+      activeSession = null
+      runCatching { existing.stopAudioConversation() }
+      runCatching { existing.close() }
+    }
   }
 
   private fun requestLiveAudioFocus() {

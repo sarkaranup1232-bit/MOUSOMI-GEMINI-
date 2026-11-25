@@ -7,6 +7,7 @@ import android.graphics.Color as AndroidColor
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -49,8 +50,6 @@ import com.example.core.voice.VoiceState
 import com.example.domain.memory.PreferenceConfirmationManager
 import com.example.domain.model.AiResponseState
 import com.example.domain.model.EdgeLightConfig
-import com.example.domain.model.EdgeLightIntensity
-import com.example.domain.model.EdgeLightPreset
 import com.example.domain.model.ResponseBlock
 import com.example.domain.model.ScreenShareStatus
 import com.example.domain.model.VerifiedModelCatalog
@@ -152,12 +151,6 @@ class MousomiAssistActivity : ComponentActivity() {
       }
     }
 
-    val roleStatus = AssistantRoleHelper.getStatus(this)
-    if (!roleStatus.isDefaultAssistant) {
-      statusBannerState =
-        "Opened via ACTION_ASSIST. Set Mousomi AI as Default Digital Assistant in Settings for system corner-swipe anywhere."
-    }
-
     observeVoiceState()
 
     if (intent?.action == Intent.ACTION_VOICE_COMMAND && hasMicPermission()) {
@@ -165,6 +158,7 @@ class MousomiAssistActivity : ComponentActivity() {
     }
 
     setContent {
+      val settings by settingsRepository.observeSettings().collectAsState(initial = null)
       val visualState by sessionStateManager.visualState.collectAsState()
       val sessionPhase by sessionStateManager.currentPhase.collectAsState()
       val edgeSignal by sessionStateManager.edgeActivation.collectAsState()
@@ -173,6 +167,7 @@ class MousomiAssistActivity : ComponentActivity() {
       val liveMuted by liveVoiceSessionManager.isMuted.collectAsState()
       val voiceState by voiceController.voiceState.collectAsState()
       val voiceRms by voiceController.audioRmsNormalized.collectAsState()
+      val ttsCompletedTick by voiceController.ttsCompletedTick.collectAsState()
       val screenShareStatus by screenShareSessionManager.status.collectAsState()
       val liveAssistantTranscript by geminiLiveVoiceEngine.assistantTranscript.collectAsState()
       val liveUserTranscript by geminiLiveVoiceEngine.userTranscript.collectAsState()
@@ -183,29 +178,36 @@ class MousomiAssistActivity : ComponentActivity() {
       LaunchedEffect(liveUserTranscript) {
         if (liveUserTranscript.isNotBlank()) userTranscriptState = liveUserTranscript
       }
+      LaunchedEffect(ttsCompletedTick) {
+        if (ttsCompletedTick > 0L &&
+          visualState == AssistantVisualState.LIVE_ASSISTANT &&
+          !usingLiveSocketState &&
+          !livePaused &&
+          !liveMuted &&
+          hasMicPermission()
+        ) {
+          val lang = settings?.voicePreferences?.preferredLanguage
+            ?: settingsRepository.getSettingsSnapshot().voicePreferences.preferredLanguage
+          voiceController.interruptSpeakingAndListen(lang)
+        }
+      }
 
+      val powerManager = getSystemService(POWER_SERVICE) as? PowerManager
+      val isSystemPowerSave = powerManager?.isPowerSaveMode == true
       val edgeParams =
         EdgeLightStateMapper.resolve(
-          config =
-            EdgeLightConfig(
-              enabled = true,
-              assistantEdgeGlowEnabled = true,
-              preset = EdgeLightPreset.GEMINI_FLOW,
-              intensity = EdgeLightIntensity.BRIGHT,
-              brightness = 0.96f,
-              borderThicknessDp = 5.5f,
-              cornerRadiusDp = 34f,
-            ),
+          config = settings?.edgeLightConfig ?: EdgeLightConfig(),
           responseState = responsePhaseState,
           voiceState = voiceState,
           voiceRmsNormalized = maxOf(voiceRms, reactiveFrame.reactiveAmplitude),
           screenShareStatus = screenShareStatus,
           notificationAlertActive = false,
-          isSystemPowerSave = false,
+          isSystemPowerSave = isSystemPowerSave,
           currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY),
-          forcePreview = true,
+          forcePreview = false,
           assistantSessionPhase = sessionPhase,
           edgeActivationSignal = edgeSignal,
+          isAssistantSession = true,
         )
 
       MousomiTheme(themeMode = AppThemeMode.DARK) {

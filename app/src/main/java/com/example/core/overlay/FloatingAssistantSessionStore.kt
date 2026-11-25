@@ -263,9 +263,10 @@ class FloatingAssistantSessionStore @Inject constructor() {
     if (clean.isBlank()) return
     _state.update { cur ->
       val last = cur.turns.lastOrNull()
+      val isSameAuthor = last != null && last.isUser == isUser && last.modelLabel == modelLabel
       val updated =
-        if (last != null && last.isUser == isUser && last.modelLabel == modelLabel &&
-          (System.currentTimeMillis() - last.timestampMs) < 12_000L
+        if (isSameAuthor &&
+          (last.text == clean || (System.currentTimeMillis() - last.timestampMs) < 12_000L)
         ) {
           cur.turns.dropLast(1) + last.copy(text = clean, timestampMs = System.currentTimeMillis())
         } else {

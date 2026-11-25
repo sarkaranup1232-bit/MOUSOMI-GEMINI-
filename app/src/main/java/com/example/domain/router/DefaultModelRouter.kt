@@ -158,8 +158,13 @@ class DefaultModelRouter @Inject constructor(
     val hasFirebaseAi = firebaseAiLogicService?.isAvailable() == true
     val hasGemini = useProxy || settings.geminiApiKey.isNotBlank() || hasFirebaseAi
     val hasGroq = useProxy || settings.groqApiKey.isNotBlank()
+    val reqPre = requestedModelId?.trim().orEmpty()
+    val isPollinationsStudio =
+      reqPre == VerifiedModelCatalog.POLLINATIONS_FLUX_ID ||
+        reqPre == VerifiedModelCatalog.IMAGE_STUDIO_SLOT_ID ||
+        reqPre == "GEMINI_IMAGE_STUDIO"
 
-    if (!hasGemini && !hasGroq) {
+    if (!hasGemini && !hasGroq && !isPollinationsStudio) {
       return Result.failure(
         IllegalStateException(
           "No API key or HTTPS backend proxy configured. Open Settings to add a Gemini or Groq key."
@@ -213,6 +218,8 @@ class DefaultModelRouter @Inject constructor(
 
         val providerReady =
           useProxy ||
+            explicitSpec.id == VerifiedModelCatalog.POLLINATIONS_FLUX_ID ||
+            explicitSpec.selectorSlotId == VerifiedModelCatalog.IMAGE_STUDIO_SLOT_ID ||
             (explicitSpec.provider == ProviderType.GEMINI && hasGemini) ||
             (explicitSpec.provider == ProviderType.GROQ && hasGroq)
 
@@ -330,10 +337,13 @@ class DefaultModelRouter @Inject constructor(
     val groqHelperSpec = VerifiedModelCatalog.createGroqHelperGuardSpec(settings.groqHelperGuardModelId)
     return when (req) {
       VerifiedModelCatalog.HYDROGEN_SLOT_ID, "GEMINI_4_HYDROGEN", "GEMINI_PRO", hydrogenSpec.id -> hydrogenSpec
+      VerifiedModelCatalog.FLAGSHIP_FLASH_38_ID -> VerifiedModelCatalog.createFlash38Spec()
+      VerifiedModelCatalog.BALANCED_CODING_36_ID -> VerifiedModelCatalog.createFlash36Spec()
+      VerifiedModelCatalog.POLLINATIONS_FLUX_ID -> VerifiedModelCatalog.createPollinationsFluxSpec()
       VerifiedModelCatalog.IMAGE_STUDIO_SLOT_ID, "GEMINI_IMAGE_STUDIO", imageSpec.id,
       VerifiedModelCatalog.DEFAULT_IMAGE_MODEL_ID, VerifiedModelCatalog.DEPRECATED_IMAGE_MODEL_ID -> imageSpec
       VerifiedModelCatalog.FLASH_LITE_SLOT_ID, "GEMINI_FLASH_LITE", "GEMINI_FLASH",
-      VerifiedModelCatalog.DEFAULT_FLASH_LITE_MODEL_ID, VerifiedModelCatalog.LEGACY_HYDROGEN_FALLBACK_ID ->
+      VerifiedModelCatalog.DEFAULT_FLASH_LITE_MODEL_ID ->
         VerifiedModelCatalog.geminiFlashLite
       VerifiedModelCatalog.LIVE_AUDIO_SLOT_ID, "GEMINI_LIVE_AUDIO", VerifiedModelCatalog.DEFAULT_LIVE_AUDIO_MODEL_ID ->
         VerifiedModelCatalog.geminiLiveAudio

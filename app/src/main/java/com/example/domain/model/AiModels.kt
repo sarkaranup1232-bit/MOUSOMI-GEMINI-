@@ -118,7 +118,10 @@ object VerifiedModelCatalog {
   const val MOUSOMI_AUTO_SLOT_ID = "mousomi_auto"
 
   const val DEFAULT_HYDROGEN_BACKING_MODEL_ID = "gemini-4-hydrogen"
-  const val LEGACY_HYDROGEN_FALLBACK_ID = "gemini-3.8-flash"
+  const val FLAGSHIP_FLASH_38_ID = "gemini-3.8-flash"
+  const val LEGACY_HYDROGEN_FALLBACK_ID = FLAGSHIP_FLASH_38_ID
+  const val BALANCED_CODING_36_ID = "gemini-3.6-flash"
+  const val POLLINATIONS_FLUX_ID = "pollinations-flux"
   const val DEFAULT_IMAGE_MODEL_ID = "gemini-nano-banana-2.1"
   const val DEPRECATED_IMAGE_MODEL_ID = "gemini-3.1-flash-image"
   const val DEFAULT_FLASH_LITE_MODEL_ID = "gemini-3.5-flash-lite"
@@ -172,10 +175,77 @@ object VerifiedModelCatalog {
           maxContextTokens = 128_000,
           supportsImageGeneration = true,
         ),
-      description = "AI Image Generation & Creative Editing · Free-First Router ($cleanId)",
-      fallbackModelIds = listOf(DEPRECATED_IMAGE_MODEL_ID),
+      description = "AI Image Generation & Editing · Pollinations.ai Flux Studio ($cleanId)",
+      fallbackModelIds = listOf(POLLINATIONS_FLUX_ID, DEPRECATED_IMAGE_MODEL_ID),
     )
   }
+
+  fun createFlash38Spec(): AiModelSpec =
+    AiModelSpec(
+      id = FLAGSHIP_FLASH_38_ID,
+      selectorSlotId = FLASH_LITE_SLOT_ID,
+      displayName = "Gemini 3.8 Flash",
+      shortLabel = "3.8 Flash",
+      provider = ProviderType.GEMINI,
+      latencyTier = LatencyTier.ULTRA_FAST,
+      capabilities =
+        AiCapabilities(
+          supportsStreaming = true,
+          supportsVision = true,
+          supportsMultiImage = true,
+          supportsSystemInstruction = true,
+          maxContextTokens = 1_048_576,
+          supportsGoogleSearchGrounding = true,
+          supportsAudioInput = true,
+          supportsVideoFrameAnalysis = true,
+        ),
+      description = "Ultra-Fast Live News, Multimodal & Voice",
+      fallbackModelIds = listOf(BALANCED_CODING_36_ID, "gemini-2.5-flash"),
+    )
+
+  fun createFlash36Spec(): AiModelSpec =
+    AiModelSpec(
+      id = BALANCED_CODING_36_ID,
+      selectorSlotId = FLASH_LITE_SLOT_ID,
+      displayName = "Gemini 3.6 Flash",
+      shortLabel = "3.6 Flash",
+      provider = ProviderType.GEMINI,
+      latencyTier = LatencyTier.BALANCED,
+      capabilities =
+        AiCapabilities(
+          supportsStreaming = true,
+          supportsVision = true,
+          supportsMultiImage = true,
+          supportsSystemInstruction = true,
+          maxContextTokens = 1_048_576,
+          supportsGoogleSearchGrounding = true,
+          supportsAudioInput = true,
+          supportsVideoFrameAnalysis = true,
+        ),
+      description = "Balanced Coding & Smart Tasks",
+      fallbackModelIds = listOf(FLAGSHIP_FLASH_38_ID, "gemini-2.5-flash"),
+    )
+
+  fun createPollinationsFluxSpec(): AiModelSpec =
+    AiModelSpec(
+      id = POLLINATIONS_FLUX_ID,
+      selectorSlotId = IMAGE_STUDIO_SLOT_ID,
+      displayName = "Pollinations.ai — Flux Studio",
+      shortLabel = "Flux Studio",
+      provider = ProviderType.GEMINI,
+      latencyTier = LatencyTier.BALANCED,
+      capabilities =
+        AiCapabilities(
+          supportsStreaming = false,
+          supportsVision = true,
+          supportsMultiImage = true,
+          supportsSystemInstruction = true,
+          maxContextTokens = 128_000,
+          supportsImageGeneration = true,
+        ),
+      description = "Creative Image Generation Mode (Free Zero-Key Flux Engine)",
+      fallbackModelIds = listOf(DEFAULT_IMAGE_MODEL_ID),
+    )
 
   val geminiFlashLite =
     AiModelSpec(

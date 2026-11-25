@@ -123,10 +123,12 @@ class LiveConnectionManager @Inject constructor(
         ResponseLanguage.ENGLISH_US ->
           "Respond concisely and naturally in English."
         ResponseLanguage.AUTO ->
-          "Match the user's spoken language naturally and respond concisely."
+          "Match the user's spoken language naturally (including Bengali, Banglish, Hindi, or English) and respond concisely."
       }
+    val voiceStyleRule =
+      "Speak in plain, natural conversational sentences without Markdown asterisks, bullet symbols, or emojis."
     val base = custom?.takeIf { it.isNotBlank() } ?: DEFAULT_SYSTEM_INSTRUCTION
-    return "$base $langHint"
+    return "$base $langHint $voiceStyleRule"
   }
 
   fun voiceNameFor(gender: VoiceGender): String =
@@ -137,6 +139,6 @@ class LiveConnectionManager @Inject constructor(
 
   companion object {
     private const val DEFAULT_SYSTEM_INSTRUCTION =
-      "You are Mousomi AI, a fast, helpful, conversational Android assistant."
+      "You are Mousomi AI, a fast, helpful, conversational Android voice assistant."
   }
 }

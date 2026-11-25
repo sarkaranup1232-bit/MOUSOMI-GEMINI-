@@ -794,7 +794,7 @@ fun DraggableLiveOrbStage(
     val stageWidthPx = with(density) { 116.dp.toPx() }
     val stageHeightPx = with(density) { 142.dp.toPx() }
     val marginPx = with(density) { 12.dp.toPx() }
-    val bottomDockReservedPx = with(density) { 104.dp.toPx() }
+    val bottomDockReservedPx = with(density) { 152.dp.toPx() }
 
     val minX = marginPx
     val maxX = (maxWidthPx - stageWidthPx - marginPx).coerceAtLeast(minX + 1f)
